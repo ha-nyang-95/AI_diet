@@ -1,0 +1,6 @@
+# Claude Code 사용자 로컬 권한/설정 (machine-specific)
+.claude/settings.local.json
+
+# BMad 사용자 로컬 오버라이드 (machine-specific)
+_bmad/config.user.toml
+_bmad/custom/*.user.toml
