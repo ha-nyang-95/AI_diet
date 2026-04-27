@@ -1,0 +1,43 @@
+FROM python:3.13-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PROJECT_ENVIRONMENT=/opt/uv-venv
+
+# uv 설치 (공식 distroless image 대신 slim + uv pip)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    build-essential \
+    libpq5 \
+    && rm -rf /var/lib/apt/lists/*
+
+# uv 바이너리 설치
+COPY --from=ghcr.io/astral-sh/uv:0.11 /uv /usr/local/bin/uv
+
+WORKDIR /app
+
+# 1) 의존성만 먼저 (Docker layer cache — pyproject/uv.lock 변화 시에만 invalidation)
+COPY api/pyproject.toml api/uv.lock api/.python-version ./
+RUN uv sync --frozen --no-dev --no-install-project
+
+# 2) 소스 복사 (image self-contained — bind mount 없는 prod에서도 그대로 작동).
+#    docker-compose dev 환경에서는 ./api:/app bind mount가 이 위에 덮어쓰므로
+#    로컬 코드 수정 즉시 반영. prod(Railway 등)는 bind mount 없어도 image 내장 코드로 가동.
+COPY api/ ./
+
+# 3) 프로젝트 자체 install — image가 self-contained 산출물이 되도록.
+#    런타임에 `uv run`이 재 sync할 필요 없음.
+RUN uv sync --frozen --no-dev
+
+# 4) seed 컨테이너용 scripts/ 도 image에 포함 (prod에서 bind mount 없이도 작동).
+#    dev에서는 docker-compose에서 ./scripts:/app/scripts:ro 가 위에 덮어씀.
+COPY scripts/ /app/scripts/
+
+EXPOSE 8000
+
+# entrypoint: alembic upgrade head 후 uvicorn.
+# NOTE(D3): 단일 replica 전제. multi-replica 도입 시(Story 4 이후) migrate를 별도
+# one-shot 서비스로 분리해 advisory-lock 경합 방지 필요.
+CMD ["sh", "-c", "uv run alembic upgrade head && uv run uvicorn app.main:app --host 0.0.0.0 --port 8000"]

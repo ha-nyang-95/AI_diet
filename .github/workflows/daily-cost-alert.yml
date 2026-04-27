@@ -1,0 +1,18 @@
+# Daily LLM cost alert — placeholder
+# Story 8.5 (운영 hardening)에서 구현됨
+# - LangSmith API에서 일일 토큰 사용량 조회
+# - 임계 초과 시 Slack/이메일 알림
+
+name: daily-cost-alert
+
+on:
+  schedule:
+    - cron: "0 0 * * *" # UTC 00:00 = KST 09:00
+  workflow_dispatch: {}
+
+jobs:
+  placeholder:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Placeholder (Story 8.5에서 구현)
+        run: echo "daily-cost-alert placeholder — Story 8.5 implements LangSmith spend check."

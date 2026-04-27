@@ -1,0 +1,89 @@
+# BalanceNote — Docker Compose
+# 1-cmd 부팅: docker compose up
+# 인프라 URL은 environment에 하드코딩 (시크릿만 .env에서 로딩 — .env가 비어도 인프라는 가동).
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: balancenote-postgres
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: app
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d app"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: balancenote-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    container_name: balancenote-api
+    environment:
+      DATABASE_URL: postgresql+asyncpg://app:app@postgres:5432/app
+      REDIS_URL: redis://redis:6379/0
+      ENVIRONMENT: dev
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./api:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+
+  seed:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    container_name: balancenote-seed
+    environment:
+      DATABASE_URL: postgresql+asyncpg://app:app@postgres:5432/app
+      REDIS_URL: redis://redis:6379/0
+    env_file:
+      - path: .env
+        required: false
+    # dev 편의용 bind mount — 로컬에서 scripts 수정 즉시 반영.
+    # prod에서는 bind mount 없이도 Dockerfile에 COPY되어 동작.
+    volumes:
+      - ./scripts:/app/scripts:ro
+    command: ["uv", "run", "python", "/app/scripts/bootstrap_seed.py"]
+    # api가 healthy 상태(= alembic 마이그레이션 완료)인 후에만 seed 실행.
+    # 향후 Story 3.1에서 seed가 실데이터를 쓸 때 'relation does not exist' 방지.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    restart: "no"
+
+volumes:
+  postgres_data:
