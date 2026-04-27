@@ -13,7 +13,10 @@ export interface paths {
         };
         /**
          * Healthz
-         * @description Liveness probe — DB ping 포함 (asyncpg SELECT 1).
+         * @description Liveness probe — 프로세스 생존 신호만 응답. DB·Redis 의존성 없음.
+         *
+         *     k8s liveness 컨벤션상 외부 의존성과 분리되어야 함. DB 일시 장애가 컨테이너 재시작
+         *     루프를 유발하지 않도록. DB·Redis·pgvector 확인은 /readyz에서 담당.
          */
         get: operations["healthz_healthz_get"];
         put?: never;
@@ -33,7 +36,7 @@ export interface paths {
         };
         /**
          * Readyz
-         * @description Readiness probe — Postgres + Redis + pgvector extension 확인.
+         * @description Readiness probe — Postgres + Redis + pgvector extension 확인 (타임아웃 적용).
          */
         get: operations["readyz_readyz_get"];
         put?: never;
