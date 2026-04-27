@@ -1,0 +1,246 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main, master]
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+  pull-requests: write  # alembic-dry-run 코멘트용
+
+env:
+  PYTHON_VERSION: "3.13"
+  NODE_VERSION: "22"
+  PNPM_VERSION: "10"
+
+jobs:
+
+  # 1. lint-format-api ----------------------------------------------------
+  lint-format-api:
+    name: lint-format-api
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+
+  # 2. typecheck-api ------------------------------------------------------
+  typecheck-api:
+    name: typecheck-api
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: uv run mypy app
+
+  # 3. test-api -----------------------------------------------------------
+  test-api:
+    name: test-api
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app
+          POSTGRES_DB: app
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U app -d app"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+asyncpg://app:app@localhost:5432/app
+      REDIS_URL: redis://localhost:6379/0
+      ENVIRONMENT: ci
+    defaults:
+      run:
+        working-directory: api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - name: Enable pgvector extension
+        run: |
+          PGPASSWORD=app psql -h localhost -U app -d app -c "CREATE EXTENSION IF NOT EXISTS vector;"
+      - run: uv run pytest
+
+  # 4. typecheck-web ------------------------------------------------------
+  typecheck-web:
+    name: typecheck-web
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "pnpm"
+          cache-dependency-path: web/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm tsc --noEmit
+
+  # 5. typecheck-mobile ---------------------------------------------------
+  typecheck-mobile:
+    name: typecheck-mobile
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "pnpm"
+          cache-dependency-path: mobile/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm tsc --noEmit
+
+  # 6. openapi-diff -------------------------------------------------------
+  # in-process OpenAPI dump → openapi-typescript 재생성 → 커밋된 산출물과 git diff
+  openapi-diff:
+    name: openapi-diff
+    runs-on: ubuntu-latest
+    needs: typecheck-api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: API uv sync
+        working-directory: api
+        run: uv sync --frozen
+
+      - name: Dump OpenAPI schema (in-process, DB·Redis 불요)
+        working-directory: api
+        env:
+          # main.py가 import 시 외부 자원에 연결하지 않도록 보장 (limiter는 lifespan에서 init).
+          # ENVIRONMENT=ci → limiter는 memory:// fallback (Redis 미가용 무관).
+          DATABASE_URL: postgresql+asyncpg://app:app@localhost:5432/app
+          REDIS_URL: redis://localhost:6379/0
+          ENVIRONMENT: ci
+        run: |
+          uv run python -c "import json; from app.main import app; print(json.dumps(app.openapi()))" > /tmp/openapi.json
+
+      - name: Web — install + regenerate client
+        working-directory: web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm exec openapi-typescript /tmp/openapi.json -o src/lib/api-client.ts
+
+      - name: Mobile — install + regenerate client
+        working-directory: mobile
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm exec openapi-typescript /tmp/openapi.json -o lib/api-client.ts
+
+      - name: Diff against committed clients
+        run: |
+          git diff --exit-code -- web/src/lib/api-client.ts mobile/lib/api-client.ts || {
+            echo "::error::OpenAPI 클라이언트가 스키마와 동기화돼있지 않습니다. 'pnpm gen:api' 실행 후 결과를 커밋하세요."
+            exit 1
+          }
+
+  # 7. alembic-dry-run ----------------------------------------------------
+  # AC7: 출력은 PR 코멘트로 표시. 실패는 머지 비차단 (단순 정보).
+  alembic-dry-run:
+    name: alembic-dry-run
+    runs-on: ubuntu-latest
+    continue-on-error: true  # AC7 — fail 비차단
+    defaults:
+      run:
+        working-directory: api
+    env:
+      DATABASE_URL: postgresql+asyncpg://app:app@localhost:5432/app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - name: alembic upgrade head --sql
+        id: dryrun
+        run: |
+          set +e
+          uv run alembic upgrade head --sql > /tmp/alembic.sql 2> /tmp/alembic.err
+          rc=$?
+          set -e
+          {
+            echo "exit_code=$rc"
+            echo "sql<<EOF"
+            head -200 /tmp/alembic.sql
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          if [ $rc -ne 0 ]; then
+            cat /tmp/alembic.err
+          fi
+      - name: Comment on PR (정보용 — 실패 비차단)
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          # GHA expression을 JS 코드 내부에 직접 보간하지 않고 env로 전달 — script injection 차단.
+          # (SQL 본문에 `${...}`나 백틱이 들어와도 JS 파서로 흘러들지 않음.)
+          ALEMBIC_SQL: ${{ steps.dryrun.outputs.sql }}
+          ALEMBIC_RC: ${{ steps.dryrun.outputs.exit_code }}
+        with:
+          script: |
+            const sql = process.env.ALEMBIC_SQL || '';
+            const rc = process.env.ALEMBIC_RC || '?';
+            const body = [
+              '### Alembic Dry Run',
+              `exit_code: \`${rc}\``,
+              '',
+              '```sql',
+              sql.slice(0, 5000),
+              '```',
+            ].join('\n');
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body,
+            });

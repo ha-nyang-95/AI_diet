@@ -1,0 +1,114 @@
+# generated: 2026-04-27
+# last_updated: 2026-04-27 (Story 1.1 code review 완료 — 1-1 → done)
+# project: AI_diet
+# project_key: NOKEY
+# tracking_system: file-system
+# story_location: {project-root}/_bmad-output/implementation-artifacts
+
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+#
+# Epic Status Transitions:
+#   - backlog → in-progress: Automatically when first story is created (via create-story)
+#   - in-progress → done: Manually when all stories reach 'done' status
+#
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - ready-for-dev: Story file created in stories folder
+#   - in-progress: Developer actively working on implementation
+#   - review: Ready for code review (via Dev's code-review workflow)
+#   - done: Story completed
+#
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - done: Retrospective has been completed
+#
+# WORKFLOW NOTES:
+# ===============
+# - Epic transitions to 'in-progress' automatically when first story is created
+# - Stories can be worked in parallel if team capacity allows
+# - Developer typically creates next story after previous one is 'done' to incorporate learnings
+# - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
+
+generated: 2026-04-27
+last_updated: 2026-04-27  # Story 1.1 → done
+project: AI_diet
+project_key: NOKEY
+tracking_system: file-system
+story_location: "{project-root}/_bmad-output/implementation-artifacts"
+
+development_status:
+  # Epic 1: 기반 인프라 + 인증 + 온보딩·동의
+  epic-1: in-progress
+  1-1-프로젝트-부트스트랩: done
+  1-2-google-oauth-로그인-jwt: backlog
+  1-3-약관-개인정보-동의: backlog
+  1-4-자동화-의사결정-동의: backlog
+  1-5-건강-프로필-입력: backlog
+  1-6-온보딩-튜토리얼: backlog
+  epic-1-retrospective: optional
+
+  # Epic 2: 식단 입력 + 일별 기록 + 권한 흐름
+  epic-2: backlog
+  2-1-식단-텍스트-입력-crud: backlog
+  2-2-식단-사진-입력-권한-흐름: backlog
+  2-3-ocr-vision-추출-확인-카드: backlog
+  2-4-일별-식단-기록-화면: backlog
+  2-5-오프라인-텍스트-큐잉-sync: backlog
+  epic-2-retrospective: optional
+
+  # Epic 3: AI 영양 분석 (Self-RAG + 인용 피드백)
+  epic-3: backlog
+  3-1-음식-영양-rag-시드-pgvector: backlog
+  3-2-가이드라인-rag-시드-chunking: backlog
+  3-3-langgraph-6노드-self-rag-saver: backlog
+  3-4-음식명-정규화-매칭-fallback: backlog
+  3-5-fit-score-알고리즘-알레르기-단락: backlog
+  3-6-인용형-피드백-광고-가드-듀얼-llm: backlog
+  3-7-모바일-sse-스트리밍-채팅-ui: backlog
+  3-8-langsmith-옵저버빌리티-평가-데이터셋: backlog
+  epic-3-retrospective: optional
+
+  # Epic 4: 알림(nudge) + Web 주간 리포트
+  epic-4: backlog
+  4-1-알림-설정-푸시-권한: backlog
+  4-2-apscheduler-nudge-미기록-푸시: backlog
+  4-3-web-주간-리포트-차트: backlog
+  4-4-인사이트-카드-매크로-목표-조정: backlog
+  epic-4-retrospective: optional
+
+  # Epic 5: 계정 관리 + PIPA 권리
+  epic-5: backlog
+  5-1-건강-프로필-수정: backlog
+  5-2-회원-탈퇴-soft-delete-grace: backlog
+  5-3-데이터-내보내기-json-csv: backlog
+  epic-5-retrospective: optional
+
+  # Epic 6: 결제/구독 sandbox
+  epic-6: backlog
+  6-1-정기결제-sandbox-신청: backlog
+  6-2-구독-해지-영수증-이용내역: backlog
+  6-3-결제-webhook-idempotency-키: backlog
+  epic-6-retrospective: optional
+
+  # Epic 7: 관리자 + Audit Trust
+  epic-7: backlog
+  7-1-관리자-로그인-admin-jwt-가드: backlog
+  7-2-관리자-사용자-검색-이력-수정: backlog
+  7-3-audit-log-자동-기록-연쇄: backlog
+  7-4-self-audit-화면-마스킹-원문-토글: backlog
+  epic-7-retrospective: optional
+
+  # Epic 8: 운영·인수인계 패키지 + 영업 자료
+  epic-8: backlog
+  8-1-sop-4종-작성: backlog
+  8-2-faq-5종-영업-답변: backlog
+  8-3-readme-agents-인수인계: backlog
+  8-4-운영-polish-sentry-swagger-rate-limit: backlog
+  8-5-클라우드-배포-hardening-runbook: backlog
+  8-6-데모-영상-포트폴리오-영업-패키지: backlog
+  epic-8-retrospective: optional
