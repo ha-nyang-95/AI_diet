@@ -57,6 +57,39 @@ pnpm gen:api                      # web/src/lib/api-client.ts + mobile/lib/api-c
 
 API 스키마가 변경되면 **반드시** 위 명령을 실행하고 결과 파일을 커밋해야 합니다(CI `openapi-diff` 게이트가 차단).
 
+### Google OAuth Client 발급 SOP (Story 1.2)
+
+Story 1.2부터 Google 로그인을 사용하려면 Google Cloud Console에서 OAuth 2.0 client ID 3종을
+발급해야 합니다.
+
+1. https://console.cloud.google.com/ → 프로젝트 생성/선택 → "APIs & Services" → "Credentials".
+2. **OAuth consent screen** 우선 구성: User Type=External, scopes=`openid email profile`.
+3. **Credentials → Create Credentials → OAuth client ID** 를 3번 반복:
+   - **iOS**: Application type=`iOS`, Bundle ID=`com.balancenote.mobile` (Expo `app.json` slug 정합).
+   - **Android**: Application type=`Android`, Package name=`com.balancenote.mobile`, SHA-1 fingerprint
+     (`eas credentials --platform android` 또는 `keytool -list -v -keystore ~/.android/debug.keystore`).
+   - **Web**: Application type=`Web application`, Authorized redirect URIs에
+     `http://localhost:3000/api/auth/google/callback` (dev) +
+     `https://app.balancenote.app/api/auth/google/callback` (prod).
+4. 발급된 Client ID / Secret을 `.env` 에 입력:
+   - `mobile/.env`: `EXPO_PUBLIC_GOOGLE_OAUTH_CLIENT_ID_{IOS,ANDROID,WEB}`
+   - `web/.env.local`: `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`,
+     `GOOGLE_OAUTH_REDIRECT_URI`
+   - 루트 `.env`: `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET` (백엔드용)
+
+> Expo Go 개발 환경에서는 Web client ID를 모든 플랫폼에 사용해 PKCE 흐름을 검증하면 가장 마찰이 적습니다.
+
+### 인증 디버깅 SOP
+
+`401 Unauthorized` 발생 시 점검 순서:
+
+1. 응답 본문의 `code` 필드 확인 — `auth.access_token.expired` / `auth.refresh.invalid` /
+   `auth.token.issuer_mismatch` / `auth.admin.role_required` 중 하나.
+2. JWT decode (https://jwt.io) — `iss` / `aud` / `exp` 가 환경 변수와 일치하는지.
+3. DB에서 `users` row 조회 — `deleted_at IS NULL`, `role` 일치.
+4. refresh 401이면 `refresh_tokens` row의 `revoked_at` / `expires_at` 확인.
+5. `WWW-Authenticate` 헤더(401에 항상 첨부)로 RFC 6750 정합 응답 확인.
+
 ### 8시간 체크리스트
 
 - [ ] (1h) `docker compose up` 4개 컨테이너 healthy 확인

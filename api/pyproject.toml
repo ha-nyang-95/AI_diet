@@ -30,6 +30,7 @@ dependencies = [
     "slowapi>=0.1.9",
     "apscheduler>=3.11",
     "sse-starlette>=2.2",
+    "google-auth>=2.36",
 ]
 
 [dependency-groups]
@@ -59,7 +60,7 @@ plugins = ["pydantic.mypy"]
 mypy_path = "."
 
 [[tool.mypy.overrides]]
-module = ["jose.*", "passlib.*", "pgvector.*", "slowapi.*", "apscheduler.*"]
+module = ["jose.*", "passlib.*", "pgvector.*", "slowapi.*", "apscheduler.*", "google.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
@@ -68,11 +69,9 @@ addopts = "--cov=app --cov-report=term --cov-fail-under=70"
 testpaths = ["tests"]
 
 [tool.coverage.run]
-# placeholder 모듈만 omit. main.py는 /healthz·/readyz·lifespan을 포함하므로 측정 대상.
-omit = [
-    "app/core/security.py",
-    "app/core/exceptions.py",
-]
+# Story 1.2부터 security.py / exceptions.py가 채워지므로 omit 비움.
+# 신규 모듈(adapters, api/deps, api/v1/auth, api/v1/users, db/models/*) 모두 측정 대상.
+omit = []
 
 [build-system]
 requires = ["hatchling"]

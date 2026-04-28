@@ -18,14 +18,23 @@ from typing import TYPE_CHECKING
 
 import redis.asyncio as redis_asyncio
 import structlog
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.api.v1 import auth as auth_router
+from app.api.v1 import users as users_router
 from app.core.config import settings
+from app.core.exceptions import (
+    PROBLEM_JSON_MEDIA_TYPE,
+    BalanceNoteError,
+    ProblemDetail,
+)
 from app.core.logging import configure_logging
 from app.core.middleware import RequestIdMiddleware
 from app.core.sentry import init_sentry
@@ -112,7 +121,97 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+# CORS — `/v1/auth/*`은 본 프로젝트의 첫 cross-origin endpoint.
+# `allow_credentials=True` + `allow_origins=["*"]` 조합 절대 금지(브라우저 차단).
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_allowed_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Request-ID", "Idempotency-Key"],
+)
 app.add_middleware(RequestIdMiddleware)
+
+
+# --- RFC 7807 Problem Details 글로벌 핸들러 -----------------------------------
+# 등록 순서: 가장 구체적인 BalanceNoteError → RequestValidationError(HTTPException 서브클래스)
+# → HTTPException base. FastAPI는 등록 순서가 아닌 가장 구체적인 핸들러로 디스패치하지만,
+# 명시적으로 좁은 범위부터 등록해두면 의도가 코드에 그대로 드러난다.
+
+
+def _sanitize_header_value(value: str) -> str:
+    """RFC 6750 quoted-string 안전화 — `"`, CR, LF 제거(헤더 인젝션 차단)."""
+    return value.replace('"', "").replace("\r", "").replace("\n", "")
+
+
+def _problem_response(
+    problem: ProblemDetail,
+    *,
+    extra_headers: dict[str, str] | None = None,
+) -> JSONResponse:
+    headers: dict[str, str] = {}
+    if problem.status == 401:
+        # RFC 6750 — 401 응답에는 WWW-Authenticate 헤더 동시 첨부.
+        description = _sanitize_header_value(problem.detail or problem.title)
+        headers["WWW-Authenticate"] = (
+            f'Bearer realm="balancenote", error="invalid_token", error_description="{description}"'
+        )
+    if extra_headers:
+        headers.update(extra_headers)
+    return JSONResponse(
+        status_code=problem.status,
+        content=problem.to_response_dict(),
+        media_type=PROBLEM_JSON_MEDIA_TYPE,
+        headers=headers,
+    )
+
+
+@app.exception_handler(BalanceNoteError)
+async def balancenote_exception_handler(request: Request, exc: BalanceNoteError) -> JSONResponse:
+    return _problem_response(exc.to_problem(instance=str(request.url.path)))
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(
+    request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    problem = ProblemDetail(
+        title="Validation Error",
+        status=400,
+        detail="Request validation failed",
+        instance=str(request.url.path),
+        code="validation.error",
+    )
+    # RFC 7807은 확장 멤버 허용 — 필드별 에러 배열을 `errors`로 추가.
+    payload: dict[str, object] = dict(problem.to_response_dict())
+    payload["errors"] = [
+        {"loc": list(err.get("loc", [])), "msg": err.get("msg"), "type": err.get("type")}
+        for err in exc.errors()
+    ]
+    return JSONResponse(
+        status_code=400,
+        content=payload,
+        media_type=PROBLEM_JSON_MEDIA_TYPE,
+    )
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+    detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+    problem = ProblemDetail(
+        title=detail or "HTTP Error",
+        status=exc.status_code,
+        detail=detail,
+        instance=str(request.url.path),
+        code=f"http.{exc.status_code}",
+    )
+    return _problem_response(problem, extra_headers=dict(exc.headers or {}))
+
+
+# --- Routers ----------------------------------------------------------------
+app.include_router(auth_router.router, prefix="/v1/auth", tags=["auth"])
+app.include_router(users_router.router, prefix="/v1/users", tags=["users"])
 
 
 @app.get("/healthz")
