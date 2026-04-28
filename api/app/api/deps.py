@@ -152,9 +152,11 @@ async def require_basic_consents(
     return user
 
 
-def _has_automated_decision_consent(row: Consent | None) -> bool:
+def has_automated_decision_consent(row: Consent | None) -> bool:
     """Story 1.4 — ``automated_decision_consent_at`` NOT NULL + ``_revoked_at`` IS NULL +
     ``_version`` 일치 3 조건. *기본 동의 선행*은 검증 항목 X(AC4 결정).
+
+    공개 헬퍼 — ``consents.py:_build_status`` 가 응답 모델 결합 boolean 계산에 재사용.
     """
     if row is None:
         return False
@@ -180,6 +182,6 @@ async def require_automated_decision_consent(
     """
     result = await db.execute(select(Consent).where(Consent.user_id == user.id))
     row = result.scalar_one_or_none()
-    if not _has_automated_decision_consent(row):
+    if not has_automated_decision_consent(row):
         raise AutomatedDecisionConsentMissingError("automated decision consent required")
     return user

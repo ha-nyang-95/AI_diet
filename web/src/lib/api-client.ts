@@ -131,9 +131,14 @@ export interface paths {
          * Revoke Automated Decision Consent
          * @description 동의 철회 — ``automated_decision_revoked_at = now()`` set, ``_consent_at`` 보존.
          *
-         *     row 없음 또는 ``automated_decision_consent_at IS NULL``(미동의 상태) →
+         *     row 없음 또는 ``automated_decision_consent_at IS NULL``(미동의) 또는 이미 철회된 상태
+         *     (``automated_decision_revoked_at IS NOT NULL``) →
          *     ``AutomatedDecisionConsentNotGrantedError`` (404). 이미 철회된 상태에서 재호출 시
-         *     *철회는 idempotent가 아닌* 명시 분기(사용자 의도 *철회*인데 *미동의 상태*는 모호).
+         *     *철회는 idempotent 가 아닌* 명시 분기 — 두 번째 DELETE 가 200 으로 통과하면 원본
+         *     철회 시각(PIPA audit) 을 새 ``now()`` 로 덮어쓴다.
+         *
+         *     구현: ``UPDATE ... WHERE ... RETURNING`` 단일 쿼리 — SELECT-then-UPDATE TOCTOU
+         *     race 회피 + DB round-trip 1회. WHERE 매칭 실패 시 row 반환 0건 → 404.
          */
         delete: operations["revoke_automated_decision_consent_v1_users_me_consents_automated_decision_delete"];
         options?: never;

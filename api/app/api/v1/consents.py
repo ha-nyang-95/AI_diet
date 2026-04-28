@@ -24,7 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, literal_column, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from app.api.deps import DbSession, current_user
+from app.api.deps import DbSession, current_user, has_automated_decision_consent
 from app.core.exceptions import (
     AutomatedDecisionConsentNotGrantedError,
     AutomatedDecisionConsentVersionMismatchError,
@@ -99,25 +99,6 @@ def has_all_basic_consents(row: Consent | None) -> bool:
         and row.terms_version == CURRENT_VERSIONS["terms"]
         and row.privacy_version == CURRENT_VERSIONS["privacy"]
         and row.sensitive_personal_info_version == CURRENT_VERSIONS["sensitive_personal_info"]
-    )
-
-
-def has_automated_decision_consent(row: Consent | None) -> bool:
-    """Story 1.4 — 자동화 의사결정 동의 통과 여부.
-
-    3 조건: (a) ``automated_decision_consent_at`` NOT NULL,
-    (b) ``automated_decision_revoked_at`` IS NULL,
-    (c) ``automated_decision_version`` 이 ``CURRENT_VERSIONS["automated-decision"]``
-    와 일치. *기본 동의 선행*은 라우터 게이트
-    (``require_automated_decision_consent``) 검증 항목에 미포함 — 응답 모델
-    (``automated_decision_consent_complete``)에서만 결합한다(AC4 결정).
-    """
-    if row is None:
-        return False
-    return (
-        row.automated_decision_consent_at is not None
-        and row.automated_decision_revoked_at is None
-        and row.automated_decision_version == CURRENT_VERSIONS["automated-decision"]
     )
 
 
@@ -311,25 +292,29 @@ async def grant_automated_decision_consent(
         user_agent=user_agent,
     )
     excluded: Any = insert_stmt.excluded
-    upsert_stmt: Any = insert_stmt.on_conflict_do_update(
-        index_elements=[Consent.user_id],
-        set_={
-            "automated_decision_consent_at": excluded.automated_decision_consent_at,
-            "automated_decision_version": excluded.automated_decision_version,
-            # 재동의 시 철회 시각 명시 reset.
-            "automated_decision_revoked_at": None,
-            "ip_address": excluded.ip_address,
-            "user_agent": excluded.user_agent,
-            # ON CONFLICT DO UPDATE는 PG 직접 DML이라 SQLAlchemy ``onupdate=func.now()``
-            # 이벤트 미발화(Story 1.3 P2 패턴 정합).
-            "updated_at": func.now(),
-        },
+    upsert_stmt: Any = (
+        insert_stmt.on_conflict_do_update(
+            index_elements=[Consent.user_id],
+            set_={
+                "automated_decision_consent_at": excluded.automated_decision_consent_at,
+                "automated_decision_version": excluded.automated_decision_version,
+                # 재동의 시 철회 시각 명시 reset.
+                "automated_decision_revoked_at": None,
+                "ip_address": excluded.ip_address,
+                "user_agent": excluded.user_agent,
+                # ON CONFLICT DO UPDATE는 PG 직접 DML이라 SQLAlchemy ``onupdate=func.now()``
+                # 이벤트 미발화(Story 1.3 P2 패턴 정합).
+                "updated_at": func.now(),
+            },
+        )
+        # 별도 SELECT round-trip 회피 — UPSERT 결과 row 를 즉시 반환.
+        .returning(Consent)
     )
-    await db.execute(upsert_stmt)
+    result = await db.execute(upsert_stmt)
+    row = result.scalars().one()
     await db.commit()
 
-    refreshed = await db.execute(select(Consent).where(Consent.user_id == user.id))
-    return _build_status(refreshed.scalar_one())
+    return _build_status(row)
 
 
 @router.delete("/automated-decision")
@@ -344,23 +329,25 @@ async def revoke_automated_decision_consent(
     ``AutomatedDecisionConsentNotGrantedError`` (404). 이미 철회된 상태에서 재호출 시
     *철회는 idempotent 가 아닌* 명시 분기 — 두 번째 DELETE 가 200 으로 통과하면 원본
     철회 시각(PIPA audit) 을 새 ``now()`` 로 덮어쓴다.
+
+    구현: ``UPDATE ... WHERE ... RETURNING`` 단일 쿼리 — SELECT-then-UPDATE TOCTOU
+    race 회피 + DB round-trip 1회. WHERE 매칭 실패 시 row 반환 0건 → 404.
     """
-    result = await db.execute(select(Consent).where(Consent.user_id == user.id))
-    row = result.scalar_one_or_none()
-    if (
-        row is None
-        or row.automated_decision_consent_at is None
-        or row.automated_decision_revoked_at is not None
-    ):
-        raise AutomatedDecisionConsentNotGrantedError("automated decision consent not granted")
-
     now = datetime.now(UTC)
-    await db.execute(
+    stmt = (
         update(Consent)
-        .where(Consent.user_id == user.id)
+        .where(
+            Consent.user_id == user.id,
+            Consent.automated_decision_consent_at.is_not(None),
+            Consent.automated_decision_revoked_at.is_(None),
+        )
         .values(automated_decision_revoked_at=now, updated_at=func.now())
+        .returning(Consent)
     )
+    result = await db.execute(stmt)
+    row = result.scalars().one_or_none()
+    if row is None:
+        # row 부재 / 미동의 / 이미 철회 — WHERE 가 모두 흡수.
+        raise AutomatedDecisionConsentNotGrantedError("automated decision consent not granted")
     await db.commit()
-
-    refreshed = await db.execute(select(Consent).where(Consent.user_id == user.id))
-    return _build_status(refreshed.scalar_one())
+    return _build_status(row)

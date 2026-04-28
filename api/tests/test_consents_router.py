@@ -316,9 +316,7 @@ async def test_delete_automated_decision_404_when_already_revoked(
     assert second.json()["code"] == "consent.automated_decision.not_granted"
 
     # GET 으로 원본 revoked_at 가 보존되었는지 확인.
-    status_resp = await client.get(
-        "/v1/users/me/consents", headers=auth_headers(user)
-    )
+    status_resp = await client.get("/v1/users/me/consents", headers=auth_headers(user))
     assert status_resp.json()["automated_decision_revoked_at"] == original_revoked_at
 
 
