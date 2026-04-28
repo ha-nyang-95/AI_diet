@@ -136,10 +136,16 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
-        /** AdminExchangeResponseMobile */
-        AdminExchangeResponseMobile: {
+        /**
+         * AdminExchangeResponse
+         * @description `admin_access_token`은 mobile에서만 채움(secure-store 저장).
+         *
+         *     Web 흐름에서는 `bn_admin_access` httpOnly 쿠키만 발급되고 body는 `null` —
+         *     JS에서 token 노출 차단(NFR-S2).
+         */
+        AdminExchangeResponse: {
             /** Admin Access Token */
-            admin_access_token: string;
+            admin_access_token: string | null;
             /** Expires In Seconds */
             expires_in_seconds: number;
         };
@@ -375,6 +381,7 @@ export interface operations {
             };
             path?: never;
             cookie?: {
+                bn_refresh?: string | null;
                 bn_access?: string | null;
             };
         };
@@ -386,7 +393,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["AdminExchangeResponseMobile"];
+                    "application/json": components["schemas"]["AdminExchangeResponse"];
                 };
             };
             /** @description Validation Error */
