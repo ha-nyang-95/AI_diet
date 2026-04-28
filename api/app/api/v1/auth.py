@@ -216,7 +216,8 @@ def _apply_google_profile(
     user.display_name = display_name
     user.picture_url = picture_url
     user.last_login_at = now
-    user.updated_at = now
+    # `User.updated_at`은 `onupdate=text("now()")` (Story 1.2 chunk 1 P8 patch)로
+    # SQLAlchemy가 commit 시 자동 갱신 — 명시 set 불필요.
 
 
 async def _upsert_user_from_google(
