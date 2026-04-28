@@ -2,6 +2,7 @@ import { notFound, redirect } from "next/navigation";
 
 import { fetchLegalDocument } from "@/lib/legal-fetch";
 import { getServerSideUser } from "@/lib/auth";
+import { getServerSideConsents } from "@/lib/consents";
 
 import OnboardingForm from "./OnboardingForm";
 
@@ -12,6 +13,10 @@ export const metadata = {
 export default async function OnboardingDisclaimerPage() {
   const user = await getServerSideUser();
   if (!user) redirect("/login");
+
+  // 이미 동의 완료한 사용자가 페이지 직접 진입 시 dashboard로 — 중복 POST 회피.
+  const consents = await getServerSideConsents();
+  if (consents?.basic_consents_complete) redirect("/dashboard");
 
   const [disclaimer, terms, privacy] = await Promise.all([
     fetchLegalDocument("disclaimer", "ko"),

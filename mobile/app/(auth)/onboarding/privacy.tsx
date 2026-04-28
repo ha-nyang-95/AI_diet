@@ -19,7 +19,20 @@ import {
 } from 'react-native';
 
 import { useLegalDocument } from '@/features/legal/useLegalDocument';
-import { useSubmitConsents } from '@/features/onboarding/useConsents';
+import { ConsentSubmitError, useSubmitConsents } from '@/features/onboarding/useConsents';
+
+function extractSubmitErrorMessage(err: unknown): string {
+  if (err instanceof ConsentSubmitError) {
+    if (err.code === 'consent.version_mismatch') {
+      return '약관이 갱신되었습니다. 화면을 다시 열어 최신 텍스트로 동의해 주세요.';
+    }
+    if (err.status >= 500) {
+      return '일시적인 서버 오류로 저장에 실패했습니다. 잠시 후 다시 시도해 주세요.';
+    }
+    return err.detail ?? `동의 저장 실패 (${err.status})`;
+  }
+  return '네트워크 오류로 동의 저장에 실패했습니다. 잠시 후 다시 시도해 주세요.';
+}
 
 export default function OnboardingPrivacy() {
   const disclaimerDoc = useLegalDocument('disclaimer', 'ko');
@@ -79,6 +92,12 @@ export default function OnboardingPrivacy() {
       <Text style={styles.sensitiveCaption}>
         민감정보 별도 동의 (PIPA 23조) — 별도 동의 항목입니다
       </Text>
+      <Text style={styles.sensitiveRationale}>
+        BalanceNote는 정확한 영양 분석과 알레르기 가드를 위해 *체중·신장·알레르기 정보·식사
+        기록·건강 목표*를 수집합니다. 이는 「개인정보 보호법」 제23조의 민감정보에 해당하므로,
+        일반 개인정보 동의와 분리해 별도로 동의를 받습니다. 본 정보는 분석 기능 제공에만
+        사용되며, 회원 탈퇴 시 즉시 파기됩니다.
+      </Text>
       <Pressable
         style={styles.checkboxRow}
         onPress={() => setSensitiveAgreed((v) => !v)}
@@ -121,7 +140,7 @@ export default function OnboardingPrivacy() {
       </Pressable>
       {submit.isError && (
         <Text style={styles.error}>
-          동의 저장 실패: {submit.error instanceof Error ? submit.error.message : ''}
+          {extractSubmitErrorMessage(submit.error)}
         </Text>
       )}
     </View>
@@ -153,6 +172,12 @@ const styles = StyleSheet.create({
   checkboxLabel: { fontSize: 14, color: '#222', flex: 1 },
   divider: { height: 1, backgroundColor: '#ddd', marginTop: 16, marginBottom: 4 },
   sensitiveCaption: { marginTop: 12, fontSize: 12, color: '#b54708', fontWeight: '600' },
+  sensitiveRationale: {
+    marginTop: 6,
+    fontSize: 12,
+    lineHeight: 18,
+    color: '#5a3a17',
+  },
   nextButton: {
     marginTop: 16,
     backgroundColor: '#1a73e8',

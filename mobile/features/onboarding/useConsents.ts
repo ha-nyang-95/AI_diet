@@ -3,6 +3,9 @@
  *
  * `useMutation.onSuccess` 시 (a) `['consents']` 쿼리 invalidate, (b) AuthProvider의
  * `consentStatus` state도 동기 갱신해 (tabs) 가드가 즉시 통과하도록 한다.
+ *
+ * 실패 응답은 ``ConsentSubmitError``로 typed surface — UI가 ``code``(409 →
+ * ``consent.version_mismatch``)와 ``status``로 분기 가능.
  */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
@@ -13,6 +16,20 @@ export interface ConsentSubmitRequest {
   terms_version: string;
   privacy_version: string;
   sensitive_personal_info_version: string;
+}
+
+export class ConsentSubmitError extends Error {
+  status: number;
+  code?: string;
+  detail?: string;
+
+  constructor(status: number, code?: string, detail?: string) {
+    super(detail ?? `consents submit failed (${status})`);
+    this.name = 'ConsentSubmitError';
+    this.status = status;
+    this.code = code;
+    this.detail = detail;
+  }
 }
 
 async function fetchConsents(): Promise<ConsentStatus> {
@@ -30,7 +47,16 @@ async function submitConsents(body: ConsentSubmitRequest): Promise<ConsentStatus
     body: JSON.stringify(body),
   });
   if (!response.ok) {
-    throw new Error(`consents submit failed (${response.status})`);
+    let code: string | undefined;
+    let detail: string | undefined;
+    try {
+      const problem = (await response.json()) as { code?: string; detail?: string };
+      code = problem.code;
+      detail = problem.detail;
+    } catch {
+      // RFC 7807 본문이 아니면 status만 사용.
+    }
+    throw new ConsentSubmitError(response.status, code, detail);
   }
   return (await response.json()) as ConsentStatus;
 }

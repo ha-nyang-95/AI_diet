@@ -225,6 +225,13 @@ LEGAL_DOCUMENTS: dict[tuple[LegalDocType, LegalLang], LegalDocument] = {
 
 # 기본 동의 4종 — POST /v1/users/me/consents 시 클라이언트가 보낸 *_version이
 # 본 매핑과 일치해야 통과(미일치 시 409 ConsentVersionMismatchError).
+#
+# `sensitive_personal_info`는 자체 ``LegalDocument`` 항목이 없고 ``privacy`` 텍스트의
+# *민감정보* 단락을 공유한다(PIPA 22조·23조 별도 동의 의무는 *체크박스 분리 + 시각 분리
+# + 별도 단락*으로 충족 — AC1·AC13 정합). 따라서 본 키도 ``_VERSION_KO``를 공유하며,
+# 클라이언트는 ``privacy.version``을 ``sensitive_personal_info_version`` 필드에 그대로
+# 전송한다. 향후 민감정보 텍스트를 *분리 SOT*로 승격할 경우 ``LegalDocType`` Literal에
+# ``sensitive_personal_info`` 추가 + 본 키 독립 bump.
 CURRENT_VERSIONS: dict[str, str] = {
     "disclaimer": _VERSION_KO,
     "terms": _VERSION_KO,

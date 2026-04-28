@@ -19,7 +19,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import literal_column, select
+from sqlalchemy import func, literal_column, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.api.deps import DbSession, current_user
@@ -115,9 +115,13 @@ def _validate_versions(body: ConsentSubmitRequest) -> None:
 
 
 def _truncate_user_agent(value: str | None) -> str | None:
+    """UTF-8 multibyte 분리 위험 회피 — 바이트 길이 기준 자르기 + invalid byte 무시."""
     if value is None:
         return None
-    return value[:_USER_AGENT_MAX_LENGTH]
+    encoded = value.encode("utf-8")
+    if len(encoded) <= _USER_AGENT_MAX_LENGTH:
+        return value
+    return encoded[:_USER_AGENT_MAX_LENGTH].decode("utf-8", "ignore")
 
 
 # --- Endpoints -------------------------------------------------------------
@@ -164,6 +168,9 @@ async def submit_consents(
             "sensitive_personal_info_version": excluded.sensitive_personal_info_version,
             "ip_address": excluded.ip_address,
             "user_agent": excluded.user_agent,
+            # ON CONFLICT DO UPDATE는 PG 직접 DML이라 SQLAlchemy `onupdate=func.now()`
+            # 이벤트가 발화되지 않는다 — set_에 명시해야 재동의 시 갱신 시점이 기록된다.
+            "updated_at": func.now(),
         },
     ).returning(literal_column("(xmax = 0)").label("is_inserted"))
     result = await db.execute(upsert_stmt)

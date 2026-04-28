@@ -7,10 +7,16 @@
  * PIPA 22조 별도 동의 + 23조 민감정보 별도 동의 의무 — 4 체크박스 시각 분리,
  * sensitive_personal_info는 horizontal divider + 별 색상 강조.
  */
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { apiFetch } from "@/lib/api-fetch";
+
+interface ProblemDetail {
+  code?: string;
+  detail?: string;
+  title?: string;
+}
 
 interface DocSummary {
   title: string;
@@ -34,12 +40,24 @@ export default function OnboardingForm({ disclaimer, terms, privacy }: Onboardin
   });
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // double-click 방지용 — submitting state는 React 렌더 타이밍 의존이라 ref로 즉시 차단.
+  const inflightRef = useRef(false);
+  const abortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    // 언마운트 시 in-flight 요청 abort — setState on unmounted 경고 차단.
+    return () => abortRef.current?.abort();
+  }, []);
 
   const allChecked = acks.disclaimer && acks.terms && acks.privacy && acks.sensitive;
 
   async function handleSubmit() {
+    if (inflightRef.current) return;
+    inflightRef.current = true;
     setError(null);
     setSubmitting(true);
+    const controller = new AbortController();
+    abortRef.current = controller;
     try {
       const response = await apiFetch("/v1/users/me/consents", {
         method: "POST",
@@ -50,13 +68,33 @@ export default function OnboardingForm({ disclaimer, terms, privacy }: Onboardin
           privacy_version: privacy.version,
           sensitive_personal_info_version: privacy.version,
         }),
+        signal: controller.signal,
       });
-      if (!response.ok) {
-        setError(`동의 저장에 실패했습니다 (${response.status})`);
+      if (response.ok) {
+        router.push("/dashboard");
         return;
       }
-      router.push("/dashboard");
+      let problem: ProblemDetail = {};
+      try {
+        problem = (await response.json()) as ProblemDetail;
+      } catch {
+        // RFC 7807 본문이 아니면 status code만 표면.
+      }
+      if (response.status === 409 && problem.code === "consent.version_mismatch") {
+        setError("약관이 갱신되었습니다. 페이지를 새로 고침해 최신 텍스트로 다시 동의해 주세요.");
+        return;
+      }
+      if (response.status >= 500) {
+        setError("일시적인 서버 오류로 동의 저장에 실패했습니다. 잠시 후 다시 시도해 주세요.");
+        return;
+      }
+      setError(problem.detail ?? `동의 저장에 실패했습니다 (${response.status})`);
+    } catch (err) {
+      if ((err as Error).name === "AbortError") return;
+      setError("네트워크 오류로 동의 저장에 실패했습니다. 잠시 후 다시 시도해 주세요.");
     } finally {
+      inflightRef.current = false;
+      abortRef.current = null;
       setSubmitting(false);
     }
   }

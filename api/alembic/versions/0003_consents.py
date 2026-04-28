@@ -40,9 +40,7 @@ def upgrade() -> None:
         sa.Column("disclaimer_acknowledged_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("terms_consent_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("privacy_consent_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column(
-            "sensitive_personal_info_consent_at", sa.DateTime(timezone=True), nullable=True
-        ),
+        sa.Column("sensitive_personal_info_consent_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("disclaimer_version", sa.String(), nullable=True),
         sa.Column("terms_version", sa.String(), nullable=True),
         sa.Column("privacy_version", sa.String(), nullable=True),

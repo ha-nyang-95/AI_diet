@@ -31,6 +31,11 @@ export async function fetchLegalDocument(
     headers: {},
     next: { revalidate: 86400 },
   });
+  // 5xx는 ISR이 24h 캐시하지 않도록 throw — error boundary 또는 page-level error.tsx로 위임.
+  // 4xx만 null로 표면화(notFound() 트리거).
+  if (response.status >= 500) {
+    throw new Error(`legal fetch failed: upstream ${response.status}`);
+  }
   if (!response.ok) return null;
   return (await response.json()) as LegalDocumentResponse;
 }

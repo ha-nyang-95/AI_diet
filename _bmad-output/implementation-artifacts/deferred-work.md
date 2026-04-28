@@ -31,6 +31,24 @@
 - **Lax 채택 안전성**: CSRF 방어는 여전히 충분 — 외부 사이트의 form POST/AJAX는 Lax 쿠키 미포함(state-changing 요청 차단). 차이는 "외부 링크 클릭으로 들어온 GET 네비게이션 시 쿠키 포함" — auth 흐름 정상 동작.
 - **재검토 시점**: 외부 보안 audit 또는 Story 8 운영 hardening. 대안(HTML+JS redirect로 chain 끊기)은 UX 저하 + 코드 복잡도 증가로 미채택.
 
+## Deferred from: code review of 1-3-약관-개인정보-동의 (2026-04-28)
+
+- **W1 — `/v1/legal/{type}` rate limit 미적용** — public endpoint scrape/DoS 가능. 사유: Completion Notes deferred 1번 등재, Story 8 polish에서 slowapi 데코레이터 일괄 도입.
+- **W2 — `/v1/legal/{type}` Cache-Control / ETag 미설정** — 모바일은 cold start마다 fetch, CDN 캐시 미활용. 사유: Story 8 polish — 캐시 정책은 Story 4.3(주간 리포트) RSC ISR 검증 후 일괄 결정.
+- **W3 — OpenAPI 응답 코드 (201/400/401/409) 미선언** — `submit_consents`는 201/200/400/401/409, `legal` 라우터는 400/422 가능하지만 자동 생성된 client(`web/src/lib/api-client.ts`, `mobile/lib/api-client.ts`)는 200/422만 노출. 사유: Story 1.2 패턴 정합(전 라우터 동일 한정), cross-cutting cleanup으로 Story 8 일괄 처리.
+- **W4 — 버전 bump 시 자동 재동의 트리거 부재** — 운영자가 `_VERSION_KO`만 바꾸면 모든 활성 사용자가 즉시 `basic_consents_complete=false`로 차단됨(운영 폭탄). 사유: Completion Notes deferred 2번, 마이그레이션 전략(공지·단계적 강제) 결정 후 운영 SOP에 반영.
+- **W5 — `require_basic_consents` DB error → typed 5xx 매핑 미적용** — `db.execute` 실패 시 raw exception으로 500. 사유: cross-cutting, Story 8 운영 hardening.
+- **W6 — soft-deleted user 복원 시 stale consents row 사용 가능** — `users.deleted_at` 마킹만 하고 `consents` row 보존 → 복원 시 fresh PIPA assent 누락. 사유: Story 5.x(회원 탈퇴 + 30일 grace) 책임 영역.
+- **W7 — Mobile onboarding이 `?next=` 미독해** — `(tabs)/_layout.tsx`가 next 쿼리는 보존하지만 onboarding 화면들이 읽지 않음. 사유: spec AC2 line 31에 *Story 1.6 온보딩 완료 후 복귀에서 활용* 명시.
+- **W8 — `consent.basic.missing` 클라이언트 인터셉터 부재** — `require_basic_consents`가 wire되면 사용자가 raw 403만 보고 onboarding 진입 경로 못 찾음. 사유: Story 1.5+ 라우터 wire 시점에 인터셉터 추가.
+- **W9 — typed-route cast workaround (`as Parameters<typeof router.push>[0]`)** — Expo Router typed-routes 캐시 재생성 트리거를 위한 임시 우회. 사유: PR 머지·캐시 정상화 후 정리. 잔존 시 settings 경로 변경 시 컴파일러 검출 안 됨.
+- **W10 — `request.client.host` proxy 헤더 처리 미적용** — Gemini Code Assist medium 코멘트(PR #5 #discussion_r3153082820). PIPA audit IP가 reverse-proxy 사설 IP로 통일됨. 사유: Story 1.2 W2 deferred 정합 — 운영 토폴로지(Railway/Cloud Run/직접 LB) 결정 후 trusted proxy 화이트리스트와 함께 일괄 도입.
+- **W11 — spec Tasks 5.2/5.3/5.4 본문 stale** — Task 5.2 "version mismatch 422", Task 5.3 "/v1/legal/invalid 404", Task 5.4 "4 cases" — implementation은 AC를 따라 409·400·6 cases로 올바르나 task text가 stale. 사유: D1 결정 시 일괄 정비.
+- **W12 — middleware JWT 시그니처 검증 불가** — `hasValidLookingCookie`는 길이만 체크. 위조 쿠키로 onboarding GET 한 번 통과 가능(RSC가 bounce). 사유: Edge runtime crypto 제약 + Story 1.2 정합 패턴 — RSC 책임으로 분리.
+- **W13 — `ConsentVersionMismatchError` 409에 `X-Consent-Latest-Version` 헤더 미포함** — 클라이언트는 status만 보고 latest version 추론 불가, 추가 round trip 필요. 사유: UX nice-to-have, Story 1.4가 같은 패턴으로 추가 시 일괄 도입.
+- **W14 — `require_basic_consents` 라우터 wire 미적용** — `app/api/deps.py`에 정의되어 있으나 어떤 라우터에도 Depends 등록 안 됨. 사유: spec AC11 명시 — 본 스토리는 *함수 정의 + 단위 테스트*만, Story 1.5(`POST /v1/users/me/profile`) / Story 2.1+(`/v1/meals/*`)이 명시 적용.
+- **W15 — CSRF 방어 명시 검증 미수행** — Web POST `/v1/users/me/consents`가 cookie 인증 + body POST. 사유: Story 1.2 `Spec deviation: SameSite=Lax` 정합 — Lax 쿠키가 cross-site form POST 차단. 외부 보안 audit 시 재검토.
+
 ## Spec deviation: logout endpoint (2026-04-28, PR #2 review followup)
 
 - **AC5 spec**: 모바일은 `Authorization: Bearer <access>` + body `{refresh_token}` 두 필드 동시 전송 (logout 시 access token 검증).

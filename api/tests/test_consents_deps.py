@@ -12,7 +12,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 
 import pytest
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.deps import require_basic_consents
 from app.core.exceptions import BasicConsentMissingError
@@ -26,7 +26,7 @@ ConsentFactory = Callable[..., Awaitable[Consent]]
 
 async def _call(user: User) -> User:
     """``require_basic_consents``를 직접 호출 — FastAPI Depends 우회 단위 테스트."""
-    session_maker: async_sessionmaker = app.state.session_maker
+    session_maker: async_sessionmaker[AsyncSession] = app.state.session_maker
     async with session_maker() as session:
         return await require_basic_consents(db=session, user=user)
 

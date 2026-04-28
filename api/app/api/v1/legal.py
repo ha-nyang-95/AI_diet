@@ -8,8 +8,9 @@
 
 응답:
 - 200 + ``LegalDocumentResponse`` (snake_case 양방향, Story 1.2 정합).
-- 잘못된 `lang` 값: 422 (FastAPI Literal 자동 검증).
-- 잘못된 `type` path: 404 (FastAPI Literal 자동 검증).
+- 잘못된 `lang` / `type` 값: ``RequestValidationError`` 발생 → ``main.py``의 글로벌
+  ``validation_exception_handler``가 RFC 7807 + status 400으로 매핑 (Story 1.2 P11
+  패턴 정합 — Pydantic 422 → 400 통일). 상세 위치는 응답 ``detail.errors[*].loc``.
 """
 
 from __future__ import annotations
