@@ -51,6 +51,9 @@ export default function OnboardingForm({ title, body, version }: OnboardingFormP
         signal: controller.signal,
       });
       if (response.ok) {
+        // RSC `getServerSideConsents` 캐시 무효화 — 누락 시 `/dashboard` 가 stale
+        // consents 로 다시 onboarding 으로 redirect 하는 loop 발생.
+        router.refresh();
         router.push("/dashboard");
         return;
       }

@@ -34,7 +34,13 @@ export default function TabsLayout() {
     >[0]['href'];
     return <Redirect href={target} />;
   }
-  if (!consentStatus.automated_decision_consent_complete) {
+  // Settings 의 자동화 의사결정 화면(`/settings/automated-decision`)은 본 가드를 우회.
+  // revoke 직후 `automated_decision_consent_complete=false` 가 되더라도 settings 화면에
+  // 머물며 *동의 다시 부여* 흐름을 진행해야 한다.
+  if (
+    !consentStatus.automated_decision_consent_complete &&
+    !pathname.startsWith('/settings/automated-decision')
+  ) {
     const next = encodeURIComponent(pathname || '/(tabs)');
     const target = `/(auth)/onboarding/automated-decision?next=${next}` as Parameters<
       typeof Redirect

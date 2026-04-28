@@ -339,13 +339,19 @@ async def revoke_automated_decision_consent(
 ) -> ConsentStatusResponse:
     """동의 철회 — ``automated_decision_revoked_at = now()`` set, ``_consent_at`` 보존.
 
-    row 없음 또는 ``automated_decision_consent_at IS NULL``(미동의 상태) →
+    row 없음 또는 ``automated_decision_consent_at IS NULL``(미동의) 또는 이미 철회된 상태
+    (``automated_decision_revoked_at IS NOT NULL``) →
     ``AutomatedDecisionConsentNotGrantedError`` (404). 이미 철회된 상태에서 재호출 시
-    *철회는 idempotent가 아닌* 명시 분기(사용자 의도 *철회*인데 *미동의 상태*는 모호).
+    *철회는 idempotent 가 아닌* 명시 분기 — 두 번째 DELETE 가 200 으로 통과하면 원본
+    철회 시각(PIPA audit) 을 새 ``now()`` 로 덮어쓴다.
     """
     result = await db.execute(select(Consent).where(Consent.user_id == user.id))
     row = result.scalar_one_or_none()
-    if row is None or row.automated_decision_consent_at is None:
+    if (
+        row is None
+        or row.automated_decision_consent_at is None
+        or row.automated_decision_revoked_at is not None
+    ):
         raise AutomatedDecisionConsentNotGrantedError("automated decision consent not granted")
 
     now = datetime.now(UTC)

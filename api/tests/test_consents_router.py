@@ -291,6 +291,38 @@ async def test_delete_automated_decision_404_when_consent_at_null(
 
 
 @pytest.mark.asyncio
+async def test_delete_automated_decision_404_when_already_revoked(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """이미 철회된 사용자가 DELETE 재호출 시 404 — 두 번째 호출이 200 으로 통과하면
+    원본 ``automated_decision_revoked_at`` 이 새 ``now()`` 로 덮어써져 PIPA audit 손상."""
+    user = await user_factory()
+    await consent_factory(user, automated_decision=True)
+    # 첫 번째 DELETE — 정상 철회.
+    first = await client.delete(
+        "/v1/users/me/consents/automated-decision", headers=auth_headers(user)
+    )
+    assert first.status_code == 200
+    original_revoked_at = first.json()["automated_decision_revoked_at"]
+    assert original_revoked_at is not None
+
+    # 두 번째 DELETE — 이미 철회된 상태이므로 404.
+    second = await client.delete(
+        "/v1/users/me/consents/automated-decision", headers=auth_headers(user)
+    )
+    assert second.status_code == 404
+    assert second.json()["code"] == "consent.automated_decision.not_granted"
+
+    # GET 으로 원본 revoked_at 가 보존되었는지 확인.
+    status_resp = await client.get(
+        "/v1/users/me/consents", headers=auth_headers(user)
+    )
+    assert status_resp.json()["automated_decision_revoked_at"] == original_revoked_at
+
+
+@pytest.mark.asyncio
 async def test_delete_automated_decision_requires_auth(client: AsyncClient) -> None:
     response = await client.delete("/v1/users/me/consents/automated-decision")
     assert response.status_code == 401

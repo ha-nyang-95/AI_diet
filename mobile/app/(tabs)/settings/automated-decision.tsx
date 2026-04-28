@@ -51,9 +51,14 @@ export default function SettingsAutomatedDecision() {
   // double-tap 차단 — Story 1.3 P10 패턴 정합.
   const inflightRef = useRef(false);
 
+  // Stack.Screen 은 conditional 분기 *밖* 에서도 일관되게 적용되어야 한다 — loading
+  // 분기에서 title 미설정이면 nav header 가 잠깐 깜빡이며 빈 제목을 노출.
+  const headerTitle = doc.data?.title ?? '자동화 의사결정 동의';
+
   if (doc.isLoading) {
     return (
       <View style={styles.center}>
+        <Stack.Screen options={{ title: headerTitle }} />
         <ActivityIndicator />
       </View>
     );
@@ -61,12 +66,19 @@ export default function SettingsAutomatedDecision() {
   if (doc.isError || !doc.data) {
     return (
       <View style={styles.center}>
+        <Stack.Screen options={{ title: headerTitle }} />
         <Text style={styles.error}>동의서를 불러올 수 없습니다.</Text>
       </View>
     );
   }
 
-  const granted = consentStatus?.automated_decision_consent_complete ?? false;
+  // 결합 boolean (`automated_decision_consent_complete = basic AND ad`) 은 layout 가드
+  // 용으로 설계됨 — settings 화면은 raw 필드로 자체 판정해, basic 이 SOT bump 로 일시
+  // 깨졌더라도 본 화면에서 *철회* 버튼을 정확히 표시한다.
+  const granted =
+    !!consentStatus?.automated_decision_consent_at &&
+    !consentStatus.automated_decision_revoked_at &&
+    consentStatus.automated_decision_version === doc.data.version;
   const consentAt = consentStatus?.automated_decision_consent_at;
   const revokedAt = consentStatus?.automated_decision_revoked_at;
   const isPending = grant.isPending || revoke.isPending;
@@ -84,26 +96,31 @@ export default function SettingsAutomatedDecision() {
     );
   };
 
+  const releaseInflight = () => {
+    inflightRef.current = false;
+  };
+
   const onRevoke = () => {
     if (inflightRef.current) return;
+    // Alert 가 modal 이라도 Android 뒤로가기 / 외부 영역 탭으로 dismiss 되어 onPress 가
+    // 발화되지 않을 수 있다 — 그 사이 두 번째 탭이 들어오면 Alert 가 중첩 누적되며 *철회*
+    // 가 두 번 발사된다. 가드는 Alert 오픈 시점에 set, Cancel·dismiss·onSettled 모두에서
+    // release.
+    inflightRef.current = true;
     Alert.alert(
       '동의 철회',
       '동의 철회 시 분석 기능 사용 불가 — 진행하시겠습니까?',
       [
-        { text: '취소', style: 'cancel' },
+        { text: '취소', style: 'cancel', onPress: releaseInflight },
         {
           text: '철회',
           style: 'destructive',
           onPress: () => {
-            inflightRef.current = true;
-            revoke.mutate(undefined, {
-              onSettled: () => {
-                inflightRef.current = false;
-              },
-            });
+            revoke.mutate(undefined, { onSettled: releaseInflight });
           },
         },
       ],
+      { onDismiss: releaseInflight },
     );
   };
 
@@ -115,7 +132,7 @@ export default function SettingsAutomatedDecision() {
 
   return (
     <ScrollView contentContainerStyle={styles.container}>
-      <Stack.Screen options={{ title: doc.data.title }} />
+      <Stack.Screen options={{ title: headerTitle }} />
       <Text style={styles.body}>{doc.data.body}</Text>
 
       <View style={styles.statusBlock}>
