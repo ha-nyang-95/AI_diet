@@ -1,8 +1,9 @@
-export default function Home() {
-  return (
-    <main className="flex min-h-screen flex-col items-center justify-center p-8">
-      <h1 className="text-3xl font-semibold tracking-tight">BalanceNote — Web</h1>
-      <p className="mt-2 text-sm text-zinc-500">Story 1.1 부트스트랩 placeholder</p>
-    </main>
-  );
+import { redirect } from "next/navigation";
+
+import { getServerSideUser } from "@/lib/auth";
+
+export default async function Home() {
+  // 인증 상태 따라 이분기 — middleware가 매칭하지 않는 / 진입점.
+  const user = await getServerSideUser();
+  redirect(user ? "/dashboard" : "/login");
 }

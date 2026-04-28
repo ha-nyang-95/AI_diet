@@ -13,8 +13,11 @@ from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+# 도메인 모델 등록 — `app.db` 패키지 import 사이드이펙트로 declarative 모델이 Base에 등록.
+import app.db  # noqa: F401  (declarative side-effect)
 from alembic import context
 from app.core.config import settings
+from app.db.base import Base
 
 config = context.config
 config.set_main_option("sqlalchemy.url", settings.database_url)
@@ -22,8 +25,7 @@ config.set_main_option("sqlalchemy.url", settings.database_url)
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# 본 스토리 시점: 도메인 모델 미정. 후속 스토리에서 Base.metadata 임포트로 교체.
-target_metadata = None
+target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:

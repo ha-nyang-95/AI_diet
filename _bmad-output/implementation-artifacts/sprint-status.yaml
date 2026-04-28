@@ -1,5 +1,5 @@
 # generated: 2026-04-27
-# last_updated: 2026-04-27 (Story 1.1 code review 완료 — 1-1 → done)
+# last_updated: 2026-04-28 (Story 1.3 컨텍스트 생성 — 1-3 → ready-for-dev)
 # project: AI_diet
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-27
-last_updated: 2026-04-27  # Story 1.1 → done
+last_updated: 2026-04-28  # Story 1.3 컨텍스트 생성 → ready-for-dev
 project: AI_diet
 project_key: NOKEY
 tracking_system: file-system
@@ -45,8 +45,8 @@ development_status:
   # Epic 1: 기반 인프라 + 인증 + 온보딩·동의
   epic-1: in-progress
   1-1-프로젝트-부트스트랩: done
-  1-2-google-oauth-로그인-jwt: backlog
-  1-3-약관-개인정보-동의: backlog
+  1-2-google-oauth-로그인-jwt: done
+  1-3-약관-개인정보-동의: ready-for-dev
   1-4-자동화-의사결정-동의: backlog
   1-5-건강-프로필-입력: backlog
   1-6-온보딩-튜토리얼: backlog

@@ -97,3 +97,5 @@ logs/
 
 # Note: _bmad-output/ is INTENTIONALLY tracked (BMad planning artifacts).
 # Do NOT add it here.
+# Exception: _bmad-output/temp/ — 워킹 아티팩트(리뷰 diff, 스크린샷 등)는 커밋 X.
+_bmad-output/temp/
