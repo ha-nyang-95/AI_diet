@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import (
     AccessTokenInvalidError,
     AdminRoleRequiredError,
+    AutomatedDecisionConsentMissingError,
     BasicConsentMissingError,
 )
 from app.core.security import (
@@ -148,4 +149,39 @@ async def require_basic_consents(
     row = result.scalar_one_or_none()
     if not _has_all_basic_consents(row):
         raise BasicConsentMissingError("basic consents required")
+    return user
+
+
+def has_automated_decision_consent(row: Consent | None) -> bool:
+    """Story 1.4 — ``automated_decision_consent_at`` NOT NULL + ``_revoked_at`` IS NULL +
+    ``_version`` 일치 3 조건. *기본 동의 선행*은 검증 항목 X(AC4 결정).
+
+    공개 헬퍼 — ``consents.py:_build_status`` 가 응답 모델 결합 boolean 계산에 재사용.
+    """
+    if row is None:
+        return False
+    return (
+        row.automated_decision_consent_at is not None
+        and row.automated_decision_revoked_at is None
+        and row.automated_decision_version == CURRENT_VERSIONS["automated-decision"]
+    )
+
+
+async def require_automated_decision_consent(
+    db: DbSession,
+    user: Annotated[User, Depends(current_user)],
+) -> User:
+    """PIPA 2026.03.15 자동화 의사결정 동의 통과 확인 (Story 1.4).
+
+    Epic 3 분석 라우터(``/v1/analysis/stream`` 등)에서 명시 wire한다. 본 게이트는
+    ``require_basic_consents``와 *직교* — 분석 라우터는 두 게이트 모두 wire 권장
+    (LLM 비용 0 보호 + 핵심 데이터 정합 검증). 미동의 시 LangGraph/LLM 호출 *전*
+    ``AutomatedDecisionConsentMissingError`` raise → 글로벌 핸들러가 RFC 7807 403.
+
+    본 스토리는 라우터에 wire하지 않음 — Epic 3 Story 3.x가 명시 wire.
+    """
+    result = await db.execute(select(Consent).where(Consent.user_id == user.id))
+    row = result.scalar_one_or_none()
+    if not has_automated_decision_consent(row):
+        raise AutomatedDecisionConsentMissingError("automated decision consent required")
     return user

@@ -49,6 +49,17 @@
 - **W14 — `require_basic_consents` 라우터 wire 미적용** — `app/api/deps.py`에 정의되어 있으나 어떤 라우터에도 Depends 등록 안 됨. 사유: spec AC11 명시 — 본 스토리는 *함수 정의 + 단위 테스트*만, Story 1.5(`POST /v1/users/me/profile`) / Story 2.1+(`/v1/meals/*`)이 명시 적용.
 - **W15 — CSRF 방어 명시 검증 미수행** — Web POST `/v1/users/me/consents`가 cookie 인증 + body POST. 사유: Story 1.2 `Spec deviation: SameSite=Lax` 정합 — Lax 쿠키가 cross-site form POST 차단. 외부 보안 audit 시 재검토.
 
+## Deferred from: code review of 1-4-자동화-의사결정-동의 (2026-04-28)
+
+- **W0 (D1 결정) — 백엔드 `POST /automated-decision`에 `require_basic_consents` 게이트 미적용** [`api/app/api/v1/consents.py:285-321`] — 스펙 AC3 가 INSERT 분기 basic 4 컬럼 NULL 허용을 *명시*("이론상 불가 — 본 화면 진입 가드가 basic 4종 통과 강제"), 직접 API 호출 시 `basic_consents_complete=false` + AD granted 인 일관성 깨진 row 생성 가능 + Anti-pattern catalog (line 535) 모순. 사유: 본 스토리는 데모 sales tool 범위, 프론트엔드 가드로 충분; 직접 API 호출 보호는 운영 hardening 영역 — Story 8(운영 hardening) 또는 외부 보안 audit 시 재검토. 도입 시 새 에러 클래스 `BasicConsentsMissingError(409)` + AC3 수정 + Mobile `extractSubmitErrorMessage` 처리 (P8 와 함께) 일괄.
+- **W1 — `request.client.host` 원시 IP** [`api/app/api/v1/consents.py:1061`] — proxy/LB 뒤에서 PIPA audit 가 LB IP 로 통일됨. 사유: Story 1.2 W2 / Story 1.3 W10 정합 — 운영 토폴로지(Railway/Cloud Run/직접 LB) 결정 후 trusted proxy 화이트리스트와 함께 일괄 도입 (Story 8 운영 hardening).
+- **W2 — Migration downgrade `op.drop_column` 이 PIPA audit 영구 파괴** [`api/alembic/versions/0004_consents_automated_decision.py:806-810`] — 동의/철회 timestamp + version 손실. 사유: alembic 표준 패턴 (downgrade 가 destructive 인 것은 일반적). Story 8 운영 SOP 에 "PIPA 보존 의무 관련 동의 마이그레이션 downgrade 금지" 명시. NotImplementedError 가드는 운영 SOP 결정 후 도입.
+- **W3 — `datetime.now(UTC)` (Python) vs `func.now()` (Postgres) 타임스탬프 drift** [`api/app/api/v1/consents.py:1056-1083, 1109-1113`] — 같은 row 내 `automated_decision_consent_at` (Python) 과 `updated_at` (DB) 에 ms 수준 시계 차이 발생 가능. 사유: Story 1.3 carry-over 패턴 — DB-only(`func.now()`) 또는 Python-only(`datetime.now(UTC)`) 통일은 Story 8 일괄 정리.
+- **W4 — `conftest.consent_factory` 가 항상 `CURRENT_VERSIONS["automated-decision"]` 평가 — leaky coupling** [`api/tests/conftest.py:1448`] — `ad_version = automated_decision_version or version or CURRENT_VERSIONS["automated-decision"]`. 향후 SOT 키 rename/제거 시 Story 1.3 호환 테스트 import 만으로 KeyError. 사유: 테스트 인프라 cleanup, 다음 SOT 변경 시 일괄.
+- **W5 — `legal_documents` dict missing key 시 raw `KeyError` → 500** [`api/app/domain/legal_documents.py`] — `LEGAL_DOCUMENTS[(doc_type, lang)]` 가 미존재 키일 때 raw KeyError 가 500 으로 surface, fastapi 의 404 매핑 미적용. 사유: Story 1.3 패턴 정합. Story 8 cross-cutting cleanup 에서 KeyError → `LegalDocumentNotFoundError` 매핑 일괄.
+- **W6 — OpenAPI client kebab-case migration note 누락** — `automated-decision` (hyphen) 으로 path/Literal 통일했으나 캐시된 underscore 버전 클라이언트는 422 만 반환. 사유: 빌드 산출물 — README "OpenAPI 클라이언트 재생성 SOP" 단락에 kebab-case 마이그레이션 주의사항 추가 (Story 8.3 인수인계 SOP 정합).
+- **W7 — `scalar_one()` 가 concurrent CASCADE delete 시 uncaught `NoResultFound` → 500** [`api/app/api/v1/consents.py:1086-1090`] — UPSERT 직후 refresh select 사이에 user 계정 삭제 시 NoResultFound 가 raw 500 으로 노출. 사유: 일반 SQLAlchemy 패턴 — Story 1.3 W5 (typed 5xx 매핑) 와 함께 Story 8 운영 hardening 에서 일괄 처리. 발생 빈도 극히 낮음(시간차 ms 수준 race).
+
 ## Spec deviation: logout endpoint (2026-04-28, PR #2 review followup)
 
 - **AC5 spec**: 모바일은 `Authorization: Bearer <access>` + body `{refresh_token}` 두 필드 동시 전송 (logout 시 access token 검증).

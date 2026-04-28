@@ -96,7 +96,18 @@ Story 1.2부터 Google 로그인을 사용하려면 Google Cloud Console에서 O
 | `auth.google.email_unverified` | 401 | Google 이메일 미인증 |
 | `consent.basic.missing` | 403 | 4종 기본 동의 미통과 — `(auth)/onboarding/disclaimer` 필요 |
 | `consent.version_mismatch` | 409 | 클라이언트가 stale 동의 화면 제출 — 최신 텍스트 fetch 후 재동의 |
+| `consent.automated_decision.missing` | 403 | PIPA 2026.03.15 자동화 의사결정 동의 미부여 — 분석 라우터 차단(LLM 비용 0 보호) |
+| `consent.automated_decision.not_granted` | 404 | `DELETE /automated-decision`을 미동의 row에서 호출 — GET으로 상태 재확인 |
+| `consent.automated_decision.version_mismatch` | 409 | 자동화 의사결정 동의서 갱신됨 — `X-Consent-Latest-Version` 헤더에 SOT 버전 첨부 |
 | `validation.error` | 400 | Pydantic validation (`errors[]` 배열에 필드별 사유) |
+
+**409 응답 헤더 — `X-Consent-Latest-Version`** (Story 1.4)
+
+- 두 version mismatch(`consent.version_mismatch` / `consent.automated_decision.version_mismatch`)
+  응답에 `X-Consent-Latest-Version: <doc_type>=<version>` 헤더가 첨부됩니다.
+- 클라이언트가 추가 `GET /v1/legal/{type}` round-trip 없이 latest version을 즉시 인식할 수 있도록
+  돕는 *옵션 hint* — 1차 신호는 body의 `code`/`detail`. 첫 mismatch entry만 인코딩하므로
+  필요 시 클라이언트가 GET으로 fresh 텍스트를 fetch하면 다른 항목도 함께 갱신됩니다.
 
 `401 Unauthorized` 점검 순서:
 
@@ -122,6 +133,29 @@ Story 1.2부터 Google 로그인을 사용하려면 Google Cloud Console에서 O
   - Web: `/legal/{disclaimer,terms,privacy}` (한국어), `/en/legal/...` (영문) — 인증 무관 public.
 - **버전 mismatch 처리**: 클라이언트가 `*_version`을 backend SOT 버전과 다르게 보내면 409.
   사용자가 stale 화면을 제출한 케이스 — 모바일/Web이 최신 텍스트를 다시 fetch한 뒤 재동의.
+
+### PIPA 자동화 의사결정 SOP (Story 1.4)
+
+- **별 SOT 위치**: `api/app/domain/legal_documents.py`의 `("automated-decision", "ko"|"en")` entry.
+  `disclaimer/terms/privacy`와 *분리된 5섹션 텍스트*(처리 항목 / 이용 목적 / 보관 기간 / 제3자 제공
+  / LLM 외부 처리). PIPA 2026.03.15 자동화된 결정 동의 의무에 정합하며, 입법예고(R9)는 분기 1회
+  추적 후 텍스트·version을 갱신합니다 — `https://www.moleg.go.kr/lawinfo/makingInfo.mo?lawSeq=81114`.
+- **3 게이트 분리** (절대 통합 금지):
+  1. `current_user` (Story 1.2) — JWT 검증.
+  2. `require_basic_consents` (Story 1.3) — 4종 기본 동의 + SOT 버전 일치.
+  3. `require_automated_decision_consent` (Story 1.4) — `automated_decision_consent_at` NOT NULL +
+     `_revoked_at` IS NULL + `_version` 일치. **Epic 3 분석 라우터(`/v1/analysis/stream` 등)에서만
+     wire** — `/v1/users/me`/`/v1/users/me/profile`처럼 LLM 호출 없는 endpoint에는 wire 금지.
+- **철회 endpoint**: `DELETE /v1/users/me/consents/automated-decision` — `revoked_at = now()` set,
+  `consent_at`은 보존(과거 동의 사실 감사 흔적). 미동의 상태에서 호출 시 404
+  (`consent.automated_decision.not_granted`). 사용자 의도 *철회*인데 *미동의 상태*는 모호 →
+  명시 분기로 클라이언트가 GET 후 재분기.
+- **재동의 케이스**: 철회 후 `POST /v1/users/me/consents/automated-decision`가 `revoked_at = NULL`로
+  reset, `consent_at`을 새 시각으로 갱신. UPSERT(`pg_insert(...).on_conflict_do_update`)로 race-free.
+- **재열람 위치**:
+  - Mobile: `(tabs)/settings/automated-decision` — 풀텍스트 + 부여/철회 버튼(분기) + Confirm 다이얼로그.
+  - Web: `/legal/automated-decision` (한국어), `/en/legal/automated-decision` (영문) — 인증 무관 public.
+    Web settings 측 *철회·재부여 UI*는 Story 5.1에서 추가 예정(현 Web에 settings 그룹 부재).
 
 ### 8시간 체크리스트
 

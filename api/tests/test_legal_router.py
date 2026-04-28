@@ -70,3 +70,51 @@ async def test_legal_ignores_invalid_cookie(client: AsyncClient) -> None:
     )
     assert response.status_code == 200
     assert response.json()["type"] == "privacy"
+
+
+# ---------------------------------------------------------------------------
+# Story 1.4 — automated-decision 5섹션 SOT 회귀 (AC #6, #15)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_legal_automated_decision_ko_returns_5_sections(
+    client: AsyncClient,
+) -> None:
+    response = await client.get("/v1/legal/automated-decision", params={"lang": "ko"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["type"] == "automated-decision"
+    assert body["lang"] == "ko"
+    assert body["version"] == CURRENT_VERSIONS["automated-decision"]
+    # 5섹션 헤더 substring 단언.
+    text = body["body"]
+    assert "## 1. 처리 항목" in text
+    assert "## 2. 이용 목적" in text
+    assert "## 3. 보관 기간" in text
+    assert "## 4. 제3자 제공" in text
+    assert "## 5. LLM 외부 처리" in text
+
+
+@pytest.mark.asyncio
+async def test_legal_automated_decision_en_returns_5_sections(
+    client: AsyncClient,
+) -> None:
+    response = await client.get("/v1/legal/automated-decision", params={"lang": "en"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["lang"] == "en"
+    text = body["body"]
+    assert "## 1. Items Processed" in text
+    assert "## 5. LLM External Processing" in text
+
+
+@pytest.mark.asyncio
+async def test_legal_automated_decision_ignores_cookie(client: AsyncClient) -> None:
+    """본 신규 type도 cookie 동봉 시 동일 200 — public endpoint 회귀."""
+    response = await client.get(
+        "/v1/legal/automated-decision",
+        params={"lang": "ko"},
+        cookies={"bn_access": "bogus"},
+    )
+    assert response.status_code == 200

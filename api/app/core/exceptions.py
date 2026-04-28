@@ -1,9 +1,14 @@
-"""RFC 7807 Problem Details + 도메인 예외 계층 (Story 1.2).
+"""RFC 7807 Problem Details + 도메인 예외 계층 (Story 1.2 / 1.3 / 1.4).
 
 전체 횡단 표준:
 - 모든 에러 응답 media_type = `application/problem+json`.
-- `code` 필드는 카탈로그화 — 본 스토리에서 `auth.*` 8건 정의.
+- `code` 필드는 카탈로그화 — Story 1.2 `auth.*`, Story 1.3 `consent.basic.*` /
+  `consent.version_mismatch`, Story 1.4 `consent.automated_decision.*` 3건.
 - 401 응답에 `WWW-Authenticate: Bearer ...` 헤더 추가는 main.py 핸들러가 담당.
+- 409 version mismatch 예외(``ConsentVersionMismatchError`` /
+  ``AutomatedDecisionConsentVersionMismatchError``)는 ``latest_versions``
+  instance attribute 보유 → main.py 핸들러가 ``X-Consent-Latest-Version`` 헤더
+  첨부(Story 1.4 W13 흡수). 헤더 인코딩은 ``encode_latest_version_header``.
 """
 
 from __future__ import annotations
@@ -14,6 +19,21 @@ from pydantic import BaseModel, ConfigDict
 
 PROBLEM_JSON_MEDIA_TYPE: Final[str] = "application/problem+json"
 DEFAULT_PROBLEM_TYPE: Final[str] = "about:blank"
+
+# Story 1.4 — 409 version mismatch 응답에 첨부되는 헤더 이름. 클라이언트는 본 헤더를
+# *옵션 hint*로 사용 — body의 ``code``/``detail``이 1차 신호. RFC 9110 §5.6.1
+# list-based 헤더 패턴(다중 entry는 ``; ``로 구분). 본 스토리는 첫 mismatch entry만
+# 인코딩(UX 노이즈 회피 + 클라이언트 단순성).
+X_CONSENT_LATEST_VERSION_HEADER: Final[str] = "X-Consent-Latest-Version"
+
+
+def encode_latest_version_header(latest_versions: dict[str, str]) -> str:
+    """`<doc_type>=<version>` 단일/다중 entry 인코딩.
+
+    다중 entry는 정렬 후 ``; ``로 구분(결정성 + RFC 9110 §5.6.1.2 list-based
+    헤더 안전 패턴 정합). 빈 dict는 빈 문자열 — 호출 측이 이 상황을 회피해야 한다.
+    """
+    return "; ".join(f"{k}={v}" for k, v in sorted(latest_versions.items()))
 
 
 class ProblemDetail(BaseModel):
@@ -134,3 +154,50 @@ class ConsentVersionMismatchError(ConsentError):
     status: ClassVar[int] = 409
     code: ClassVar[str] = "consent.version_mismatch"
     title: ClassVar[str] = "Consent version mismatch"
+
+    def __init__(
+        self,
+        detail: str | None = None,
+        *,
+        latest_versions: dict[str, str] | None = None,
+    ) -> None:
+        super().__init__(detail)
+        # Story 1.4 W13 — main.py 핸들러가 ``X-Consent-Latest-Version`` 헤더를
+        # 첨부할 때 참조. 빈 dict면 헤더 첨부 생략.
+        self.latest_versions: dict[str, str] = latest_versions or {}
+
+
+# --- Automated Decision Consent 계층 (Story 1.4) ---
+
+
+class AutomatedDecisionConsentMissingError(ConsentError):
+    """PIPA 2026.03.15 자동화 의사결정 동의 미부여 — 분석 라우터 차단(LLM 비용 0 보호)."""
+
+    status: ClassVar[int] = 403
+    code: ClassVar[str] = "consent.automated_decision.missing"
+    title: ClassVar[str] = "Automated decision consent required"
+
+
+class AutomatedDecisionConsentNotGrantedError(ConsentError):
+    """``DELETE /automated-decision`` 호출 시 동의 row가 없거나 미동의 상태."""
+
+    status: ClassVar[int] = 404
+    code: ClassVar[str] = "consent.automated_decision.not_granted"
+    title: ClassVar[str] = "Automated decision consent not granted"
+
+
+class AutomatedDecisionConsentVersionMismatchError(ConsentError):
+    """클라이언트가 보낸 ``automated_decision_version``이 SOT와 불일치."""
+
+    status: ClassVar[int] = 409
+    code: ClassVar[str] = "consent.automated_decision.version_mismatch"
+    title: ClassVar[str] = "Automated decision consent version mismatch"
+
+    def __init__(
+        self,
+        detail: str | None = None,
+        *,
+        latest_versions: dict[str, str] | None = None,
+    ) -> None:
+        super().__init__(detail)
+        self.latest_versions: dict[str, str] = latest_versions or {}

@@ -1,10 +1,14 @@
-"""법적 문서 SOT — 디스클레이머 / 약관 / 개인정보 처리방침 (한·영).
+"""법적 문서 SOT — 디스클레이머 / 약관 / 개인정보 처리방침 / 자동화 의사결정 (한·영).
 
 텍스트는 모듈 const로 임베드 — DB row 또는 외부 파일 X (1인 8주 MVP 정합).
 변경 시: (a) ``LEGAL_DOCUMENTS[(type, lang)].body`` 갱신 → (b) ``CURRENT_VERSIONS``
 의 version 문자열 bump → (c) ``updated_at`` 갱신. PR diff로 변경 가시성 확보.
 
 Public endpoint(``GET /v1/legal/{type}``)에서 노출 — 인증 무관.
+
+Story 1.4가 ``automated-decision`` 타입 추가 — PIPA 2026.03.15 자동화 의사결정 동의
+5섹션 SOT(처리 항목·이용 목적·보관 기간·제3자 제공·LLM 외부 처리). 입법예고
+(R9)는 분기 1회 추적 후 텍스트·version 갱신.
 """
 
 from __future__ import annotations
@@ -13,7 +17,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
 
-LegalDocType = Literal["disclaimer", "terms", "privacy"]
+# Literal 값은 hyphen 통일 — URL/SDK method/SOT dict 키 모두 동일(Story 1.4 AC13).
+LegalDocType = Literal["disclaimer", "terms", "privacy", "automated-decision"]
 LegalLang = Literal["ko", "en"]
 
 
@@ -163,6 +168,54 @@ _PRIVACY_EN = """This Privacy Policy describes how BalanceNote (the "Company") c
 This is a courtesy translation; the Korean original prevails."""
 
 
+# --- 자동화 의사결정 동의서 (Story 1.4, PIPA 2026.03.15) ----------------------
+#
+# 5섹션 명세: 처리 항목 / 이용 목적 / 보관 기간 / 제3자 제공 / LLM 외부 처리.
+# 한국어 본문은 PRD §C2 + epics.md Story 1.4 AC + research 2.5(법제처 입법예고)
+# 결합. 영문은 1:1 번역 + 1줄 번역 디스클레이머. 입법예고는 분기 1회 추적
+# (R9 SOP) — 텍스트·version은 본 시점 SOT, 변경 시 ``_VERSION_AUTOMATED_DECISION``
+# 별도 const로 분기 가능.
+
+_AUTOMATED_DECISION_KO = """본 동의서는 BalanceNote(이하 "회사")가 회원의 식단·건강 데이터를 LLM 기반 자동화 처리로 분석하여 개인화된 영양·식단 피드백을 산출하는 의사결정에 대한 별도 동의를 규정합니다. 본 동의는 「개인정보 보호법」(이하 "PIPA") 제22조의2(2026.03.15 시행)에 따른 자동화된 결정에 대한 정보주체의 동의 의무에 정합합니다. 입법예고 추적: https://www.moleg.go.kr/lawinfo/makingInfo.mo?lawSeq=81114
+
+## 1. 처리 항목
+체중, 신장, 알레르기 정보, 식사 기록(텍스트·사진 OCR 결과), 건강 목표(체중 감량/유지/증량 등). 본 항목은 LLM 호출 직전 NFR-O2 마스킹 processor가 PII(이메일 주소·체중 수치·식단 raw_text·알레르기 식별자)를 송신 전 마스킹 처리합니다.
+
+## 2. 이용 목적
+LangGraph 6노드 + Self-RAG 파이프라인을 통한 자동화된 영양·식단 분석, ``fit_score`` 적합도 산출, 인용 근거형 피드백 메시지 생성. 본 자동화 처리의 결과는 회원의 의학적 의사결정을 대체하지 않으며, 디스클레이머에 명시된 한계가 모두 적용됩니다.
+
+## 3. 보관 기간
+분석 결과(``meal_analyses`` 테이블) 및 LangSmith 트레이스는 회원 탈퇴 요청 시 즉시 파기됩니다. 동의 시점 및 철회 시점 기록은 PIPA 외 관련법(예: 전자상거래법)이 보존을 요구하는 기간 동안 격리 보관 후 파기됩니다.
+
+## 4. 제3자 제공 및 국외 이전
+제3자 제공: 없음.
+국외 이전: 본 자동화 처리는 OpenAI(미국, GPT-4o-mini 계열)와 Anthropic(미국, Claude 계열) API에 마스킹된 데이터를 송신하며, 분석 트레이스는 LangSmith(미국)에 저장됩니다. 본 이전은 자동화된 영양 분석 기능 제공에 필수적입니다.
+
+## 5. LLM 외부 처리
+회사는 ``adapters/openai.py`` 및 ``adapters/anthropic.py`` 모듈을 통해 위 LLM API를 호출합니다. 송신 직전 ``mask_processor``가 PII를 마스킹하며, ``LANGCHAIN_TRACING_V2`` 환경변수가 활성화된 경우 마스킹된 trace가 LangSmith에 송신됩니다. 회원은 본 자동화 처리에 동의하지 않을 권리가 있으며, 미동의 또는 동의 철회 시 영양·식단 분석 기능이 비활성화됩니다(다른 기능에는 영향 없음). 동의 철회는 설정 화면에서 언제든 수행할 수 있습니다."""
+
+
+_AUTOMATED_DECISION_EN = """This consent governs separate authorization for BalanceNote (the "Company") to analyze a Member's meal and health data through LLM-based automated processing in order to produce personalized nutrition and dietary feedback. This consent aligns with Article 22-2 (effective 2026.03.15) of the Personal Information Protection Act ("PIPA"), which requires data-subject consent for automated decisions. Legislative-notice tracking: https://www.moleg.go.kr/lawinfo/makingInfo.mo?lawSeq=81114
+
+## 1. Items Processed
+Weight, height, allergy information, meal records (text and photo-OCR output), and health goals (e.g., weight loss/maintenance/gain). Immediately before each LLM call, the NFR-O2 masking processor masks PII (email address, weight values, raw meal text, allergen identifiers) prior to transmission.
+
+## 2. Purposes of Use
+Automated nutrition and dietary analysis through a LangGraph 6-node + Self-RAG pipeline, computation of the ``fit_score`` suitability metric, and generation of citation-backed feedback messages. The output of this automated processing does not substitute for a Member's medical decisions, and all limitations stated in the Disclaimer apply.
+
+## 3. Retention Period
+Analysis output (``meal_analyses`` table) and LangSmith traces are destroyed promptly upon a Member's withdrawal request. Records of consent and withdrawal timestamps are retained in isolation for the period required by laws other than PIPA (e.g., e-commerce statutes), then destroyed.
+
+## 4. Third-Party Provision and International Transfers
+Third-party provision: none.
+International transfers: This automated processing transmits masked data to the OpenAI (United States, GPT-4o-mini family) and Anthropic (United States, Claude family) APIs, and analysis traces are stored with LangSmith (United States). These transfers are essential to providing the automated nutrition-analysis functionality.
+
+## 5. LLM External Processing
+The Company invokes the above LLM APIs through the ``adapters/openai.py`` and ``adapters/anthropic.py`` modules. The ``mask_processor`` masks PII immediately before transmission, and when the ``LANGCHAIN_TRACING_V2`` environment variable is enabled, masked traces are sent to LangSmith. Members have the right to decline this automated processing; if consent is not granted or is later withdrawn, the nutrition and dietary analysis features are disabled (other features are unaffected). Withdrawal can be performed at any time from the settings screen.
+
+This is a courtesy translation; the Korean original prevails."""
+
+
 # --- SOT 매핑 ---------------------------------------------------------------
 
 
@@ -220,6 +273,23 @@ LEGAL_DOCUMENTS: dict[tuple[LegalDocType, LegalLang], LegalDocument] = {
         body=_PRIVACY_EN,
         updated_at=_UPDATED_AT,
     ),
+    # Story 1.4 — hyphen 키 통일(Literal/URL/SOT 키 1:1).
+    ("automated-decision", "ko"): LegalDocument(
+        type="automated-decision",
+        lang="ko",
+        version=_VERSION_KO,
+        title="자동화 의사결정 동의서",
+        body=_AUTOMATED_DECISION_KO,
+        updated_at=_UPDATED_AT,
+    ),
+    ("automated-decision", "en"): LegalDocument(
+        type="automated-decision",
+        lang="en",
+        version=_VERSION_EN,
+        title="Automated Decision Consent",
+        body=_AUTOMATED_DECISION_EN,
+        updated_at=_UPDATED_AT,
+    ),
 }
 
 
@@ -237,4 +307,7 @@ CURRENT_VERSIONS: dict[str, str] = {
     "terms": _VERSION_KO,
     "privacy": _VERSION_KO,
     "sensitive_personal_info": _VERSION_KO,
+    # Story 1.4 — hyphen 키 통일(Literal/URL과 1:1). 입법예고(R9) 추적 후 분기 1회
+    # 갱신 시 본 키만 독립 bump 가능(``_VERSION_AUTOMATED_DECISION_KO`` 별도 const).
+    "automated-decision": _VERSION_KO,
 }

@@ -11,6 +11,9 @@
 - 잘못된 `lang` / `type` 값: ``RequestValidationError`` 발생 → ``main.py``의 글로벌
   ``validation_exception_handler``가 RFC 7807 + status 400으로 매핑 (Story 1.2 P11
   패턴 정합 — Pydantic 422 → 400 통일). 상세 위치는 응답 ``detail.errors[*].loc``.
+
+Story 1.4가 ``automated-decision`` 타입 추가 — PIPA 2026.03.15 자동화 의사결정 동의
+5섹션 SOT(``app/domain/legal_documents.py``).
 """
 
 from __future__ import annotations
@@ -37,7 +40,7 @@ class LegalDocumentResponse(BaseModel):
 
 @router.get("/{doc_type}")
 async def get_legal_document(
-    doc_type: Literal["disclaimer", "terms", "privacy"],
+    doc_type: Literal["disclaimer", "terms", "privacy", "automated-decision"],
     lang: Literal["ko", "en"] = "ko",
 ) -> LegalDocumentResponse:
     """SOT 매핑(`LEGAL_DOCUMENTS`)에서 직접 조회 — DB 호출 없음."""
