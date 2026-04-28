@@ -1,15 +1,27 @@
+import { router } from 'expo-router';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { useAuth } from '@/lib/auth';
 
+/**
+ * (tabs) 홈 — Story 2.1에서 식단 입력 화면으로 채워질 예정.
+ * 로그아웃 / 디스클레이머 / 약관 / 개인정보 진입은 (tabs)/settings/index.tsx에서 일원화
+ * (Story 1.3 AC13).
+ */
 export default function TabsHome() {
-  const { user, signOut } = useAuth();
+  const { user } = useAuth();
   return (
     <View style={styles.container}>
       <Text style={styles.title}>안녕하세요, {user?.display_name ?? user?.email}</Text>
       <Text style={styles.subtitle}>(Story 2.1에서 채워짐 — 식단 입력 화면)</Text>
-      <Pressable style={styles.button} onPress={signOut}>
-        <Text style={styles.buttonText}>로그아웃</Text>
+      <Pressable
+        style={styles.button}
+        onPress={() => {
+          const target = '/(tabs)/settings' as Parameters<typeof router.push>[0];
+          router.push(target);
+        }}
+      >
+        <Text style={styles.buttonText}>설정</Text>
       </Pressable>
     </View>
   );

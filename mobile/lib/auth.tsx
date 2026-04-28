@@ -26,12 +26,26 @@ export interface AuthUser {
   role: 'user' | 'admin';
 }
 
+export interface ConsentStatus {
+  disclaimer_acknowledged_at: string | null;
+  terms_consent_at: string | null;
+  privacy_consent_at: string | null;
+  sensitive_personal_info_consent_at: string | null;
+  disclaimer_version: string | null;
+  terms_version: string | null;
+  privacy_version: string | null;
+  sensitive_personal_info_version: string | null;
+  basic_consents_complete: boolean;
+}
+
 export interface AuthContextValue {
   user: AuthUser | null;
+  consentStatus: ConsentStatus | null;
   isAuthed: boolean;
   isReady: boolean;
   signIn: (payload: { access: string; refresh: string; user: AuthUser }) => Promise<void>;
   signOut: () => Promise<void>;
+  setConsentStatus: (status: ConsentStatus) => void;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -140,11 +154,15 @@ export async function authFetch(input: string, init?: RequestInit): Promise<Resp
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
+  const [consentStatus, setConsentStatusState] = useState<ConsentStatus | null>(null);
   const [isReady, setIsReady] = useState(false);
 
   useEffect(() => {
     // signOut/refresh 실패로 세션 클리어 신호 → user state 동기화(stale fetch 결과 부활 방지).
-    return subscribeSessionCleared(() => setUser(null));
+    return subscribeSessionCleared(() => {
+      setUser(null);
+      setConsentStatusState(null);
+    });
   }, []);
 
   useEffect(() => {
@@ -156,11 +174,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return;
       }
       try {
-        const response = await authFetch('/v1/users/me');
+        const meResponse = await authFetch('/v1/users/me');
         if (isCancelled) return;
-        if (response.ok) {
-          const body = (await response.json()) as AuthUser;
-          if (!isCancelled) setUser(body);
+        if (!meResponse.ok) return;
+        const body = (await meResponse.json()) as AuthUser;
+        if (isCancelled) return;
+        setUser(body);
+        // Story 1.3 AC2 — bootstrap 시 동의 상태도 1회 fetch.
+        const consentResp = await authFetch('/v1/users/me/consents');
+        if (isCancelled) return;
+        if (consentResp.ok) {
+          const consentBody = (await consentResp.json()) as ConsentStatus;
+          if (!isCancelled) setConsentStatusState(consentBody);
         }
       } finally {
         if (!isCancelled) setIsReady(true);
@@ -174,11 +199,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const value = useMemo<AuthContextValue>(
     () => ({
       user,
+      consentStatus,
       isAuthed: user !== null,
       isReady,
       async signIn(payload) {
         await Promise.all([setAccessToken(payload.access), setRefreshToken(payload.refresh)]);
         setUser(payload.user);
+        // 새 로그인 — 이전 세션의 동의 상태 클리어. onboarding 가드가 fetch 후 갱신.
+        setConsentStatusState(null);
       },
       async signOut() {
         const [access, refresh] = await Promise.all([getAccessToken(), getRefreshToken()]);
@@ -198,10 +226,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
         await clearAuth();
         setUser(null);
+        setConsentStatusState(null);
         router.replace('/(auth)/login');
       },
+      setConsentStatus(status) {
+        setConsentStatusState(status);
+      },
     }),
-    [user, isReady],
+    [user, consentStatus, isReady],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

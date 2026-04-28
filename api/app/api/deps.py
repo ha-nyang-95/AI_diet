@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import (
     AccessTokenInvalidError,
     AdminRoleRequiredError,
+    BasicConsentMissingError,
 )
 from app.core.security import (
     AdminTokenClaims,
@@ -27,7 +28,9 @@ from app.core.security import (
     verify_admin_token,
     verify_user_token,
 )
+from app.db.models.consent import Consent
 from app.db.models.user import User
+from app.domain.legal_documents import CURRENT_VERSIONS
 
 
 def _extract_token(
@@ -110,4 +113,39 @@ async def current_admin(
         raise AccessTokenInvalidError("admin user not found or deleted")
     if user.role != "admin":
         raise AdminRoleRequiredError("admin role required")
+    return user
+
+
+def _has_all_basic_consents(row: Consent | None) -> bool:
+    """4 timestamp NOT NULL + 4 version이 ``CURRENT_VERSIONS``와 일치인지 확인."""
+    if row is None:
+        return False
+    return (
+        row.disclaimer_acknowledged_at is not None
+        and row.terms_consent_at is not None
+        and row.privacy_consent_at is not None
+        and row.sensitive_personal_info_consent_at is not None
+        and row.disclaimer_version == CURRENT_VERSIONS["disclaimer"]
+        and row.terms_version == CURRENT_VERSIONS["terms"]
+        and row.privacy_version == CURRENT_VERSIONS["privacy"]
+        and row.sensitive_personal_info_version == CURRENT_VERSIONS["sensitive_personal_info"]
+    )
+
+
+async def require_basic_consents(
+    db: DbSession,
+    user: Annotated[User, Depends(current_user)],
+) -> User:
+    """4종 기본 동의(disclaimer/terms/privacy/sensitive_personal_info) 통과 + 현재 SOT
+    버전 일치 확인.
+
+    인증 게이트(``current_user``)와 분리된 동의 게이트.
+    *핵심 사용자 데이터 작성·조회* 라우트(Story 1.5 ``POST /v1/users/me/profile``,
+    Story 2.1+ ``/v1/meals/*``)에서 명시 wire한다. ``/v1/users/me`` 같은 자기 정보
+    조회 endpoint에 적용 금지(미동의 사용자도 조회 가능해야 UX 정합).
+    """
+    result = await db.execute(select(Consent).where(Consent.user_id == user.id))
+    row = result.scalar_one_or_none()
+    if not _has_all_basic_consents(row):
+        raise BasicConsentMissingError("basic consents required")
     return user

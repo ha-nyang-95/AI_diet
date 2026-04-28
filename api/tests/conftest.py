@@ -30,7 +30,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from alembic import command as alembic_command
 from app.core.config import settings
 from app.core.security import create_user_token
+from app.db.models.consent import Consent
 from app.db.models.user import User
+from app.domain.legal_documents import CURRENT_VERSIONS
 from app.main import app
 
 
@@ -83,7 +85,11 @@ async def _truncate_user_tables() -> AsyncIterator[None]:
     engine = create_async_engine(settings.database_url, pool_pre_ping=True)
     try:
         async with engine.begin() as conn:
-            await conn.execute(text("TRUNCATE refresh_tokens, users RESTART IDENTITY CASCADE"))
+            # consents는 users.id ON DELETE CASCADE라 자동 cascade되지만, 명시 prepend로
+            # 가독성 + 후속 모델 추가 시 truncate 누락 회피.
+            await conn.execute(
+                text("TRUNCATE consents, refresh_tokens, users RESTART IDENTITY CASCADE")
+            )
     finally:
         await engine.dispose()
     yield
@@ -145,3 +151,54 @@ def auth_headers(user: User, *, platform: str = "mobile") -> dict[str, str]:
     """user JWT를 Authorization 헤더로 직조."""
     token = create_user_token(user.id, role=user.role, platform=platform)
     return {"Authorization": f"Bearer {token}"}
+
+
+ConsentFactory = Callable[..., Awaitable[Consent]]
+
+
+@pytest_asyncio.fixture
+async def consent_factory(client: AsyncClient) -> ConsentFactory:
+    """test DB에 consents row를 직접 INSERT하는 async factory.
+
+    키워드 인자로 부분 동의 구성 가능 — ``sensitive=False`` 단일 누락 케이스 등 PIPA
+    23조 회귀 테스트에 사용.
+
+    ``version`` 인자는 4 항목 모두에 동일 적용 — 미지정 시 ``CURRENT_VERSIONS``의
+    값(현 SOT)을 사용해 ``basic_consents_complete=True`` 시나리오를 자연스럽게 구성.
+    """
+    _ = client
+
+    session_maker: async_sessionmaker[AsyncSession] = app.state.session_maker
+
+    async def _make(
+        user: User,
+        *,
+        disclaimer: bool = True,
+        terms: bool = True,
+        privacy: bool = True,
+        sensitive: bool = True,
+        version: str | None = None,
+    ) -> Consent:
+        now = datetime.now(UTC)
+        async with session_maker() as session:
+            consent = Consent(
+                user_id=user.id,
+                disclaimer_acknowledged_at=now if disclaimer else None,
+                terms_consent_at=now if terms else None,
+                privacy_consent_at=now if privacy else None,
+                sensitive_personal_info_consent_at=now if sensitive else None,
+                disclaimer_version=(
+                    (version or CURRENT_VERSIONS["disclaimer"]) if disclaimer else None
+                ),
+                terms_version=((version or CURRENT_VERSIONS["terms"]) if terms else None),
+                privacy_version=((version or CURRENT_VERSIONS["privacy"]) if privacy else None),
+                sensitive_personal_info_version=(
+                    (version or CURRENT_VERSIONS["sensitive_personal_info"]) if sensitive else None
+                ),
+            )
+            session.add(consent)
+            await session.commit()
+            await session.refresh(consent)
+            return consent
+
+    return _make

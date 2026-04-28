@@ -28,6 +28,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.api.v1 import auth as auth_router
+from app.api.v1 import consents as consents_router
+from app.api.v1 import legal as legal_router
 from app.api.v1 import users as users_router
 from app.core.config import settings
 from app.core.exceptions import (
@@ -212,6 +214,8 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
 # --- Routers ----------------------------------------------------------------
 app.include_router(auth_router.router, prefix="/v1/auth", tags=["auth"])
 app.include_router(users_router.router, prefix="/v1/users", tags=["users"])
+app.include_router(consents_router.router, prefix="/v1/users/me/consents", tags=["consents"])
+app.include_router(legal_router.router, prefix="/v1/legal", tags=["legal"])
 
 
 @app.get("/healthz")

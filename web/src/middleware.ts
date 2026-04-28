@@ -43,6 +43,17 @@ export function middleware(request: NextRequest): NextResponse {
     }
   }
 
+  // Story 1.3 AC14 — onboarding은 인증된 사용자만 진입. 미인증 시 /login redirect.
+  // 동의 게이트(basic_consents_complete) 검증은 dashboard RSC가 server side로 수행
+  // (`getServerSideConsents()`) — middleware는 access 쿠키 존재만 확인.
+  if (pathname.startsWith("/onboarding")) {
+    if (!hasValidLookingCookie(request, "bn_access")) {
+      url.pathname = "/login";
+      url.searchParams.set("next", pathname + search);
+      return NextResponse.redirect(url);
+    }
+  }
+
   // symmetric guard — 이미 인증된 사용자가 /login 진입 시 dashboard로(또는 next로) redirect.
   if (pathname === "/login" && hasValidLookingCookie(request, "bn_access")) {
     url.pathname = "/dashboard";
@@ -54,5 +65,5 @@ export function middleware(request: NextRequest): NextResponse {
 }
 
 export const config = {
-  matcher: ["/dashboard/:path*", "/admin/:path*", "/login"],
+  matcher: ["/dashboard/:path*", "/admin/:path*", "/login", "/onboarding/:path*"],
 };
