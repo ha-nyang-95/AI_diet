@@ -34,6 +34,10 @@ export default function SettingsIndex() {
       onPress: () => navigateTo('/(tabs)/settings/privacy'),
     },
     {
+      label: '자동화 의사결정 동의',
+      onPress: () => navigateTo('/(tabs)/settings/automated-decision'),
+    },
+    {
       label: '로그아웃',
       onPress: () => {
         void signOut();

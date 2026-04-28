@@ -178,8 +178,16 @@ async def consent_factory(client: AsyncClient) -> ConsentFactory:
         privacy: bool = True,
         sensitive: bool = True,
         version: str | None = None,
+        automated_decision: bool = False,
+        automated_decision_revoked: bool = False,
+        automated_decision_version: str | None = None,
     ) -> Consent:
+        """Story 1.4 — ``automated_decision=True``이면 동의 row 생성, ``revoked=True``이면
+        추가로 ``automated_decision_revoked_at`` 시각도 set. 기본값 모두 False로 Story
+        1.3 테스트 호환성 유지.
+        """
         now = datetime.now(UTC)
+        ad_version = automated_decision_version or version or CURRENT_VERSIONS["automated-decision"]
         async with session_maker() as session:
             consent = Consent(
                 user_id=user.id,
@@ -194,6 +202,11 @@ async def consent_factory(client: AsyncClient) -> ConsentFactory:
                 privacy_version=((version or CURRENT_VERSIONS["privacy"]) if privacy else None),
                 sensitive_personal_info_version=(
                     (version or CURRENT_VERSIONS["sensitive_personal_info"]) if sensitive else None
+                ),
+                automated_decision_consent_at=now if automated_decision else None,
+                automated_decision_version=ad_version if automated_decision else None,
+                automated_decision_revoked_at=(
+                    now if (automated_decision and automated_decision_revoked) else None
                 ),
             )
             session.add(consent)

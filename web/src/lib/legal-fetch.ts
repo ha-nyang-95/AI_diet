@@ -11,7 +11,8 @@ import "server-only";
 
 const API_BASE_URL = process.env.API_BASE_URL ?? "http://localhost:8000";
 
-export type LegalDocType = "disclaimer" | "terms" | "privacy";
+// Story 1.4 — Literal 확장(URL/SOT 키 hyphen 통일).
+export type LegalDocType = "disclaimer" | "terms" | "privacy" | "automated-decision";
 export type LegalLang = "ko" | "en";
 
 export interface LegalDocumentResponse {

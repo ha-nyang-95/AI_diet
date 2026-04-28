@@ -34,8 +34,12 @@ from app.api.v1 import users as users_router
 from app.core.config import settings
 from app.core.exceptions import (
     PROBLEM_JSON_MEDIA_TYPE,
+    X_CONSENT_LATEST_VERSION_HEADER,
+    AutomatedDecisionConsentVersionMismatchError,
     BalanceNoteError,
+    ConsentVersionMismatchError,
     ProblemDetail,
+    encode_latest_version_header,
 )
 from app.core.logging import configure_logging
 from app.core.middleware import RequestIdMiddleware
@@ -171,7 +175,20 @@ def _problem_response(
 
 @app.exception_handler(BalanceNoteError)
 async def balancenote_exception_handler(request: Request, exc: BalanceNoteError) -> JSONResponse:
-    return _problem_response(exc.to_problem(instance=str(request.url.path)))
+    extra_headers: dict[str, str] | None = None
+    # Story 1.4 W13 — 409 version mismatch 응답에 ``X-Consent-Latest-Version`` 첨부.
+    # 클라이언트가 추가 GET round-trip 없이 latest version 즉시 인식.
+    if (
+        isinstance(exc, ConsentVersionMismatchError | AutomatedDecisionConsentVersionMismatchError)
+        and exc.latest_versions
+    ):
+        extra_headers = {
+            X_CONSENT_LATEST_VERSION_HEADER: encode_latest_version_header(exc.latest_versions),
+        }
+    return _problem_response(
+        exc.to_problem(instance=str(request.url.path)),
+        extra_headers=extra_headers,
+    )
 
 
 @app.exception_handler(RequestValidationError)

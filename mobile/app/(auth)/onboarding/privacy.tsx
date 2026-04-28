@@ -4,8 +4,9 @@
  * PIPA 22조 별도 동의 의무 + 23조 민감정보 별도 동의 의무 — 단일 화면에서 *2개 별 체크박스*
  * (privacy + sensitive_personal_info)로 분리. 시각 강조: horizontal divider + 별 색상.
  *
- * 2 체크 모두 통과 시 `POST /v1/users/me/consents` 4 version 전송 → 성공 시 (tabs)로
- * Redirect. Story 1.6이 본 redirect를 가로채 automated-decision/tutorial/profile을 chain.
+ * 2 체크 모두 통과 시 `POST /v1/users/me/consents` 4 version 전송 → 성공 시
+ * `/(auth)/onboarding/automated-decision`으로 Redirect (Story 1.4 AC7).
+ * Story 1.6이 본 chain의 끝에 tutorial/profile을 추가한다.
  */
 import { Redirect } from 'expo-router';
 import { useState } from 'react';
@@ -63,7 +64,7 @@ export default function OnboardingPrivacy() {
   }
 
   if (submit.isSuccess) {
-    return <Redirect href="/(tabs)" />;
+    return <Redirect href="/(auth)/onboarding/automated-decision" />;
   }
 
   const canSubmit = privacyAgreed && sensitiveAgreed && !submit.isPending;

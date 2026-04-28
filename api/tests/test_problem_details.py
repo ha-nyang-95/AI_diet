@@ -16,9 +16,14 @@ from pydantic import BaseModel
 
 from app.core.exceptions import (
     PROBLEM_JSON_MEDIA_TYPE,
+    X_CONSENT_LATEST_VERSION_HEADER,
     AccessTokenExpiredError,
     AdminRoleRequiredError,
+    AutomatedDecisionConsentMissingError,
+    AutomatedDecisionConsentNotGrantedError,
+    AutomatedDecisionConsentVersionMismatchError,
     BalanceNoteError,
+    ConsentVersionMismatchError,
     InvalidIdTokenError,
 )
 from app.main import (
@@ -53,6 +58,31 @@ def _build_isolated_app() -> FastAPI:
     @test_app.get("/raise/admin-required")
     async def _admin() -> None:
         raise AdminRoleRequiredError("admin required")
+
+    # --- Story 1.4 — 자동화 의사결정 동의 예외 3건 + W13 헤더 회귀 ---
+
+    @test_app.get("/raise/ad-missing")
+    async def _ad_missing() -> None:
+        raise AutomatedDecisionConsentMissingError("ad consent required")
+
+    @test_app.get("/raise/ad-not-granted")
+    async def _ad_not_granted() -> None:
+        raise AutomatedDecisionConsentNotGrantedError("ad consent not granted")
+
+    @test_app.get("/raise/ad-version-mismatch")
+    async def _ad_version() -> None:
+        raise AutomatedDecisionConsentVersionMismatchError(
+            "ad version mismatch",
+            latest_versions={"automated-decision": "ko-2026-04-28"},
+        )
+
+    @test_app.get("/raise/basic-version-mismatch")
+    async def _basic_version() -> None:
+        # Story 1.3 deferred W13 — basic version mismatch도 동일 헤더 패턴 회귀.
+        raise ConsentVersionMismatchError(
+            "disclaimer version mismatch",
+            latest_versions={"disclaimer": "ko-2026-04-28"},
+        )
 
     @test_app.get("/raise/http")
     async def _http() -> None:
@@ -131,3 +161,50 @@ async def test_validation_error_maps_to_400_with_errors_field() -> None:
     assert isinstance(body["errors"], list)
     assert len(body["errors"]) >= 1
     assert "loc" in body["errors"][0]
+
+
+# ---------------------------------------------------------------------------
+# Story 1.4 — 자동화 의사결정 동의 예외 status/code/title + W13 헤더 회귀
+# ---------------------------------------------------------------------------
+
+
+async def test_ad_consent_missing_returns_403() -> None:
+    app = _build_isolated_app()
+    async with await _client(app) as ac:
+        response = await ac.get("/raise/ad-missing")
+    assert response.status_code == 403
+    body = response.json()
+    assert body["code"] == "consent.automated_decision.missing"
+    assert body["title"] == "Automated decision consent required"
+
+
+async def test_ad_consent_not_granted_returns_404() -> None:
+    app = _build_isolated_app()
+    async with await _client(app) as ac:
+        response = await ac.get("/raise/ad-not-granted")
+    assert response.status_code == 404
+    body = response.json()
+    assert body["code"] == "consent.automated_decision.not_granted"
+
+
+async def test_ad_consent_version_mismatch_attaches_latest_version_header() -> None:
+    app = _build_isolated_app()
+    async with await _client(app) as ac:
+        response = await ac.get("/raise/ad-version-mismatch")
+    assert response.status_code == 409
+    body = response.json()
+    assert body["code"] == "consent.automated_decision.version_mismatch"
+    header = response.headers.get(X_CONSENT_LATEST_VERSION_HEADER.lower(), "")
+    assert header == "automated-decision=ko-2026-04-28"
+
+
+async def test_basic_version_mismatch_attaches_latest_version_header() -> None:
+    """Story 1.3 deferred W13 흡수 회귀 — basic mismatch도 동일 헤더 첨부."""
+    app = _build_isolated_app()
+    async with await _client(app) as ac:
+        response = await ac.get("/raise/basic-version-mismatch")
+    assert response.status_code == 409
+    body = response.json()
+    assert body["code"] == "consent.version_mismatch"
+    header = response.headers.get(X_CONSENT_LATEST_VERSION_HEADER.lower(), "")
+    assert header == "disclaimer=ko-2026-04-28"

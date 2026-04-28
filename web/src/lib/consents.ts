@@ -26,6 +26,11 @@ export interface ConsentStatus {
   privacy_version: string | null;
   sensitive_personal_info_version: string | null;
   basic_consents_complete: boolean;
+  // Story 1.4 — PIPA 2026.03.15 자동화 의사결정 동의 (별도 게이트).
+  automated_decision_consent_at: string | null;
+  automated_decision_revoked_at: string | null;
+  automated_decision_version: string | null;
+  automated_decision_consent_complete: boolean;
 }
 
 export async function getServerSideConsents(): Promise<ConsentStatus | null> {
