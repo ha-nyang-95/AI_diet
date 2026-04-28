@@ -107,6 +107,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/users/me/consents/automated-decision": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Grant Automated Decision Consent
+         * @description PIPA 2026.03.15 자동화 의사결정 동의 grant — 항상 200(부분 update 의미).
+         *
+         *     재동의 케이스(이전에 ``automated_decision_revoked_at IS NOT NULL`` 사용자)도 안전:
+         *     UPSERT set_에 ``automated_decision_revoked_at = None``로 명시 reset.
+         *     INSERT 분기(이론상 불가 — 본 endpoint 진입 가드가 basic 4종 통과 강제)에서는 basic
+         *     4 컬럼을 함께 set하지 않는다(``has_all_basic_consents=false`` 반환으로 클라이언트가
+         *     onboarding 흐름 재진입).
+         */
+        post: operations["grant_automated_decision_consent_v1_users_me_consents_automated_decision_post"];
+        /**
+         * Revoke Automated Decision Consent
+         * @description 동의 철회 — ``automated_decision_revoked_at = now()`` set, ``_consent_at`` 보존.
+         *
+         *     row 없음 또는 ``automated_decision_consent_at IS NULL``(미동의 상태) →
+         *     ``AutomatedDecisionConsentNotGrantedError`` (404). 이미 철회된 상태에서 재호출 시
+         *     *철회는 idempotent가 아닌* 명시 분기(사용자 의도 *철회*인데 *미동의 상태*는 모호).
+         */
+        delete: operations["revoke_automated_decision_consent_v1_users_me_consents_automated_decision_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/legal/{doc_type}": {
         parameters: {
             query?: never;
@@ -187,6 +221,14 @@ export interface components {
             /** Expires In Seconds */
             expires_in_seconds: number;
         };
+        /**
+         * AutomatedDecisionGrantRequest
+         * @description Story 1.4 — POST /v1/users/me/consents/automated-decision body.
+         */
+        AutomatedDecisionGrantRequest: {
+            /** Automated Decision Version */
+            automated_decision_version: string;
+        };
         /** ConsentStatusResponse */
         ConsentStatusResponse: {
             /** Disclaimer Acknowledged At */
@@ -207,6 +249,14 @@ export interface components {
             sensitive_personal_info_version: string | null;
             /** Basic Consents Complete */
             basic_consents_complete: boolean;
+            /** Automated Decision Consent At */
+            automated_decision_consent_at: string | null;
+            /** Automated Decision Revoked At */
+            automated_decision_revoked_at: string | null;
+            /** Automated Decision Version */
+            automated_decision_version: string | null;
+            /** Automated Decision Consent Complete */
+            automated_decision_consent_complete: boolean;
         };
         /** ConsentSubmitRequest */
         ConsentSubmitRequest: {
@@ -264,7 +314,7 @@ export interface components {
              * Type
              * @enum {string}
              */
-            type: "disclaimer" | "terms" | "privacy";
+            type: "disclaimer" | "terms" | "privacy" | "automated-decision";
             /**
              * Lang
              * @enum {string}
@@ -604,6 +654,76 @@ export interface operations {
             };
         };
     };
+    grant_automated_decision_consent_v1_users_me_consents_automated_decision_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                Authorization?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                bn_access?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AutomatedDecisionGrantRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConsentStatusResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    revoke_automated_decision_consent_v1_users_me_consents_automated_decision_delete: {
+        parameters: {
+            query?: never;
+            header?: {
+                Authorization?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                bn_access?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConsentStatusResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_legal_document_v1_legal__doc_type__get: {
         parameters: {
             query?: {
@@ -611,7 +731,7 @@ export interface operations {
             };
             header?: never;
             path: {
-                doc_type: "disclaimer" | "terms" | "privacy";
+                doc_type: "disclaimer" | "terms" | "privacy" | "automated-decision";
             };
             cookie?: never;
         };
