@@ -130,13 +130,14 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_jwt_secrets_in_prod(self) -> Settings:
-        # 비-prod(dev/ci/test/staging) 환경은 디폴트 dev secret 허용 — 부팅 fail 회피.
-        if self.environment != "prod":
+        # prod + staging 환경은 dev secret 차단 — staging은 prod-mirror 데이터 노출 가능성이라
+        # 동일 강도 검증 적용. dev/ci/test는 디폴트 dev secret 허용 — 부팅 fail 회피.
+        if self.environment not in {"prod", "staging"}:
             return self
         if not self.jwt_user_secret or self.jwt_user_secret.startswith("dev-"):
-            raise ValueError("jwt_user_secret must be set to a non-dev value in prod")
+            raise ValueError("jwt_user_secret must be set to a non-dev value in prod/staging")
         if not self.jwt_admin_secret or self.jwt_admin_secret.startswith("dev-"):
-            raise ValueError("jwt_admin_secret must be set to a non-dev value in prod")
+            raise ValueError("jwt_admin_secret must be set to a non-dev value in prod/staging")
         if self.jwt_user_secret == self.jwt_admin_secret:
             raise ValueError("jwt_user_secret and jwt_admin_secret must differ")
         return self

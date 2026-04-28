@@ -30,3 +30,13 @@
 - **사유**: spec literal 따라 Strict로 발급하면 OAuth callback의 cross-site initiated redirect chain(`accounts.google.com → /api/auth/google/callback → /dashboard`)에서 첫 `/dashboard` 요청에 쿠키가 포함되지 않음. 브라우저는 redirect chain의 initiator가 cross-site(Google)이면 chain 전체를 cross-site로 판정해 Strict 쿠키를 배제. 결과: 로그인 직후 무한 `/login → /dashboard → /login` 루프.
 - **Lax 채택 안전성**: CSRF 방어는 여전히 충분 — 외부 사이트의 form POST/AJAX는 Lax 쿠키 미포함(state-changing 요청 차단). 차이는 "외부 링크 클릭으로 들어온 GET 네비게이션 시 쿠키 포함" — auth 흐름 정상 동작.
 - **재검토 시점**: 외부 보안 audit 또는 Story 8 운영 hardening. 대안(HTML+JS redirect로 chain 끊기)은 UX 저하 + 코드 복잡도 증가로 미채택.
+
+## Spec deviation: logout endpoint (2026-04-28, PR #2 review followup)
+
+- **AC5 spec**: 모바일은 `Authorization: Bearer <access>` + body `{refresh_token}` 두 필드 동시 전송 (logout 시 access token 검증).
+- **실제 구현**: refresh-only — `current_user` Depends 미사용. body / 쿠키의 refresh token sha256 hash 매칭 row만 revoke.
+- **사유 (PR #2 Gemini Code Assist review comment #2 거부 결정)**:
+  1. **만료 세션 강제 종료 보존**: access token 만료된 사용자가 logout 시도 시 `current_user` Depends가 401 발사 → 클라이언트 인터셉터가 refresh 시도 → 또 만료면 logout 자체 불가. *세션 정리* 흐름이 깨진다. refresh-only는 만료 세션도 정상 logout 가능.
+  2. **CSRF 방어는 별도 layer**: JSON body 요구(`Content-Type: application/json` + `{refresh_token}` 필드)로 form POST CSRF 차단 + SameSite=Lax 쿠키. logout-CSRF 위협 모델은 *피해자 강제 로그아웃*(annoyance 수준) — refresh token 본인만 알기에 무차별 발사 불가.
+  3. **refresh token = 본인 식별자**: 평문 32-byte URL-safe random + DB sha256 매칭. token 보유자만 logout 가능 — access token 검증과 동등한 보증.
+- **재검토 시점**: 외부 보안 audit / 외주 클라이언트 보안 요구사항 변경 시. 또는 Story 5.x(전체 디바이스 로그아웃) 도입 시점에 access token 검증 layer 추가 검토.
