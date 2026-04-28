@@ -89,6 +89,44 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/users/me/consents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Consents */
+        get: operations["get_consents_v1_users_me_consents_get"];
+        put?: never;
+        /** Submit Consents */
+        post: operations["submit_consents_v1_users_me_consents_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/legal/{doc_type}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Legal Document
+         * @description SOT 매핑(`LEGAL_DOCUMENTS`)에서 직접 조회 — DB 호출 없음.
+         */
+        get: operations["get_legal_document_v1_legal__doc_type__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/healthz": {
         parameters: {
             query?: never;
@@ -149,6 +187,38 @@ export interface components {
             /** Expires In Seconds */
             expires_in_seconds: number;
         };
+        /** ConsentStatusResponse */
+        ConsentStatusResponse: {
+            /** Disclaimer Acknowledged At */
+            disclaimer_acknowledged_at: string | null;
+            /** Terms Consent At */
+            terms_consent_at: string | null;
+            /** Privacy Consent At */
+            privacy_consent_at: string | null;
+            /** Sensitive Personal Info Consent At */
+            sensitive_personal_info_consent_at: string | null;
+            /** Disclaimer Version */
+            disclaimer_version: string | null;
+            /** Terms Version */
+            terms_version: string | null;
+            /** Privacy Version */
+            privacy_version: string | null;
+            /** Sensitive Personal Info Version */
+            sensitive_personal_info_version: string | null;
+            /** Basic Consents Complete */
+            basic_consents_complete: boolean;
+        };
+        /** ConsentSubmitRequest */
+        ConsentSubmitRequest: {
+            /** Disclaimer Version */
+            disclaimer_version: string;
+            /** Terms Version */
+            terms_version: string;
+            /** Privacy Version */
+            privacy_version: string;
+            /** Sensitive Personal Info Version */
+            sensitive_personal_info_version: string;
+        };
         /** GoogleLoginRequest */
         GoogleLoginRequest: {
             /**
@@ -187,6 +257,30 @@ export interface components {
         HTTPValidationError: {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
+        };
+        /** LegalDocumentResponse */
+        LegalDocumentResponse: {
+            /**
+             * Type
+             * @enum {string}
+             */
+            type: "disclaimer" | "terms" | "privacy";
+            /**
+             * Lang
+             * @enum {string}
+             */
+            lang: "ko" | "en";
+            /** Version */
+            version: string;
+            /** Title */
+            title: string;
+            /** Body */
+            body: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
         };
         /** LogoutRequest */
         LogoutRequest: {
@@ -427,6 +521,109 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["UserMeResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_consents_v1_users_me_consents_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                Authorization?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                bn_access?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConsentStatusResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    submit_consents_v1_users_me_consents_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                Authorization?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                bn_access?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConsentSubmitRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConsentStatusResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_legal_document_v1_legal__doc_type__get: {
+        parameters: {
+            query?: {
+                lang?: "ko" | "en";
+            };
+            header?: never;
+            path: {
+                doc_type: "disclaimer" | "terms" | "privacy";
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegalDocumentResponse"];
                 };
             };
             /** @description Validation Error */

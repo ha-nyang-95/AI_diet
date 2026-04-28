@@ -79,16 +79,49 @@ Story 1.2부터 Google 로그인을 사용하려면 Google Cloud Console에서 O
 
 > Expo Go 개발 환경에서는 Web client ID를 모든 플랫폼에 사용해 PKCE 흐름을 검증하면 가장 마찰이 적습니다.
 
-### 인증 디버깅 SOP
+### 인증·동의 디버깅 SOP
 
-`401 Unauthorized` 발생 시 점검 순서:
+응답 본문의 `code` 필드로 원인을 1차 식별합니다. 본 프로젝트가 정의한 RFC 7807 코드 카탈로그:
 
-1. 응답 본문의 `code` 필드 확인 — `auth.access_token.expired` / `auth.refresh.invalid` /
-   `auth.token.issuer_mismatch` / `auth.admin.role_required` 중 하나.
+| code | 상태 | 의미 |
+|------|------|------|
+| `auth.access_token.expired` | 401 | access JWT 만료 — 클라이언트가 refresh로 갱신 |
+| `auth.access_token.invalid` | 401 | access JWT 형식·서명 불일치 |
+| `auth.refresh.invalid` | 401 | refresh token 미인식 / 만료 |
+| `auth.refresh.replay_detected` | 401 | revoked refresh 재사용 — family 전체 revoke |
+| `auth.token.issuer_mismatch` | 401 | user/admin issuer 혼용 |
+| `auth.admin.role_required` | 403 | admin endpoint에 user role |
+| `auth.account.deleted` | 403 | soft-deleted user 재로그인 시도 |
+| `auth.google.id_token_invalid` | 401 | Google id_token 검증 실패 |
+| `auth.google.email_unverified` | 401 | Google 이메일 미인증 |
+| `consent.basic.missing` | 403 | 4종 기본 동의 미통과 — `(auth)/onboarding/disclaimer` 필요 |
+| `consent.version_mismatch` | 409 | 클라이언트가 stale 동의 화면 제출 — 최신 텍스트 fetch 후 재동의 |
+| `validation.error` | 400 | Pydantic validation (`errors[]` 배열에 필드별 사유) |
+
+`401 Unauthorized` 점검 순서:
+
+1. 응답 `code` 필드 확인.
 2. JWT decode (https://jwt.io) — `iss` / `aud` / `exp` 가 환경 변수와 일치하는지.
 3. DB에서 `users` row 조회 — `deleted_at IS NULL`, `role` 일치.
 4. refresh 401이면 `refresh_tokens` row의 `revoked_at` / `expires_at` 확인.
 5. `WWW-Authenticate` 헤더(401에 항상 첨부)로 RFC 6750 정합 응답 확인.
+
+### 동의 흐름 SOP (Story 1.3)
+
+- **풀텍스트 SOT**: `api/app/domain/legal_documents.py` 모듈 const (한·영). DB row 또는 외부
+  파일을 사용하지 않습니다(1인 8주 MVP 정합). 텍스트 변경 시:
+  1. `LEGAL_DOCUMENTS[(type, lang)].body` 업데이트
+  2. `CURRENT_VERSIONS`의 version 문자열을 bump (`ko-2026-04-28` → `ko-2026-MM-DD`)
+  3. `updated_at` 갱신
+  4. PR diff로 변경 가시성 확보 — 운영 SOP는 Story 8 polish.
+- **PIPA 별도 동의 의무**: 4 항목(disclaimer / terms / privacy / sensitive_personal_info)을
+  *별도 체크박스*로 분리 표시. "전체 동의" 단일 체크박스 위장 금지(PIPA 22조 위반). 민감정보
+  체크박스는 horizontal divider + 별 색상으로 시각 구분(PIPA 23조).
+- **재열람 위치**:
+  - Mobile: `(tabs)/settings` → 디스클레이머 / 약관 / 개인정보 처리방침 (한국어).
+  - Web: `/legal/{disclaimer,terms,privacy}` (한국어), `/en/legal/...` (영문) — 인증 무관 public.
+- **버전 mismatch 처리**: 클라이언트가 `*_version`을 backend SOT 버전과 다르게 보내면 409.
+  사용자가 stale 화면을 제출한 케이스 — 모바일/Web이 최신 텍스트를 다시 fetch한 뒤 재동의.
 
 ### 8시간 체크리스트
 

@@ -5,7 +5,8 @@
 
 from __future__ import annotations
 
+from app.db.models.consent import Consent
 from app.db.models.refresh_token import RefreshToken
 from app.db.models.user import User
 
-__all__ = ["RefreshToken", "User"]
+__all__ = ["Consent", "RefreshToken", "User"]

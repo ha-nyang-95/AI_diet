@@ -50,6 +50,11 @@ target-version = "py313"
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "ASYNC"]
 ignore = []
 
+# Story 1.3: legal_documents.py는 한·영 약관 풀텍스트를 모듈 const로 임베드 — 본문 단락은
+# 한 줄당 한 단락을 유지해 PR diff 가시성과 자연어 정확성을 우선한다(line-length 무시).
+[tool.ruff.lint.per-file-ignores]
+"app/domain/legal_documents.py" = ["E501"]
+
 [tool.ruff.format]
 quote-style = "double"
 

@@ -26,12 +26,26 @@ export interface AuthUser {
   role: 'user' | 'admin';
 }
 
+export interface ConsentStatus {
+  disclaimer_acknowledged_at: string | null;
+  terms_consent_at: string | null;
+  privacy_consent_at: string | null;
+  sensitive_personal_info_consent_at: string | null;
+  disclaimer_version: string | null;
+  terms_version: string | null;
+  privacy_version: string | null;
+  sensitive_personal_info_version: string | null;
+  basic_consents_complete: boolean;
+}
+
 export interface AuthContextValue {
   user: AuthUser | null;
+  consentStatus: ConsentStatus | null;
   isAuthed: boolean;
   isReady: boolean;
   signIn: (payload: { access: string; refresh: string; user: AuthUser }) => Promise<void>;
   signOut: () => Promise<void>;
+  setConsentStatus: (status: ConsentStatus) => void;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -138,13 +152,31 @@ export async function authFetch(input: string, init?: RequestInit): Promise<Resp
   return fetch(url, { ...init, headers: retryHeaders });
 }
 
+/**
+ * 동의 상태를 한 번 fetch — 네트워크 오류 / non-2xx는 null 반환(호출부가 fallback 결정).
+ * 401은 ``authFetch``가 refresh + redirect를 자동 처리 후 401 그대로 반환 → null.
+ */
+async function fetchConsentStatus(): Promise<ConsentStatus | null> {
+  try {
+    const resp = await authFetch('/v1/users/me/consents');
+    if (!resp.ok) return null;
+    return (await resp.json()) as ConsentStatus;
+  } catch {
+    return null;
+  }
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
+  const [consentStatus, setConsentStatusState] = useState<ConsentStatus | null>(null);
   const [isReady, setIsReady] = useState(false);
 
   useEffect(() => {
     // signOut/refresh 실패로 세션 클리어 신호 → user state 동기화(stale fetch 결과 부활 방지).
-    return subscribeSessionCleared(() => setUser(null));
+    return subscribeSessionCleared(() => {
+      setUser(null);
+      setConsentStatusState(null);
+    });
   }, []);
 
   useEffect(() => {
@@ -156,12 +188,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return;
       }
       try {
-        const response = await authFetch('/v1/users/me');
+        const meResponse = await authFetch('/v1/users/me');
         if (isCancelled) return;
-        if (response.ok) {
-          const body = (await response.json()) as AuthUser;
-          if (!isCancelled) setUser(body);
-        }
+        if (!meResponse.ok) return;
+        const body = (await meResponse.json()) as AuthUser;
+        if (isCancelled) return;
+        setUser(body);
+        // Story 1.3 AC2 — bootstrap 시 동의 상태도 1회 fetch. 네트워크 오류는
+        // 무시(consentStatus는 null 유지 → onboarding 가드가 fallback). 401은
+        // authFetch 인터셉터가 이미 /(auth)/login으로 라우팅.
+        const consent = await fetchConsentStatus();
+        if (isCancelled) return;
+        if (consent !== null) setConsentStatusState(consent);
       } finally {
         if (!isCancelled) setIsReady(true);
       }
@@ -174,11 +212,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const value = useMemo<AuthContextValue>(
     () => ({
       user,
+      consentStatus,
       isAuthed: user !== null,
       isReady,
       async signIn(payload) {
         await Promise.all([setAccessToken(payload.access), setRefreshToken(payload.refresh)]);
         setUser(payload.user);
+        // 새 로그인 — 이전 세션의 동의 상태 클리어 후 즉시 refetch. 기존 사용자가 신규
+        // 로그인 시 onboarding으로 잘못 redirect되는 loop 방지.
+        setConsentStatusState(null);
+        const status = await fetchConsentStatus();
+        if (status !== null) setConsentStatusState(status);
       },
       async signOut() {
         const [access, refresh] = await Promise.all([getAccessToken(), getRefreshToken()]);
@@ -198,10 +242,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
         await clearAuth();
         setUser(null);
+        setConsentStatusState(null);
         router.replace('/(auth)/login');
       },
+      setConsentStatus(status) {
+        setConsentStatusState(status);
+      },
     }),
-    [user, isReady],
+    [user, consentStatus, isReady],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

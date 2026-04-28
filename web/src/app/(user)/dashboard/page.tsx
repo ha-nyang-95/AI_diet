@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 
 import { getServerSideUser } from "@/lib/auth";
+import { getServerSideConsents } from "@/lib/consents";
 
 import { LogoutButton } from "./logout-button";
 
@@ -12,6 +13,13 @@ export default async function DashboardPage() {
   const user = await getServerSideUser();
   if (!user) {
     redirect("/login");
+  }
+
+  // Story 1.3 AC2 — 동의 미통과 사용자는 onboarding 강제. 인증 게이트(`current_user`)와
+  // 분리된 동의 게이트로 처리(architecture line 311 정합).
+  const consents = await getServerSideConsents();
+  if (!consents?.basic_consents_complete) {
+    redirect("/onboarding/disclaimer");
   }
 
   return (

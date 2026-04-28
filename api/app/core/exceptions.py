@@ -111,3 +111,26 @@ class AccountDeletedError(AuthError):
     status: ClassVar[int] = 403
     code: ClassVar[str] = "auth.account.deleted"
     title: ClassVar[str] = "Account deleted"
+
+
+# --- Consent 계층 (Story 1.3) ---
+
+
+class ConsentError(BalanceNoteError):
+    status: ClassVar[int] = 403
+    code: ClassVar[str] = "consent.error"
+    title: ClassVar[str] = "Consent Error"
+
+
+class BasicConsentMissingError(ConsentError):
+    status: ClassVar[int] = 403
+    code: ClassVar[str] = "consent.basic.missing"
+    title: ClassVar[str] = "Basic consents required"
+
+
+class ConsentVersionMismatchError(ConsentError):
+    # 409 Conflict — RFC 9110 §15.5.10 stale state. Pydantic ValidationError 422와
+    # status 충돌 회피.
+    status: ClassVar[int] = 409
+    code: ClassVar[str] = "consent.version_mismatch"
+    title: ClassVar[str] = "Consent version mismatch"
