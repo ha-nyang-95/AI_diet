@@ -23,6 +23,22 @@ async def test_me_returns_user_payload(client: AsyncClient, user_factory: UserFa
     assert body["display_name"] == "Me"
     assert body["role"] == "user"
     assert body["created_at"]
+    # Story 1.5 — profile_completed_at 필드 노출 검증 (4번째 가드 분기 입력).
+    assert "profile_completed_at" in body
+    assert body["profile_completed_at"] is None  # 미입력 사용자
+
+
+async def test_me_exposes_profile_completed_at_when_filled(
+    client: AsyncClient, user_factory: UserFactory
+) -> None:
+    """Story 1.5 — profile_completed=True 사용자 → profile_completed_at ISO datetime."""
+    user = await user_factory(profile_completed=True)
+    response = await client.get("/v1/users/me", headers=auth_headers(user))
+    assert response.status_code == 200
+    body = response.json()
+    assert body["profile_completed_at"] is not None
+    # ISO 8601 형식 — Python datetime ISO 직렬화 정합.
+    assert "T" in body["profile_completed_at"]
 
 
 async def test_me_requires_token(client: AsyncClient) -> None:

@@ -24,6 +24,9 @@ export interface AuthUser {
   display_name: string | null;
   picture_url: string | null;
   role: 'user' | 'admin';
+  // Story 1.5 — 건강 프로필 입력 시점(미입력 시 null). (tabs)/_layout.tsx의 4번째
+  // 가드(profile) 분기 입력. 본 필드는 GET /v1/users/me 응답에서 forward됨.
+  profile_completed_at: string | null;
 }
 
 export interface ConsentStatus {

@@ -84,6 +84,8 @@ class UserPublic(BaseModel):
     display_name: str | None
     picture_url: str | None
     role: str
+    # Story 1.5 — 모바일/Web 클라이언트가 signIn 직후 4번째 가드(profile) 분기에 사용.
+    profile_completed_at: datetime | None
 
 
 class GoogleLoginResponseMobile(BaseModel):
@@ -195,6 +197,7 @@ def _user_to_public(user: User) -> UserPublic:
         email=user.email,
         display_name=user.display_name,
         picture_url=user.picture_url,
+        profile_completed_at=user.profile_completed_at,
         role=user.role,
     )
 

@@ -99,7 +99,9 @@ Story 1.2부터 Google 로그인을 사용하려면 Google Cloud Console에서 O
 | `consent.automated_decision.missing` | 403 | PIPA 2026.03.15 자동화 의사결정 동의 미부여 — 분석 라우터 차단(LLM 비용 0 보호) |
 | `consent.automated_decision.not_granted` | 404 | `DELETE /automated-decision`을 미동의 row에서 호출 — GET으로 상태 재확인 |
 | `consent.automated_decision.version_mismatch` | 409 | 자동화 의사결정 동의서 갱신됨 — `X-Consent-Latest-Version` 헤더에 SOT 버전 첨부 |
-| `validation.error` | 400 | Pydantic validation (`errors[]` 배열에 필드별 사유) |
+| `validation.error` | 400 | Pydantic validation (`errors[]` 배열에 필드별 사유 — `age`/`weight_kg`/`height_cm` 범위 외, `activity_level`/`health_goal` enum 외, `allergies` 22종 외 항목·dedup, 누락 필드, `extra="forbid"` 위반 등 Story 1.5) |
+
+본 스토리(Story 1.5)에서 `POST /v1/users/me/profile` 200 / `GET /v1/users/me/profile` 200 두 endpoint가 신규 도입되며 `Depends(require_basic_consents)`가 `POST`에 첫 wire 됩니다(`GET`은 *자기 정보 조회*라 동의 게이트 미적용). 검증 실패 케이스 6 종(범위·enum·22종 알레르기·누락·extra·중복)은 모두 `code=validation.error` 400 으로 매핑됩니다.
 
 **409 응답 헤더 — `X-Consent-Latest-Version`** (Story 1.4)
 
@@ -156,6 +158,43 @@ Story 1.2부터 Google 로그인을 사용하려면 Google Cloud Console에서 O
   - Mobile: `(tabs)/settings/automated-decision` — 풀텍스트 + 부여/철회 버튼(분기) + Confirm 다이얼로그.
   - Web: `/legal/automated-decision` (한국어), `/en/legal/automated-decision` (영문) — 인증 무관 public.
     Web settings 측 *철회·재부여 UI*는 Story 5.1에서 추가 예정(현 Web에 settings 그룹 부재).
+
+### 건강 프로필 입력 SOP (Story 1.5)
+
+- **22종 알레르기 SOT 위치**: `api/app/domain/allergens.py:KOREAN_22_ALLERGENS` tuple. 식약처
+  *식품 등의 표시기준 별표* 22종. 정의 순서(우유 → 메밀 → … → 기타)는 PDF 순 — 본 순서는
+  Story 3.5 fit_score 알레르기 위반 단락 22 단위 테스트 입력 도메인. 변경 SOP:
+  1. `KOREAN_22_ALLERGENS` tuple 갱신 (정의 순 보존).
+  2. mobile/web 두 클라이언트 schema(`features/onboarding/healthProfileSchema.ts`)도 동일 갱신
+     (백엔드 SOT를 import하지 않는 이유: bundler 분리 + i18n 라벨 분기 가능성).
+  3. 새 alembic revision으로 `users.allergies` `ck_users_allergies_domain` CHECK 제약
+     drop+recreate(`app.domain.allergens` import 후 SQL 인라인).
+  4. `scripts/verify_allergy_22.py` 분기 1회 cron(R8 SOP, Story 8) 실행 결과 동기.
+- **`health_goal` 4종 + `activity_level` 5종**: `api/app/domain/health_profile.py` Literal SOT —
+  `weight_loss` / `muscle_gain` / `maintenance` / `diabetes_management` (KDRIs AMDR 매크로 룰
+  forward-hook, Story 3.5 fit_score lookup table 키) + `sedentary` / `light` / `moderate` /
+  `active` / `very_active` (Mifflin-St Jeor + Harris-Benedict 활동 계수 표준 5단계, Story 3.x
+  BMR/TDEE 기반). 한국어 라벨 매핑은 클라이언트(`HEALTH_GOAL_LABELS_KO` /
+  `ACTIVITY_LEVEL_LABELS_KO`) 책임 — 백엔드는 enum 영문값만 저장·반환(향후 영문 UI 전환 시
+  백엔드 변경 0).
+- **`require_basic_consents` 첫 라우터 wire**: 본 스토리에서 `POST /v1/users/me/profile`에
+  첫 wire 적용 (Story 1.3 W14 deferred 흡수). 4종 기본 동의 미통과 사용자는 403 +
+  `code=consent.basic.missing` raise → 모바일/Web 클라이언트가 `(auth)/onboarding/disclaimer`
+  로 자동 redirect. **`GET /v1/users/me/profile`에는 적용 금지** — 자기 정보 *조회*는 동의 무관
+  (`deps.py:require_basic_consents` docstring 정합).
+- **`profile_completed_at` 4번째 가드 (mobile + Web)**: Story 1.5에서 `users.profile_completed_at`
+  컬럼 추가 후 `GET /v1/users/me` 응답 모델(`UserMeResponse`)이 본 필드 forward.
+  - Mobile: `(tabs)/_layout.tsx`가 (1) 인증 → (2) basic → (3) AD → **(4) profile** 4단계 가드 —
+    `!user.profile_completed_at` 시 `(auth)/onboarding/profile` redirect.
+  - Web: `(user)/dashboard/page.tsx`가 동일 4단계 가드 — `!user.profile_completed_at` 시
+    `/onboarding/profile` redirect.
+  - **가드 순서 엄수** — basic/AD 미통과 사용자가 profile 화면으로 우회되지 않도록 (1)→(2)→(3)→(4)
+    순서 유지.
+- **컬럼 무결성 (DB CHECK 제약)**: `0005_users_health_profile.py` 마이그레이션이 `age`(1~150) /
+  `weight_kg`(1.0~500.0) / `height_cm`(50~300) / `allergies`(22종 부분집합 `<@`) 4건의
+  CHECK 제약과 `users_activity_level_enum` / `users_health_goal_enum` 2종 Postgres ENUM 타입을
+  생성. SQLAlchemy 모델 선언과 alembic SQL이 *동일 SOT*(`app.domain.allergens.KOREAN_22_ALLERGENS`
+  module-level import)로 동기 — autogenerate diff 0건 보장.
 
 ### 8시간 체크리스트
 

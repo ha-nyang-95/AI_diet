@@ -24,6 +24,8 @@ export interface AuthUser {
   created_at: string;
   last_login_at: string | null;
   onboarded_at: string | null;
+  // Story 1.5 — 건강 프로필 입력 시점(미입력 시 null). dashboard 4번째 가드 분기 입력.
+  profile_completed_at: string | null;
 }
 
 export async function getServerSideUser(): Promise<AuthUser | null> {
