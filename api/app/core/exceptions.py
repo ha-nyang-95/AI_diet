@@ -201,3 +201,34 @@ class AutomatedDecisionConsentVersionMismatchError(ConsentError):
     ) -> None:
         super().__init__(detail)
         self.latest_versions: dict[str, str] = latest_versions or {}
+
+
+# --- Meal 계층 (Story 2.1) ---
+
+
+class MealError(BalanceNoteError):
+    """Epic 2 식단 도메인 예외 base. Story 2.2 R2 업로드 실패 / Story 2.3 OCR 장애 /
+    Story 2.5 큐잉 실패 등 후속 스토리가 본 base 하위 코드 카탈로그 확장."""
+
+    status: ClassVar[int] = 500
+    code: ClassVar[str] = "meals.error"
+    title: ClassVar[str] = "Meal Error"
+
+
+class MealNotFoundError(MealError):
+    """소유권 미일치 / 존재 X / soft-deleted 모두 동일 응답 (404 일원화 — enumeration
+    차단). PATCH/DELETE에서 `update().where(id, user_id, deleted_at IS NULL)` 결과
+    None일 때 raise."""
+
+    status: ClassVar[int] = 404
+    code: ClassVar[str] = "meals.not_found"
+    title: ClassVar[str] = "Meal not found"
+
+
+class MealQueryValidationError(MealError):
+    """`/v1/meals` GET 쿼리 파라미터 validation 실패 — `from_date > to_date` (P15)
+    또는 `cursor` 비-null 송신(P18, Story 2.4 입력)."""
+
+    status: ClassVar[int] = 400
+    code: ClassVar[str] = "meals.query.invalid"
+    title: ClassVar[str] = "Meal query validation error"

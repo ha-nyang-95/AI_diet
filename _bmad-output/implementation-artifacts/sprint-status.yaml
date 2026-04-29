@@ -1,5 +1,5 @@
 # generated: 2026-04-27
-# last_updated: 2026-04-29 (Story 1.6 done — CR 13 patches 적용 후 review → done. Epic 1 모든 6 스토리 완료, epic-1: in-progress → done.)
+# last_updated: 2026-04-29 (Story 2.1 done — code-review 완료 + 18 patch 적용 + Status: review → done.)
 # project: AI_diet
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-27
-last_updated: 2026-04-29  # Story 1.6 done — CR 3-layer 통과 + 13 patches 적용 + 백엔드/모바일/웹 게이트 clean. Epic 1 모든 6 스토리 완료.
+last_updated: 2026-04-29  # Story 2.1 done — code-review 18 patch 적용 + review → done. epic-2 in-progress 유지 (2.2-2.5 backlog).
 project: AI_diet
 project_key: NOKEY
 tracking_system: file-system
@@ -53,8 +53,8 @@ development_status:
   epic-1-retrospective: optional
 
   # Epic 2: 식단 입력 + 일별 기록 + 권한 흐름
-  epic-2: backlog
-  2-1-식단-텍스트-입력-crud: backlog
+  epic-2: in-progress
+  2-1-식단-텍스트-입력-crud: done
   2-2-식단-사진-입력-권한-흐름: backlog
   2-3-ocr-vision-추출-확인-카드: backlog
   2-4-일별-식단-기록-화면: backlog

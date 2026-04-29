@@ -227,6 +227,20 @@ Story 1.2부터 Google 로그인을 사용하려면 Google Cloud Console에서 O
   자동화 의사결정) · 1.5(건강 프로필 22종 알레르기) · 1.6(온보딩 튜토리얼 + Epic 1 종료). Epic 2
   (식단 입력 + 일별 기록 + 권한 흐름) 진입 준비 완료.
 
+### 식단 CRUD SOP (Story 2.1)
+
+- `/v1/meals` REST 4 endpoint (POST/GET/PATCH/DELETE) — *작성 경로*(POST/PATCH/DELETE) 3종에만
+  `Depends(require_basic_consents)` wire (Story 1.5 W14 두 번째 적용). *조회 경로*(GET)는
+  `current_user`만 — PIPA Art.35 정보주체 권리(자기 데이터 열람은 동의 철회와 독립).
+- `meals` soft delete 정책 — `DELETE /v1/meals/{id}`는 `deleted_at = func.now()` 단일 UPDATE만
+  실행 (물리 삭제 X). 30일 grace + 일괄 물리 파기는 Story 5.2 책임.
+- PATCH/DELETE의 *소유권 미일치 / 존재 X / 이미 deleted* 모두 동일 응답 (404 + `code=meals.not_found`)
+  — `update().where(id, user_id, deleted_at IS NULL).returning()` 단일 SQL로 enumeration 차단.
+- `Idempotency-Key` 헤더는 본 스토리 baseline에서 *수신만 허용* — 같은 key 재발사 시 중복 row
+  생성. 멱등 처리(409/200 분기)는 Story 2.5(오프라인 큐잉 + 자동 sync) 책임.
+- Epic 2(*식단 입력 + 일별 기록 + 권한 흐름*) 첫 스토리(2.1) 완료. 후속: 2.2(사진 입력) /
+  2.3(OCR 추출) / 2.4(일별 기록 화면 polish) / 2.5(오프라인 텍스트 큐잉 sync).
+
 ### 8시간 체크리스트
 
 - [ ] (1h) `docker compose up` 4개 컨테이너 healthy 확인

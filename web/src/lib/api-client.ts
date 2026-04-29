@@ -213,6 +213,70 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/meals": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Meals
+         * @description 자기 식단 목록 조회 — 인증만 (PIPA Art.35).
+         *
+         *     ``WHERE user_id = current_user.id AND deleted_at IS NULL`` 강제 — 다른 사용자
+         *     노출 / soft-deleted 노출 회귀 차단. ``ORDER BY ate_at DESC`` (partial index hit).
+         *
+         *     날짜 wire 시맨틱(KST/UTC drift)은 Story 2.4 deferred (W50). ``cursor`` 비-null
+         *     송신은 거부 (P18 / D2 결정 — silent 무시 → 무한 루프 footgun 차단). ``next_cursor``
+         *     는 항상 ``null``.
+         */
+        get: operations["list_meals_v1_meals_get"];
+        put?: never;
+        /**
+         * Create Meal
+         * @description 식단 생성 — INSERT + RETURNING으로 race-free 응답.
+         *
+         *     ``ate_at`` 미지정 시 ``func.now()`` fallback (DB-side 단일 시계). 응답 build는
+         *     ``commit`` *이전*에 — expired 객체 lazy-load 회피 (Story 1.5 패턴).
+         */
+        post: operations["create_meal_v1_meals_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/meals/{meal_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete Meal
+         * @description 식단 soft delete — ``UPDATE meals SET deleted_at = now() WHERE ... RETURNING id``.
+         *
+         *     물리 삭제 X (soft delete만). 30일 grace + 물리 파기는 Story 5.2 책임. 이미
+         *     soft-deleted된 meal은 404 (멱등 *조회* 결과 일관성 + enumeration 차단).
+         */
+        delete: operations["delete_meal_v1_meals__meal_id__delete"];
+        options?: never;
+        head?: never;
+        /**
+         * Update Meal
+         * @description 식단 수정 — 단일 SQL ``update().where(id, user_id, deleted_at IS NULL).returning()``.
+         *
+         *     소유권 미일치 / 존재 X / soft-deleted 모두 동일 404 + ``code=meals.not_found``
+         *     (enumeration 차단).
+         */
+        patch: operations["update_meal_v1_meals__meal_id__patch"];
+        trace?: never;
+    };
     "/healthz": {
         parameters: {
             query?: never;
@@ -440,6 +504,79 @@ export interface components {
         LogoutRequest: {
             /** Refresh Token */
             refresh_token?: string | null;
+        };
+        /**
+         * MealCreateRequest
+         * @description ``POST /v1/meals`` body — `extra="forbid"`로 silent unknown field 차단.
+         *
+         *     ``raw_text`` 빈 문자열·whitespace-only 거부 (1차 게이트, trim 정규화 — 모바일
+         *     ``zod.trim()``과 wire 단일화 / P1). ``ate_at`` 미지정 시 DB-side ``now()``
+         *     fallback (server_default). 미래 시점 거부는 도메인 룰 미존재 (catch-up
+         *     시나리오 허용). naive datetime은 거부 (P19 / D3 결정).
+         */
+        MealCreateRequest: {
+            /** Raw Text */
+            raw_text: string;
+            /** Ate At */
+            ate_at?: string | null;
+        };
+        /**
+         * MealListResponse
+         * @description 식단 목록 응답. ``next_cursor``는 본 스토리에서 항상 ``null`` (Story 2.4 입력).
+         */
+        MealListResponse: {
+            /** Meals */
+            meals: components["schemas"]["MealResponse"][];
+            /** Next Cursor */
+            next_cursor?: string | null;
+        };
+        /**
+         * MealResponse
+         * @description 식단 단건 응답 — 7 필드. ``deleted_at`` NULL 시에도 키 유지 (스키마 안정성).
+         */
+        MealResponse: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /**
+             * User Id
+             * Format: uuid
+             */
+            user_id: string;
+            /** Raw Text */
+            raw_text: string;
+            /**
+             * Ate At
+             * Format: date-time
+             */
+            ate_at: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Deleted At */
+            deleted_at: string | null;
+        };
+        /**
+         * MealUpdateRequest
+         * @description ``PATCH /v1/meals/{meal_id}`` body — 모든 필드 None 시 400 (최소 1 필드 필수).
+         *
+         *     ``raw_text=null``과 *필드 부재*는 동일 처리 (no-op, D4 결정). naive ``ate_at``
+         *     거부 (P19 / D3 결정). raw_text는 trim 정규화 (P1).
+         */
+        MealUpdateRequest: {
+            /** Raw Text */
+            raw_text?: string | null;
+            /** Ate At */
+            ate_at?: string | null;
         };
         /** RefreshRequest */
         RefreshRequest: {
@@ -924,6 +1061,153 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["LegalDocumentResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_meals_v1_meals_get: {
+        parameters: {
+            query?: {
+                from_date?: string | null;
+                to_date?: string | null;
+                limit?: number;
+                cursor?: string | null;
+            };
+            header?: {
+                Authorization?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                bn_access?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MealListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_meal_v1_meals_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                Authorization?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                bn_access?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MealCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MealResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_meal_v1_meals__meal_id__delete: {
+        parameters: {
+            query?: never;
+            header?: {
+                Authorization?: string | null;
+            };
+            path: {
+                meal_id: string;
+            };
+            cookie?: {
+                bn_access?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_meal_v1_meals__meal_id__patch: {
+        parameters: {
+            query?: never;
+            header?: {
+                Authorization?: string | null;
+            };
+            path: {
+                meal_id: string;
+            };
+            cookie?: {
+                bn_access?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MealUpdateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MealResponse"];
                 };
             };
             /** @description Validation Error */
