@@ -15,6 +15,7 @@ import uuid
 from datetime import datetime
 from typing import Annotated
 
+import structlog
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import func, update
@@ -23,6 +24,8 @@ from app.api.deps import DbSession, current_user, require_basic_consents
 from app.db.models.user import User
 from app.domain.allergens import normalize_allergens
 from app.domain.health_profile import ActivityLevel, HealthGoal
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter()
 
@@ -163,7 +166,14 @@ async def submit_health_profile(
     expire 시키므로, expired 객체 속성 접근이 lazy-load를 trigger해
     ``sqlalchemy.exc.MissingGreenlet`` (async context lazy-load 금지) 가능.
     RETURNING으로 메모리에 이미 로드된 데이터를 commit 전에 직렬화 후 commit.
+
+    Story 1.6 — ``onboarded_at = func.coalesce(User.onboarded_at, func.now())``로 단일
+    UPDATE 안에서 *기존 NULL이면 now() set, 이미 set이면 그대로* (멱등). Story 5.1
+    프로필 수정 시점에도 ``onboarded_at``은 변경되지 않아 *최초 온보딩 시점*이 보존됨.
+    ``onboarded_first_time`` 로깅은 update 직전 ORM 객체 값으로 판별(NFR-S5: user_id만
+    raw, 다른 민감정보 X).
     """
+    onboarded_first_time = user.onboarded_at is None
     result = await db.execute(
         update(User)
         .where(User.id == user.id)
@@ -175,6 +185,7 @@ async def submit_health_profile(
             health_goal=body.health_goal,
             allergies=body.allergies,
             profile_completed_at=func.now(),
+            onboarded_at=func.coalesce(User.onboarded_at, func.now()),
             updated_at=func.now(),
         )
         .returning(User)
@@ -183,6 +194,11 @@ async def submit_health_profile(
     updated_user = result.scalar_one()
     response = _build_profile_response(updated_user)
     await db.commit()
+    logger.info(
+        "users.profile.updated",
+        user_id=str(user.id),
+        onboarded_first_time=onboarded_first_time,
+    )
     return response
 
 

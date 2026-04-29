@@ -384,3 +384,27 @@ async def test_protected_endpoint_returns_problem_json_when_unauth(
     assert 'realm="balancenote"' in auth_header
     assert 'error="invalid_token"' in auth_header
     assert response.json()["code"] == "auth.access_token.invalid"
+
+
+# --- Story 1.6 — UserPublic.onboarded_at 노출 (AC #6) ---
+
+
+async def test_google_login_response_exposes_onboarded_at(
+    client: AsyncClient, stubbed_google: None
+) -> None:
+    """``POST /v1/auth/google`` 응답 ``user.onboarded_at`` 키 노출 — 신규 사용자는 null.
+
+    refresh 응답(``RefreshResponseMobile``)은 토큰만 — user 정보 X. ``UserPublic``의
+    ``onboarded_at`` 신규 필드 회귀 차단.
+    """
+    response = await client.post("/v1/auth/google", json=_login_payload("mobile"))
+    assert response.status_code == 200
+    body = response.json()
+    assert "onboarded_at" in body["user"]
+    # 신규 사용자 — 프로필 입력 전이라 onboarded_at은 null.
+    assert body["user"]["onboarded_at"] is None
+
+    # refresh 응답에는 user 정보 X (RefreshResponseMobile은 토큰만).
+    refresh = await client.post("/v1/auth/refresh", json={"refresh_token": body["refresh_token"]})
+    assert refresh.status_code == 200
+    assert "user" not in refresh.json()

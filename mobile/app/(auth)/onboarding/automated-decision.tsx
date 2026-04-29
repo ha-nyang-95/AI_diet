@@ -59,10 +59,11 @@ export default function OnboardingAutomatedDecision() {
   }
 
   if (grant.isSuccess) {
-    // Story 1.5 — AD 동의 완료 후 건강 프로필 입력으로 이동. Story 1.6이 본 redirect를
-    // 가로채 ``automated-decision → tutorial → profile → /(tabs)`` chain의 한 구간으로
-    // 끼움. typedRoutes 갱신 전이라 cast로 우회.
-    const target = '/(auth)/onboarding/profile' as Parameters<typeof Redirect>[0]['href'];
+    // Story 1.6 — AD 동의 완료 후 사용법 튜토리얼로 이동. tutorial 화면이 seen flag로
+    // first-time vs resume 분기 → resume이면 자체적으로 /profile로 push.
+    // ``automated-decision → tutorial → profile → /(tabs)`` chain. typedRoutes 갱신
+    // 전이라 cast로 우회(Story 1.5 패턴 정합).
+    const target = '/(auth)/onboarding/tutorial' as Parameters<typeof Redirect>[0]['href'];
     return <Redirect href={target} />;
   }
 
