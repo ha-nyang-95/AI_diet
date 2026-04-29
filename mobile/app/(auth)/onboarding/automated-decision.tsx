@@ -59,7 +59,11 @@ export default function OnboardingAutomatedDecision() {
   }
 
   if (grant.isSuccess) {
-    return <Redirect href="/(tabs)" />;
+    // Story 1.5 — AD 동의 완료 후 건강 프로필 입력으로 이동. Story 1.6이 본 redirect를
+    // 가로채 ``automated-decision → tutorial → profile → /(tabs)`` chain의 한 구간으로
+    // 끼움. typedRoutes 갱신 전이라 cast로 우회.
+    const target = '/(auth)/onboarding/profile' as Parameters<typeof Redirect>[0]['href'];
+    return <Redirect href={target} />;
   }
 
   const canSubmit = agreed && !grant.isPending;

@@ -19,6 +19,7 @@ import asyncio
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
+from decimal import Decimal
 
 import pytest
 import pytest_asyncio
@@ -32,6 +33,7 @@ from app.core.config import settings
 from app.core.security import create_user_token
 from app.db.models.consent import Consent
 from app.db.models.user import User
+from app.domain.health_profile import ActivityLevel, HealthGoal
 from app.domain.legal_documents import CURRENT_VERSIONS
 from app.main import app
 
@@ -127,7 +129,33 @@ async def user_factory(client: AsyncClient) -> UserFactory:
         display_name: str | None = "Test User",
         picture_url: str | None = None,
         deleted: bool = False,
+        profile_completed: bool = False,
+        age: int | None = None,
+        weight_kg: Decimal | None = None,
+        height_cm: int | None = None,
+        activity_level: ActivityLevel | None = None,
+        health_goal: HealthGoal | None = None,
+        allergies: list[str] | None = None,
     ) -> User:
+        """Story 1.5 — ``profile_completed=True`` 또는 명시 인자로 건강 프로필 7컬럼 set.
+
+        ``profile_completed=True`` + 명시 인자 미제공 시 기본값:
+        ``age=30``, ``weight_kg=Decimal('70.0')``, ``height_cm=170``,
+        ``activity_level='moderate'``, ``health_goal='maintenance'``, ``allergies=[]``,
+        ``profile_completed_at=now``.
+        """
+        now = datetime.now(UTC)
+        if profile_completed:
+            age = age if age is not None else 30
+            weight_kg = weight_kg if weight_kg is not None else Decimal("70.0")
+            height_cm = height_cm if height_cm is not None else 170
+            activity_level = activity_level if activity_level is not None else "moderate"
+            health_goal = health_goal if health_goal is not None else "maintenance"
+            allergies = allergies if allergies is not None else []
+            profile_completed_at: datetime | None = now
+        else:
+            profile_completed_at = None
+
         async with session_maker() as session:
             user = User(
                 google_sub=google_sub or f"google-sub-{uuid.uuid4()}",
@@ -136,8 +164,15 @@ async def user_factory(client: AsyncClient) -> UserFactory:
                 display_name=display_name,
                 picture_url=picture_url,
                 role=role,
-                last_login_at=datetime.now(UTC),
-                deleted_at=datetime.now(UTC) if deleted else None,
+                last_login_at=now,
+                deleted_at=now if deleted else None,
+                age=age,
+                weight_kg=weight_kg,
+                height_cm=height_cm,
+                activity_level=activity_level,
+                health_goal=health_goal,
+                allergies=allergies,
+                profile_completed_at=profile_completed_at,
             )
             session.add(user)
             await session.commit()

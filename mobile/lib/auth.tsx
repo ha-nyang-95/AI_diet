@@ -24,6 +24,9 @@ export interface AuthUser {
   display_name: string | null;
   picture_url: string | null;
   role: 'user' | 'admin';
+  // Story 1.5 — 건강 프로필 입력 시점(미입력 시 null). (tabs)/_layout.tsx의 4번째
+  // 가드(profile) 분기 입력. 본 필드는 GET /v1/users/me 응답에서 forward됨.
+  profile_completed_at: string | null;
 }
 
 export interface ConsentStatus {
@@ -51,6 +54,10 @@ export interface AuthContextValue {
   signIn: (payload: { access: string; refresh: string; user: AuthUser }) => Promise<void>;
   signOut: () => Promise<void>;
   setConsentStatus: (status: ConsentStatus) => void;
+  // Story 1.5 — `POST /v1/users/me/profile` 성공 직후 4번째 가드 stale-cache loop를
+  // 차단하기 위해 user state의 profile_completed_at만 즉시 갱신. /me refetch가 settle
+  // 되기 전 (tabs) 가드가 stale null을 봐 onboarding으로 재 redirect되는 flicker 차단.
+  markProfileCompleted: (profileCompletedAt: string) => void;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -252,6 +259,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       },
       setConsentStatus(status) {
         setConsentStatusState(status);
+      },
+      markProfileCompleted(profileCompletedAt) {
+        setUser((prev) => (prev ? { ...prev, profile_completed_at: profileCompletedAt } : prev));
       },
     }),
     [user, consentStatus, isReady],

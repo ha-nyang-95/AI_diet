@@ -1,5 +1,5 @@
 # generated: 2026-04-27
-# last_updated: 2026-04-28 (Story 1.4 done — code-review 완료, 6 patches applied + 8 deferred)
+# last_updated: 2026-04-29 (Story 1.5 done — 3-layer CR 18 patches 적용 + 정적 게이트 통과)
 # project: AI_diet
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-27
-last_updated: 2026-04-28  # Story 1.4 done — code-review 완료, 6 patches applied + 8 deferred
+last_updated: 2026-04-29  # Story 1.5 done — 3-layer CR 18 patches 적용 + pytest 133/133 (cov 80.37%) + 정적 게이트 모두 통과.
 project: AI_diet
 project_key: NOKEY
 tracking_system: file-system
@@ -48,7 +48,7 @@ development_status:
   1-2-google-oauth-로그인-jwt: done
   1-3-약관-개인정보-동의: done
   1-4-자동화-의사결정-동의: done
-  1-5-건강-프로필-입력: backlog
+  1-5-건강-프로필-입력: done
   1-6-온보딩-튜토리얼: backlog
   epic-1-retrospective: optional
 

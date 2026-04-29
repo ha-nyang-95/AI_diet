@@ -89,6 +89,47 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/users/me/profile": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Health Profile
+         * @description 프로필 조회 — 인증만(자기 정보 조회는 동의 무관, deps.py 주석 정합).
+         *
+         *     미입력 사용자(``profile_completed_at IS NULL``) → 200 + 6 필드 NULL +
+         *     ``allergies=[]`` + ``profile_completed_at=null``. 404 미사용.
+         */
+        get: operations["get_health_profile_v1_users_me_profile_get"];
+        put?: never;
+        /**
+         * Submit Health Profile
+         * @description 프로필 입력 — 7컬럼 update + ``profile_completed_at = now()`` set.
+         *
+         *     ``users`` row는 OAuth 시점(Story 1.2)에 이미 존재 — INSERT 분기 X. 항상 200.
+         *     재입력(이미 입력된 사용자가 다시 POST)도 200 + 갱신값 반영 + ``profile_completed_at``
+         *     갱신(*최신 프로필 기록 시점*. 과거 입력 history는 audit_logs Story 7.3 책임).
+         *
+         *     ``UPDATE ... RETURNING``으로 race-free 응답 — commit 후 별도 SELECT 시
+         *     동시 다른 device POST가 끼어들면 응답이 *방금 보낸 값*이 아닌 *마지막 commit
+         *     값*이 되는 race를 차단. ``profile_completed_at`` / ``updated_at`` 양쪽 모두
+         *     DB-side ``func.now()`` 단일 시계 — Python ``datetime.now()`` 와의 clock skew 회피.
+         *
+         *     응답 build는 ``commit`` *이전*에 수행 — AsyncSession은 ``commit`` 후 모든 객체를
+         *     expire 시키므로, expired 객체 속성 접근이 lazy-load를 trigger해
+         *     ``sqlalchemy.exc.MissingGreenlet`` (async context lazy-load 금지) 가능.
+         *     RETURNING으로 메모리에 이미 로드된 데이터를 commit 전에 직렬화 후 commit.
+         */
+        post: operations["submit_health_profile_v1_users_me_profile_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/users/me/consents": {
         parameters: {
             query?: never;
@@ -313,6 +354,58 @@ export interface components {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
         };
+        /**
+         * HealthProfileResponse
+         * @description ``POST/GET /v1/users/me/profile`` 응답 — 7 필드.
+         *
+         *     ``allergies``는 NULL → ``[]`` 빈 배열로 응답(클라이언트 분기 단순화).
+         *     ``weight_kg``는 DB ``Decimal`` → JSON wire format ``float`` 직렬화.
+         */
+        HealthProfileResponse: {
+            /** Age */
+            age: number | null;
+            /** Weight Kg */
+            weight_kg: number | null;
+            /** Height Cm */
+            height_cm: number | null;
+            /** Activity Level */
+            activity_level: ("sedentary" | "light" | "moderate" | "active" | "very_active") | null;
+            /** Health Goal */
+            health_goal: ("weight_loss" | "muscle_gain" | "maintenance" | "diabetes_management") | null;
+            /** Allergies */
+            allergies: string[];
+            /** Profile Completed At */
+            profile_completed_at: string | null;
+        };
+        /**
+         * HealthProfileSubmitRequest
+         * @description ``POST /v1/users/me/profile`` body — 6 입력 필드 (profile_completed_at은 backend-managed).
+         *
+         *     범위 검증은 Pydantic ``Field(ge=, le=)``로 1차, DB CHECK 제약이 2차(double gate).
+         *     ``allergies`` 22종 검증은 ``field_validator``에서 ``normalize_allergens()`` 호출 —
+         *     invalid 항목 발견 시 ``ValueError`` raise → Pydantic ``ValidationError`` →
+         *     글로벌 핸들러가 RFC 7807 400 + ``code=validation.error``.
+         */
+        HealthProfileSubmitRequest: {
+            /** Age */
+            age: number;
+            /** Weight Kg */
+            weight_kg: number;
+            /** Height Cm */
+            height_cm: number;
+            /**
+             * Activity Level
+             * @enum {string}
+             */
+            activity_level: "sedentary" | "light" | "moderate" | "active" | "very_active";
+            /**
+             * Health Goal
+             * @enum {string}
+             */
+            health_goal: "weight_loss" | "muscle_gain" | "maintenance" | "diabetes_management";
+            /** Allergies */
+            allergies?: string[];
+        };
         /** LegalDocumentResponse */
         LegalDocumentResponse: {
             /**
@@ -380,6 +473,8 @@ export interface components {
             last_login_at: string | null;
             /** Onboarded At */
             onboarded_at: string | null;
+            /** Profile Completed At */
+            profile_completed_at: string | null;
         };
         /** UserPublic */
         UserPublic: {
@@ -396,6 +491,8 @@ export interface components {
             picture_url: string | null;
             /** Role */
             role: string;
+            /** Profile Completed At */
+            profile_completed_at: string | null;
         };
         /** ValidationError */
         ValidationError: {
@@ -576,6 +673,76 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["UserMeResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_health_profile_v1_users_me_profile_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                Authorization?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                bn_access?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HealthProfileResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    submit_health_profile_v1_users_me_profile_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                Authorization?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                bn_access?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HealthProfileSubmitRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HealthProfileResponse"];
                 };
             };
             /** @description Validation Error */

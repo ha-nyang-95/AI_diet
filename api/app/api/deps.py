@@ -142,8 +142,13 @@ async def require_basic_consents(
 
     인증 게이트(``current_user``)와 분리된 동의 게이트.
     *핵심 사용자 데이터 작성·조회* 라우트(Story 1.5 ``POST /v1/users/me/profile``,
-    Story 2.1+ ``/v1/meals/*``)에서 명시 wire한다. ``/v1/users/me`` 같은 자기 정보
-    조회 endpoint에 적용 금지(미동의 사용자도 조회 가능해야 UX 정합).
+    Story 2.1+ ``/v1/meals/*``)에서 명시 wire한다.
+
+    ``/v1/users/me``, ``/v1/users/me/profile`` GET 같은 *자기 정보 조회* endpoint에
+    적용 금지: PIPA Art.35(정보주체의 권리 — 열람·정정·삭제·처리정지)는 동의 철회와
+    독립된 *권리*로 보장되며, 자기 데이터 조회를 동의 게이트로 차단하면 권리 행사
+    자체가 봉쇄된다(+ UX 모순: 자기가 입력한 데이터를 볼 수 없음). 따라서 *작성*
+    경로(POST/PATCH/DELETE)는 동의 게이트 wire, *조회* 경로(GET)는 인증만 wire.
     """
     result = await db.execute(select(Consent).where(Consent.user_id == user.id))
     row = result.scalar_one_or_none()
