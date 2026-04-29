@@ -1,16 +1,18 @@
 /**
- * Story 2.1 — `/v1/meals` TanStack Query hooks.
+ * Story 2.1 + 2.2 — `/v1/meals` + `/v1/meals/images` TanStack Query hooks.
  *
- * - `useMealsQuery`        — `GET /v1/meals?from_date=&to_date=&limit=`
- * - `useCreateMealMutation` — `POST /v1/meals`
- * - `useUpdateMealMutation` — `PATCH /v1/meals/{meal_id}`
- * - `useDeleteMealMutation` — `DELETE /v1/meals/{meal_id}`
+ * - `useMealsQuery`            — `GET /v1/meals?from_date=&to_date=&limit=`
+ * - `useCreateMealMutation`    — `POST /v1/meals`
+ * - `useUpdateMealMutation`    — `PATCH /v1/meals/{meal_id}`
+ * - `useDeleteMealMutation`    — `DELETE /v1/meals/{meal_id}`
+ * - `useImagePresignMutation`  — `POST /v1/meals/images/presign` (Story 2.2)
+ * - `uploadImageToR2`          — `presign + R2 PUT 2-step` async helper (Story 2.2)
  *
  * 모든 mutation은 성공 시 `['meals']` 무효화 — list 자동 refetch. optimistic update
  * 회피 (yagni — 실패 시 rollback 복잡, baseline은 단순; Story 8 polish 시점 도입).
  *
  * `MealSubmitError` 패턴은 Story 1.5 `ProfileSubmitError`와 1:1 정합 — typed status +
- * code + detail.
+ * code + detail. `MealImageUploadError`는 R2 PUT 실패(network / timeout) 분기.
  */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
@@ -18,11 +20,16 @@ import { authFetch } from '@/lib/auth';
 
 import type {
   MealCreateRequest,
+  MealImagePresignRequest,
+  MealImagePresignResponse,
   MealListResponse,
   MealResponse,
   MealUpdateRequest,
   MealsListQuery,
 } from './mealSchema';
+
+// 모바일 4G 가정 — 10 MB 업로드 ≤ 25초. 30초 hard cap로 stuck upload 방지.
+const R2_UPLOAD_TIMEOUT_MS = 30_000;
 
 export class MealSubmitError extends Error {
   status: number;
@@ -34,6 +41,25 @@ export class MealSubmitError extends Error {
     this.name = 'MealSubmitError';
     this.status = status;
     this.code = code;
+    this.detail = detail;
+  }
+}
+
+/**
+ * Story 2.2 — R2 PUT 직접 업로드 실패 (presign 단계는 `MealSubmitError`).
+ *
+ * `status`는 R2 응답 status, fetch reject 시 'network', AbortController 시 'timeout'.
+ */
+export class MealImageUploadError extends Error {
+  status: number | 'timeout' | 'network';
+  imageKey?: string;
+  detail?: string;
+
+  constructor(status: number | 'timeout' | 'network', imageKey?: string, detail?: string) {
+    super(detail ?? `image upload failed (${status})`);
+    this.name = 'MealImageUploadError';
+    this.status = status;
+    this.imageKey = imageKey;
     this.detail = detail;
   }
 }
@@ -108,6 +134,90 @@ async function deleteMeal(meal_id: string): Promise<void> {
   // 204 No Content — body 없음.
 }
 
+// --- Story 2.2 R2 presigned URL + 직접 업로드 ---
+
+async function requestPresignedUpload(
+  body: MealImagePresignRequest,
+): Promise<MealImagePresignResponse> {
+  const response = await authFetch('/v1/meals/images/presign', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    const problem = await _parseProblem(response);
+    throw new MealSubmitError(response.status, problem.code, problem.detail);
+  }
+  return (await response.json()) as MealImagePresignResponse;
+}
+
+/**
+ * Story 2.2 — file URI를 R2에 직접 PUT (백엔드 proxy 회피, Railway egress 비용/메모리
+ * 폭발 방지). 2-step:
+ * 1. `POST /v1/meals/images/presign` → upload_url + image_key + public_url 수신.
+ * 2. RN `fetch(upload_url, { method: 'PUT', body: blob })` → R2 직접 PUT.
+ *
+ * 30초 timeout(`AbortController`) — 모바일 4G 가정. 초과 시 `MealImageUploadError("timeout")`.
+ *
+ * 호출자(`(tabs)/meals/input.tsx`)는 반환된 `image_key`를 `MealCreateRequest.image_key`로
+ * 전달. `public_url`은 썸네일 표시용 (R2 public read).
+ */
+export async function uploadImageToR2(
+  uri: string,
+  contentType: MealImagePresignRequest['content_type'],
+  contentLength: number,
+): Promise<{ image_key: string; public_url: string }> {
+  // Step 1 — presign (백엔드 인증·동의·검증 게이트 통과).
+  const presigned = await requestPresignedUpload({
+    content_type: contentType,
+    content_length: contentLength,
+  });
+
+  // Step 2 — file URI → blob → R2 PUT.
+  // RN `fetch(uri).blob()`는 file URI를 Blob으로 변환 가능 (HEIC/HEIF 포함 raw bytes 보존).
+  const fileResponse = await fetch(uri);
+  const blob = await fileResponse.blob();
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), R2_UPLOAD_TIMEOUT_MS);
+
+  let putResponse: Response;
+  try {
+    putResponse = await fetch(presigned.upload_url, {
+      method: 'PUT',
+      headers: { 'Content-Type': contentType },
+      body: blob,
+      signal: controller.signal,
+    });
+  } catch (err) {
+    clearTimeout(timeoutId);
+    // AbortError → timeout, 그 외 → network.
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new MealImageUploadError('timeout', presigned.image_key, '업로드 시간 초과');
+    }
+    throw new MealImageUploadError(
+      'network',
+      presigned.image_key,
+      err instanceof Error ? err.message : 'network error',
+    );
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
+  if (!putResponse.ok) {
+    throw new MealImageUploadError(
+      putResponse.status,
+      presigned.image_key,
+      `R2 PUT failed (${putResponse.status})`,
+    );
+  }
+
+  return {
+    image_key: presigned.image_key,
+    public_url: presigned.public_url,
+  };
+}
+
 export function useMealsQuery(params?: MealsListQuery) {
   return useQuery({
     // params를 query key에 직접 spread하지 않고 직렬화 가능한 plain object로 forward.
@@ -143,5 +253,18 @@ export function useDeleteMealMutation() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['meals'] });
     },
+  });
+}
+
+/**
+ * Story 2.2 — `POST /v1/meals/images/presign` mutation.
+ *
+ * 본 스토리 baseline에서는 `uploadImageToR2`가 inline `requestPresignedUpload`를 호출해
+ * 직접 사용 X. forward-compat hook export — Story 4.1 알림 설정 또는 W43 디버그 polish
+ * 시점에 활용 가능 (예: 진행률 표시 + cancel 버튼).
+ */
+export function useImagePresignMutation() {
+  return useMutation({
+    mutationFn: requestPresignedUpload,
   });
 }

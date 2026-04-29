@@ -239,6 +239,9 @@ export interface paths {
          *
          *     ``ate_at`` 미지정 시 ``func.now()`` fallback (DB-side 단일 시계). 응답 build는
          *     ``commit`` *이전*에 — expired 객체 lazy-load 회피 (Story 1.5 패턴).
+         *
+         *     Story 2.2: ``image_key`` ownership 검증 + 사진-only 입력 시 ``raw_text`` placeholder
+         *     fallback (`PHOTO_ONLY_RAW_TEXT_PLACEHOLDER`). Story 2.3 OCR이 결과로 덮어씀.
          */
         post: operations["create_meal_v1_meals_post"];
         delete?: never;
@@ -273,8 +276,48 @@ export interface paths {
          *
          *     소유권 미일치 / 존재 X / soft-deleted 모두 동일 404 + ``code=meals.not_found``
          *     (enumeration 차단).
+         *
+         *     Story 2.2:
+         *     - ``image_key`` 추가 — *명시 `null` = 클리어*, *키 부재 = no-op* (Pydantic v2
+         *       `model_fields_set`로 absent vs explicit null 구분).
+         *     - ``image_key`` ownership 검증 — None이 아닐 때만 (None=클리어는 검증 대상 X).
+         *     - PATCH 후 *raw_text + image_key 둘 다 None* invariant — `raw_text` DB NOT NULL +
+         *       Story 2.1 D4 시맨틱(`raw_text=null` 송신은 no-op)으로 SQL 레벨 unreachable.
+         *       별도 가드 X (YAGNI, 추가 SELECT round-trip 0).
          */
         patch: operations["update_meal_v1_meals__meal_id__patch"];
+        trace?: never;
+    };
+    "/v1/meals/images/presign": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Issue Presigned Upload
+         * @description R2 presigned PUT URL + 표시용 public URL 한 쌍 발급.
+         *
+         *     HTTP 200 채택 — presign은 *리소스 생성*이 아닌 *short-lived 토큰 발급*
+         *     (stateless — DB row 0). 201은 부적절. ``Idempotency-Key`` 헤더는 *수신만*
+         *     허용 — 매 호출 새 키 발급(중복 방지 의미 부재 / 같은 key 반복 송신해도 매
+         *     호출 새 image_key 반환).
+         *
+         *     에러 흐름:
+         *     - 401 — `auth.access_token.invalid` (`current_user`)
+         *     - 403 — `consent.basic.missing` (`require_basic_consents`)
+         *     - 400 — `validation.error` (Pydantic Literal/Field) 또는
+         *       `meals.image.upload_invalid` (adapter `R2UploadValidationError`)
+         *     - 503 — `meals.image.r2_unconfigured` (`R2NotConfiguredError`)
+         */
+        post: operations["issue_presigned_upload_v1_meals_images_presign_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/healthz": {
@@ -509,16 +552,58 @@ export interface components {
          * MealCreateRequest
          * @description ``POST /v1/meals`` body — `extra="forbid"`로 silent unknown field 차단.
          *
-         *     ``raw_text`` 빈 문자열·whitespace-only 거부 (1차 게이트, trim 정규화 — 모바일
-         *     ``zod.trim()``과 wire 단일화 / P1). ``ate_at`` 미지정 시 DB-side ``now()``
-         *     fallback (server_default). 미래 시점 거부는 도메인 룰 미존재 (catch-up
-         *     시나리오 허용). naive datetime은 거부 (P19 / D3 결정).
+         *     Story 2.1: ``raw_text`` 빈 문자열·whitespace-only 거부 (1차 게이트, trim 정규화 —
+         *     모바일 ``zod.trim()``과 wire 단일화 / P1). ``ate_at`` 미지정 시 DB-side ``now()``
+         *     fallback (server_default). 미래 시점 거부는 도메인 룰 미존재 (catch-up 시나리오
+         *     허용). naive datetime은 거부 (P19 / D3 결정).
+         *
+         *     Story 2.2: ``raw_text``를 *Optional*로 변경 — *최소 한 종(`raw_text` 또는
+         *     `image_key`) 필요*. 사진-only 입력 허용. ``image_key`` ownership 검증은 라우터
+         *     inline (Pydantic field_validator는 user context 미접근).
          */
         MealCreateRequest: {
             /** Raw Text */
-            raw_text: string;
+            raw_text?: string | null;
             /** Ate At */
             ate_at?: string | null;
+            /** Image Key */
+            image_key?: string | null;
+        };
+        /**
+         * MealImagePresignRequest
+         * @description ``POST /v1/meals/images/presign`` body.
+         *
+         *     `content_type`은 Literal로 1차 게이트 — Pydantic이 router 진입 전 차단(400 +
+         *     `code=validation.error`). adapter는 *defensive double-gate* (signature 호출
+         *     경로 보호).
+         *
+         *     `content_length`는 Field `ge=1, le=10*1024*1024` — 0 byte 또는 음수, 10 MB
+         *     초과 거부.
+         */
+        MealImagePresignRequest: {
+            /**
+             * Content Type
+             * @enum {string}
+             */
+            content_type: "image/jpeg" | "image/png" | "image/webp" | "image/heic" | "image/heif";
+            /** Content Length */
+            content_length: number;
+        };
+        /**
+         * MealImagePresignResponse
+         * @description 5 필드 — 라우터가 ``r2_adapter.PresignedUpload`` dataclass에서 직렬화.
+         */
+        MealImagePresignResponse: {
+            /** Upload Url */
+            upload_url: string;
+            /** Image Key */
+            image_key: string;
+            /** Public Url */
+            public_url: string;
+            /** Expires At */
+            expires_at: string;
+            /** Content Type */
+            content_type: string;
         };
         /**
          * MealListResponse
@@ -532,7 +617,11 @@ export interface components {
         };
         /**
          * MealResponse
-         * @description 식단 단건 응답 — 7 필드. ``deleted_at`` NULL 시에도 키 유지 (스키마 안정성).
+         * @description 식단 단건 응답 — 9 필드 (Story 2.1 7 + Story 2.2 image_key + image_url).
+         *
+         *     ``deleted_at`` / ``image_key`` / ``image_url`` NULL 시에도 키 유지 (스키마 안정성).
+         *     ``image_url``은 derived — `image_key` 있으면 `_resolve_public_url(image_key)`,
+         *     없으면 None (`_meal_to_response` helper에서 계산).
          */
         MealResponse: {
             /**
@@ -564,19 +653,30 @@ export interface components {
             updated_at: string;
             /** Deleted At */
             deleted_at: string | null;
+            /** Image Key */
+            image_key: string | null;
+            /** Image Url */
+            image_url: string | null;
         };
         /**
          * MealUpdateRequest
-         * @description ``PATCH /v1/meals/{meal_id}`` body — 모든 필드 None 시 400 (최소 1 필드 필수).
+         * @description ``PATCH /v1/meals/{meal_id}`` body — 모든 필드 absent 시 400 (최소 1 필드 필수).
          *
-         *     ``raw_text=null``과 *필드 부재*는 동일 처리 (no-op, D4 결정). naive ``ate_at``
-         *     거부 (P19 / D3 결정). raw_text는 trim 정규화 (P1).
+         *     Story 2.1: ``raw_text=null``과 *필드 부재*는 동일 처리 (no-op, D4 결정). naive
+         *     ``ate_at`` 거부 (P19 / D3 결정). raw_text는 trim 정규화 (P1).
+         *
+         *     Story 2.2: ``image_key`` 추가 — *명시 `null` = 클리어 (사진 제거)*, *키 부재 = no-op*.
+         *     Pydantic v2 `model_fields_set`로 absent vs explicit null 구분 (라우터 inline).
+         *     `_at_least_one_field` model_validator는 *값이 아닌 송신 여부* 검사 (D4 explicit
+         *     null 시맨틱 보존 — 단순 `is None` 검사로는 의미 손실).
          */
         MealUpdateRequest: {
             /** Raw Text */
             raw_text?: string | null;
             /** Ate At */
             ate_at?: string | null;
+            /** Image Key */
+            image_key?: string | null;
         };
         /** RefreshRequest */
         RefreshRequest: {
@@ -1208,6 +1308,43 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["MealResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    issue_presigned_upload_v1_meals_images_presign_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                Authorization?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                bn_access?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MealImagePresignRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MealImagePresignResponse"];
                 };
             };
             /** @description Validation Error */

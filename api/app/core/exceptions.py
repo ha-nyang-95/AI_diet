@@ -232,3 +232,50 @@ class MealQueryValidationError(MealError):
     status: ClassVar[int] = 400
     code: ClassVar[str] = "meals.query.invalid"
     title: ClassVar[str] = "Meal query validation error"
+
+
+# --- Meal Image 계층 (Story 2.2 — R2 presigned URL + 사진 입력 흐름) ---
+
+
+class MealImageError(MealError):
+    """식단 사진 도메인 예외 base (R2 presigned URL / 업로드 검증 / cross-user 도용 등).
+
+    `MealError` 하위 — `meals.image.*` 코드 카탈로그.
+    """
+
+    status: ClassVar[int] = 500
+    code: ClassVar[str] = "meals.image.error"
+    title: ClassVar[str] = "Meal Image Error"
+
+
+class R2UploadValidationError(MealImageError):
+    """R2 presigned URL 발급 시 입력 검증 실패 — content_type whitelist 위반 또는
+    content_length 초과 (서버 측 1차 게이트). Pydantic Literal/Field가 router 진입
+    전 차단하므로 본 예외는 *adapter-level defensive double-gate* (settings/runtime
+    분기) — 클라이언트가 router 우회로 adapter 직접 호출하는 시나리오 보호."""
+
+    status: ClassVar[int] = 400
+    code: ClassVar[str] = "meals.image.upload_invalid"
+    title: ClassVar[str] = "Image upload validation failed"
+
+
+class R2NotConfiguredError(MealImageError):
+    """R2 환경변수 5종(`r2_account_id`, `r2_access_key_id`, `r2_secret_access_key`,
+    `r2_bucket`) 미설정 — dev/CI fail-fast 503. prod에서는 부팅 시 settings 검증으로
+    조기 차단해야 하나 현재 baseline은 runtime fail-fast(Story 8 hardening 시 부팅
+    검증 추가)."""
+
+    status: ClassVar[int] = 503
+    code: ClassVar[str] = "meals.image.r2_unconfigured"
+    title: ClassVar[str] = "Image upload service unavailable"
+
+
+class MealImageOwnershipError(MealImageError):
+    """`image_key`가 `meals/{current_user.id}/` prefix와 미일치 — cross-user
+    image_key 도용 차단 (사용자 A가 사용자 B의 image_key를 자기 식단에 첨부하는
+    attack 차단). 라우터 inline 검증 (Pydantic field_validator는 user context
+    미접근)."""
+
+    status: ClassVar[int] = 400
+    code: ClassVar[str] = "meals.image.foreign_key_rejected"
+    title: ClassVar[str] = "Image key does not belong to current user"
