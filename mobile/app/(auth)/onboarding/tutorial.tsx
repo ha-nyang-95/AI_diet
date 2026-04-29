@@ -15,18 +15,20 @@
  * 3 슬라이드 노출. fetch 완료 전 ``ActivityIndicator`` (Story 1.5 P9 패턴 정합).
  */
 import { Redirect, router } from 'expo-router';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  Dimensions,
+  BackHandler,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
+  useWindowDimensions,
   View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { getTutorialSeen, setTutorialSeen } from '@/features/onboarding/tutorialState';
 
@@ -56,7 +58,11 @@ export default function OnboardingTutorial() {
   const [seenChecked, setSeenChecked] = useState<boolean | null>(null);
   const [currentIndex, setCurrentIndex] = useState(0);
   const scrollRef = useRef<ScrollView>(null);
-  const { width } = Dimensions.get('window');
+  // 회전·foldable resize 시 슬라이드 width를 동적 추적 — 첫 렌더 캡처는 snap 어긋남 유발.
+  const { width } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
+  // 빠른 더블-탭 race 차단 (finish 2회 / scrollTo race).
+  const busyRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -68,6 +74,53 @@ export default function OnboardingTutorial() {
       cancelled = true;
     };
   }, []);
+
+  const finish = useCallback(async () => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    try {
+      await setTutorialSeen();
+    } finally {
+      // setTutorialSeen은 내부에서 swallow — 여기 try/finally는 향후 다른 throw 추가에 대비.
+      router.replace(PROFILE_ROUTE);
+    }
+  }, []);
+
+  const handleNext = useCallback(() => {
+    if (busyRef.current) return;
+    setCurrentIndex((idx) => {
+      const next = idx + 1;
+      if (next < TUTORIAL_SLIDES.length) {
+        scrollRef.current?.scrollTo({ x: next * width, animated: true });
+        return next;
+      }
+      // 마지막 슬라이드에서 *다음* 탭 → finish 흐름.
+      void finish();
+      return idx;
+    });
+  }, [finish, width]);
+
+  // Android hardware back — slide 2·3에서는 이전 슬라이드로, slide 1에서는 chain 보존을 위해
+  // back 차단(/automated-decision으로 pop 방지). chain은 server-state 가드가 책임.
+  useEffect(() => {
+    if (seenChecked !== false) return undefined;
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (busyRef.current) return true;
+      let handled = false;
+      setCurrentIndex((idx) => {
+        if (idx > 0) {
+          const prev = idx - 1;
+          scrollRef.current?.scrollTo({ x: prev * width, animated: true });
+          handled = true;
+          return prev;
+        }
+        handled = true; // slide 1: back 무시 — chain 보존.
+        return idx;
+      });
+      return handled;
+    });
+    return () => sub.remove();
+  }, [seenChecked, width]);
 
   // bootstrap 미완료(seen 값 fetch 중) 동안 spinner — flicker 차단(Story 1.5 P9 정합).
   if (seenChecked === null) {
@@ -82,19 +135,6 @@ export default function OnboardingTutorial() {
     return <Redirect href={PROFILE_ROUTE} />;
   }
 
-  const handleNext = () => {
-    const next = currentIndex + 1;
-    if (next < TUTORIAL_SLIDES.length) {
-      scrollRef.current?.scrollTo({ x: next * width, animated: true });
-      setCurrentIndex(next);
-    }
-  };
-
-  const finish = async () => {
-    await setTutorialSeen(true);
-    router.replace(PROFILE_ROUTE);
-  };
-
   const handleScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const index = Math.round(event.nativeEvent.contentOffset.x / width);
     if (index !== currentIndex && index >= 0 && index < TUTORIAL_SLIDES.length) {
@@ -105,7 +145,7 @@ export default function OnboardingTutorial() {
   const isLast = currentIndex === TUTORIAL_SLIDES.length - 1;
 
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { paddingTop: insets.top, paddingBottom: insets.bottom }]}>
       <View style={styles.header}>
         <Pressable
           onPress={() => {
@@ -131,16 +171,26 @@ export default function OnboardingTutorial() {
           <View
             key={slide.title}
             style={[styles.slide, { width }]}
-            accessibilityRole="text"
-            accessibilityLabel={`튜토리얼 슬라이드 ${index + 1}: ${slide.title}`}
+            accessibilityLabel={`튜토리얼 슬라이드 ${index + 1} / ${TUTORIAL_SLIDES.length}`}
           >
-            <Text style={styles.title}>{slide.title}</Text>
+            <Text accessibilityRole="header" style={styles.title}>
+              {slide.title}
+            </Text>
             <Text style={styles.subtitle}>{slide.subtitle}</Text>
           </View>
         ))}
       </ScrollView>
 
-      <View style={styles.indicators}>
+      <View
+        style={styles.indicators}
+        accessibilityRole="adjustable"
+        accessibilityLabel="튜토리얼 진행"
+        accessibilityValue={{
+          min: 1,
+          max: TUTORIAL_SLIDES.length,
+          now: currentIndex + 1,
+        }}
+      >
         {TUTORIAL_SLIDES.map((slide, index) => (
           <View
             key={slide.title}
@@ -183,11 +233,12 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'flex-end',
     paddingHorizontal: 16,
-    paddingTop: 56,
+    paddingTop: 8,
     paddingBottom: 8,
   },
   skipButton: { paddingVertical: 8, paddingHorizontal: 12 },
-  skipText: { fontSize: 14, color: '#666' },
+  // WCAG AA 보장 — #555 on #fff 약 7.4:1 (이전 #666 5.7:1 borderline).
+  skipText: { fontSize: 14, color: '#555' },
   scroll: { flex: 1 },
   // NFR-A3 폰트 200% 대응 — 수직 배치 + flexShrink로 wrap 보장.
   slide: {
@@ -206,7 +257,7 @@ const styles = StyleSheet.create({
   },
   subtitle: {
     fontSize: 15,
-    color: '#555',
+    color: '#444',
     textAlign: 'center',
     lineHeight: 22,
     flexShrink: 1,
@@ -224,7 +275,7 @@ const styles = StyleSheet.create({
     marginHorizontal: 4,
   },
   dotActive: { backgroundColor: '#1a73e8' },
-  footer: { paddingHorizontal: 24, paddingBottom: 32 },
+  footer: { paddingHorizontal: 24, paddingBottom: 16 },
   primaryButton: {
     backgroundColor: '#1a73e8',
     paddingVertical: 14,

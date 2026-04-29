@@ -15,17 +15,30 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 const TUTORIAL_SEEN_KEY = 'bn:onboarding-tutorial-seen';
 const SEEN_VALUE = '1';
 
+// AsyncStorage 실패는 정보 제공 화면 UX보다 결코 critical하지 않음. read 실패 시 false
+// 반환(슬라이드 한 번 더 노출 — 사용자 영향 무 vs spinner 영구 정지의 차이) + write 실패는
+// caller가 navigation을 우선 진행하도록 swallow. 토큰 store(secure-store.ts) 와 책임 분리.
 export async function getTutorialSeen(): Promise<boolean> {
-  const value = await AsyncStorage.getItem(TUTORIAL_SEEN_KEY);
-  return value === SEEN_VALUE;
+  try {
+    const value = await AsyncStorage.getItem(TUTORIAL_SEEN_KEY);
+    return value === SEEN_VALUE;
+  } catch {
+    return false;
+  }
 }
 
-export async function setTutorialSeen(value: true): Promise<void> {
-  // 인자는 ``true`` 리터럴 — false 저장은 ``clearOnboardingState()``로 일원화.
-  void value;
-  await AsyncStorage.setItem(TUTORIAL_SEEN_KEY, SEEN_VALUE);
+export async function setTutorialSeen(): Promise<void> {
+  try {
+    await AsyncStorage.setItem(TUTORIAL_SEEN_KEY, SEEN_VALUE);
+  } catch {
+    // swallow — 다음 진입 시 슬라이드 1회 더 노출에 그침. caller 내비 진행 보장.
+  }
 }
 
 export async function clearOnboardingState(): Promise<void> {
-  await AsyncStorage.removeItem(TUTORIAL_SEEN_KEY);
+  try {
+    await AsyncStorage.removeItem(TUTORIAL_SEEN_KEY);
+  } catch {
+    // swallow — signOut 흐름에서 토큰 clear / 라우팅이 차단되면 안 됨.
+  }
 }

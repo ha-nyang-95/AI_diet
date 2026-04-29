@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import uuid
 from datetime import datetime
 from typing import Annotated
@@ -194,11 +195,15 @@ async def submit_health_profile(
     updated_user = result.scalar_one()
     response = _build_profile_response(updated_user)
     await db.commit()
-    logger.info(
-        "users.profile.updated",
-        user_id=str(user.id),
-        onboarded_first_time=onboarded_first_time,
-    )
+    # 로깅은 commit 성공 후 best-effort — structlog processor 실패가 응답을 500으로
+    # 전환하지 않도록 가드(클라이언트는 이미 DB write가 성공한 것을 응답으로 봐야 함.
+    # retry 시 COALESCE는 멱등이라 데이터 중복 위험 X이나 사용자 경험 혼선만).
+    with contextlib.suppress(Exception):
+        logger.info(
+            "users.profile.updated",
+            user_id=str(user.id),
+            onboarded_first_time=onboarded_first_time,
+        )
     return response
 
 

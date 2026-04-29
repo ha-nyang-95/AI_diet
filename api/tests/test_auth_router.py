@@ -15,14 +15,19 @@ Google API mock: monkeypatch로 `app.api.v1.auth.google_exchange_code` /
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import UTC as _UTC
+from datetime import datetime as _dt
 from typing import Any
 
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient
+from sqlalchemy import update as _sa_update
 
 from app.adapters.google_oauth import GoogleIdTokenClaims, GoogleTokenResponse
 from app.core.exceptions import EmailUnverifiedError
+from app.db.models.user import User as _User
+from app.main import app as _app
 from tests.conftest import UserFactory, auth_headers
 
 GOOGLE_SUB_FIXTURE = "1234567890987654321"
@@ -408,3 +413,36 @@ async def test_google_login_response_exposes_onboarded_at(
     refresh = await client.post("/v1/auth/refresh", json={"refresh_token": body["refresh_token"]})
     assert refresh.status_code == 200
     assert "user" not in refresh.json()
+
+
+async def test_google_login_response_forwards_existing_onboarded_at(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    stubbed_google: None,
+) -> None:
+    """기존 사용자(``onboarded_at`` set) 재로그인 시 응답이 그 값을 ISO datetime으로 forward.
+
+    ``UserPublic.onboarded_at`` *값* 경로 검증 — None 케이스만 검증하면 forward
+    회귀(``_user_to_public``에서 필드 누락) 발견 X. AC #6 + AC #7 server-state 분기 보장.
+    """
+    pre_set = _dt(2025, 6, 1, 10, 30, 45, tzinfo=_UTC)
+    await user_factory(
+        google_sub=GOOGLE_SUB_FIXTURE,
+        email=EMAIL_FIXTURE,
+        profile_completed=True,
+    )
+    # user_factory는 ``onboarded_at``을 set하지 않으므로 수동 UPDATE.
+    session_maker = _app.state.session_maker
+    async with session_maker() as session:
+        await session.execute(
+            _sa_update(_User).where(_User.email == EMAIL_FIXTURE).values(onboarded_at=pre_set)
+        )
+        await session.commit()
+
+    response = await client.post("/v1/auth/google", json=_login_payload("mobile"))
+    assert response.status_code == 200
+    body = response.json()
+    onboarded_at = body["user"]["onboarded_at"]
+    assert isinstance(onboarded_at, str)
+    parsed = _dt.fromisoformat(onboarded_at.replace("Z", "+00:00"))
+    assert parsed == pre_set

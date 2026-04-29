@@ -121,6 +121,7 @@ async function performRefresh(): Promise<string | null> {
   }
   if (!response.ok) {
     await clearAuth();
+    await clearOnboardingState();
     onSessionCleared?.();
     return null;
   }
@@ -129,6 +130,7 @@ async function performRefresh(): Promise<string | null> {
     body = (await response.json()) as RefreshResponse;
   } catch {
     await clearAuth();
+    await clearOnboardingState();
     onSessionCleared?.();
     return null;
   }
@@ -263,8 +265,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // UX(tutorialState 책임). 두 책임을 분리 + 순차 await — Promise.all로 묶지
         // 않는 이유는 실패 시 fallback 의미 분명 + secure-store.ts의 *토큰 전용*
         // 책임을 유지(secure-store.ts:4 "AsyncStorage 평문 저장 금지" 주석 정합).
+        // tutorialState helper는 내부에서 AsyncStorage 실패를 swallow하나, 라우팅·
+        // user state 클리어가 차단되지 않도록 호출 자체에도 try/catch 가드(defense-in-depth).
         await clearAuth();
-        await clearOnboardingState();
+        try {
+          await clearOnboardingState();
+        } catch {
+          // ignore — signOut의 후속 라우팅이 절대 차단되면 안 됨.
+        }
         setUser(null);
         setConsentStatusState(null);
         router.replace('/(auth)/login');
