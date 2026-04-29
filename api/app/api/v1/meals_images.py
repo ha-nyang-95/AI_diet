@@ -18,6 +18,8 @@ NFR-S5 마스킹 — `upload_url` raw 출력 X (서명 토큰 노출 차단), `i
 
 from __future__ import annotations
 
+import asyncio
+from datetime import UTC
 from typing import Annotated, Literal
 
 import structlog
@@ -72,7 +74,19 @@ class MealImagePresignResponse(BaseModel):
 # --- Endpoints -----------------------------------------------------------------
 
 
-@router.post("/presign", status_code=status.HTTP_200_OK)
+@router.post(
+    "/presign",
+    status_code=status.HTTP_200_OK,
+    responses={
+        # P9 — OpenAPI에 도메인 에러 코드 노출(클라이언트 typed handler용).
+        # 422는 FastAPI Pydantic ValidationError 자동 등록 — 실제 응답은
+        # 글로벌 핸들러가 400 + ``code=validation.error``로 변환.
+        400: {"description": "Validation error or unsupported content type"},
+        401: {"description": "Authentication required"},
+        403: {"description": "Basic consents required"},
+        503: {"description": "Image upload service unavailable (R2 unconfigured)"},
+    },
+)
 async def issue_presigned_upload(
     body: MealImagePresignRequest,
     user: Annotated[User, Depends(require_basic_consents)],
@@ -90,11 +104,15 @@ async def issue_presigned_upload(
     - 400 — `validation.error` (Pydantic Literal/Field) 또는
       `meals.image.upload_invalid` (adapter `R2UploadValidationError`)
     - 503 — `meals.image.r2_unconfigured` (`R2NotConfiguredError`)
+
+    P1 — sync boto3 호출(`generate_presigned_url`)은 ``asyncio.to_thread``로
+    격리해 event-loop block 회피.
     """
-    presigned = r2_adapter.create_presigned_upload(
-        user_id=user.id,
-        content_type=body.content_type,
-        content_length=body.content_length,
+    presigned = await asyncio.to_thread(
+        r2_adapter.create_presigned_upload,
+        user.id,
+        body.content_type,
+        body.content_length,
     )
     logger.info(
         "meals.image.presign_issued",
@@ -104,11 +122,13 @@ async def issue_presigned_upload(
         content_length=body.content_length,
         expires_in_seconds=r2_adapter.PRESIGNED_URL_EXPIRES_SECONDS,
     )
-    # ISO 8601 UTC 직렬화 — 프론트는 `Date.parse()`로 변환.
+    # ISO 8601 UTC 직렬화 — `astimezone(UTC)`로 tz 강제 후 `Z`-suffixed strftime
+    # (P12 fix — `.replace("+00:00", "Z")`는 microsecond 출력/non-UTC tz 시 fragile).
+    expires_at_utc = presigned.expires_at.astimezone(UTC)
     return MealImagePresignResponse(
         upload_url=presigned.upload_url,
         image_key=presigned.image_key,
         public_url=presigned.public_url,
-        expires_at=presigned.expires_at.isoformat().replace("+00:00", "Z"),
+        expires_at=expires_at_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
         content_type=presigned.content_type,
     )

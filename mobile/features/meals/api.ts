@@ -161,6 +161,18 @@ async function requestPresignedUpload(
  *
  * 호출자(`(tabs)/meals/input.tsx`)는 반환된 `image_key`를 `MealCreateRequest.image_key`로
  * 전달. `public_url`은 썸네일 표시용 (R2 public read).
+ *
+ * P5 — 현재는 RN `fetch(uri).blob()` 패턴 유지(10 MB 한도 + RN 0.81 안정). expo-file-system
+ * `uploadAsync` BINARY_CONTENT 모드로 streaming 전환은 Story 8 polish (DF3 — 의존성 추가
+ * scope creep 회피). 본 함수는 *full-buffer PUT* 가정 — heap 50 MB 정도 여유 필요.
+ *
+ * P7 — `controller.signal.aborted` 체크로 RN AbortError name 변종(`AbortError` vs
+ * `DOMException`) 호환성 보강. clearTimeout은 finally 단일 위치(중복 호출 방지).
+ *
+ * P21 — 백엔드 POST/PATCH `/v1/meals`에 `head_object` HEAD-check 도입(D1) → 본 함수 호출
+ * 후 image_key가 R2에 실제 PUT됐는지 서버가 검증. 즉 PUT 실패 시 클라이언트는 본 함수에서
+ * `MealImageUploadError`로 차단되거나(직접), 서버 attach 단계에서 `meals.image.not_uploaded`
+ * 400으로 차단(간접 — race 케이스 cover).
  */
 export async function uploadImageToR2(
   uri: string,
@@ -190,9 +202,9 @@ export async function uploadImageToR2(
       signal: controller.signal,
     });
   } catch (err) {
-    clearTimeout(timeoutId);
-    // AbortError → timeout, 그 외 → network.
-    if (err instanceof Error && err.name === 'AbortError') {
+    // P7 — `controller.signal.aborted` 체크가 RN AbortError name 변종 호환에 안전
+    // (Error name이 `AbortError` 또는 `DOMException`로 다름). clearTimeout은 finally에 단일.
+    if (controller.signal.aborted) {
       throw new MealImageUploadError('timeout', presigned.image_key, '업로드 시간 초과');
     }
     throw new MealImageUploadError(

@@ -34,9 +34,10 @@ Story 2.2 추가:
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import date, datetime, timedelta
-from typing import Annotated
+from typing import Annotated, Final
 
 import structlog
 from fastapi import APIRouter, Depends, Query, Response, status
@@ -46,12 +47,24 @@ from sqlalchemy import func, insert, select, update
 from app.adapters import r2 as r2_adapter
 from app.api.deps import DbSession, current_user, require_basic_consents
 from app.core.exceptions import (
+    MealImageNotUploadedError,
     MealImageOwnershipError,
     MealNotFoundError,
     MealQueryValidationError,
 )
 from app.db.models.meal import Meal
 from app.db.models.user import User
+
+# P2 — `image_key`는 `meals/<user_uuid>/<image_uuid>.<ext>` 형식으로 고정. 5종 ext
+# whitelist + UUID v4 형식 검증 + path traversal/duplicate slash/empty 차단을 단일
+# regex로 통합. user_id 일치는 라우터 inline (regex로 표현 불가).
+_IMAGE_KEY_PATTERN: Final[str] = (
+    r"^meals/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+    r"/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+    r"\.(?:jpg|png|webp|heic|heif)$"
+)
+# UUID(36) + UUID(36) + ext(≤4) + slashes(7) + "meals"(5) ≈ 90. 128로 충분 + 여유.
+_IMAGE_KEY_MAX_LENGTH: Final[int] = 128
 
 # 사진-only 입력 시 ``raw_text`` 자동 fallback. Story 2.3 OCR이 추출 결과로 덮어씀.
 # i18n은 OUT (NFR-L2 한국어 1차).
@@ -94,7 +107,7 @@ class MealCreateRequest(BaseModel):
 
     raw_text: str | None = Field(default=None, min_length=1, max_length=2000)
     ate_at: datetime | None = None
-    image_key: str | None = Field(default=None, max_length=512)
+    image_key: str | None = Field(default=None, max_length=_IMAGE_KEY_MAX_LENGTH, pattern=_IMAGE_KEY_PATTERN)
 
     @field_validator("raw_text")
     @classmethod
@@ -136,7 +149,7 @@ class MealUpdateRequest(BaseModel):
 
     raw_text: str | None = Field(default=None, min_length=1, max_length=2000)
     ate_at: datetime | None = None
-    image_key: str | None = Field(default=None, max_length=512)
+    image_key: str | None = Field(default=None, max_length=_IMAGE_KEY_MAX_LENGTH, pattern=_IMAGE_KEY_PATTERN)
 
     @field_validator("raw_text")
     @classmethod
@@ -159,8 +172,10 @@ class MealUpdateRequest(BaseModel):
         # `raw_text=null` (D4 — no-op) 또는 `image_key=null` (클리어) 송신은 *각각의
         # 의미가 있는* 필드 송신 — 단순 `is None` 검사로는 의미 손실. Story 2.1 validator
         # 단순화 케이스(`is None`)를 본 스토리에서 갱신.
-        sent_fields = self.model_fields_set.intersection({"raw_text", "ate_at", "image_key"})
-        if not sent_fields:
+        # P16 — set은 `model_fields.keys()`에서 derive(필드 추가 시 drift 자동 차단).
+        # `model_fields_set` 자체가 이미 정의된 필드의 부분집합이므로 추가 intersection
+        # 불필요 — 단 미래 *비-data* 필드(예: meta)가 도입될 경우 set 갱신 필요.
+        if not self.model_fields_set:
             raise ValueError("at least one of raw_text, ate_at, image_key required")
         return self
 
@@ -195,8 +210,10 @@ def _meal_to_response(meal: Meal) -> MealResponse:
     """ORM → 응답 모델 변환 단일 지점 (Story 1.5 ``_build_profile_response`` 패턴).
 
     Story 2.2: ``image_url``은 ``image_key``에서 derive (public CDN URL).
+    P3 — ``r2_adapter.resolve_public_url``은 R2 미설정 시 ``None`` 반환(broken
+    `https:///<key>` URL 차단). 호출 측은 None을 그대로 응답 ``image_url``로 forward.
     """
-    image_url = r2_adapter._resolve_public_url(meal.image_key) if meal.image_key else None
+    image_url = r2_adapter.resolve_public_url(meal.image_key) if meal.image_key else None
     return MealResponse(
         id=meal.id,
         user_id=meal.user_id,
@@ -215,11 +232,26 @@ def _validate_image_key_ownership(image_key: str, user_id: uuid.UUID) -> None:
 
     Pydantic field_validator는 user context 미접근 → 라우터 inline 호출.
     image_key=None은 검증 대상 X (호출 측에서 None 체크).
+    P2 — image_key 형식(UUID + ext + 단일 slash)은 Pydantic ``pattern``이 차단하므로
+    본 함수는 *user_id 일치*만 책임 (regex 통과 후 호출됨).
     """
     expected_prefix = f"meals/{user_id}/"
     if not image_key.startswith(expected_prefix):
         raise MealImageOwnershipError(
             f"image_key does not belong to current user (expected prefix {expected_prefix!r})"
+        )
+
+
+async def _verify_image_uploaded(image_key: str) -> None:
+    """R2에 ``image_key`` 객체가 실제로 PUT 됐는지 HEAD-check (P21 / D1 결정).
+
+    sync boto3 호출은 ``asyncio.to_thread``로 격리(event-loop block 회피, P1 정합).
+    R2 미설정 시 ``R2NotConfiguredError`` 전파 — 글로벌 핸들러 503.
+    """
+    exists = await asyncio.to_thread(r2_adapter.head_object_exists, image_key)
+    if not exists:
+        raise MealImageNotUploadedError(
+            f"image_key not found in R2 (presign 발급 후 PUT 미수행 또는 만료): {image_key}"
         )
 
 
@@ -240,9 +272,11 @@ async def create_meal(
     Story 2.2: ``image_key`` ownership 검증 + 사진-only 입력 시 ``raw_text`` placeholder
     fallback (`PHOTO_ONLY_RAW_TEXT_PLACEHOLDER`). Story 2.3 OCR이 결과로 덮어씀.
     """
-    # Story 2.2 — image_key ownership 검증 (Pydantic 통과 후 router-inline).
+    # Story 2.2 — image_key ownership 검증 (Pydantic 통과 후 router-inline) +
+    # P21 R2 head_object HEAD-check (D1 결정 — orphan/미PUT 키 attach 차단).
     if body.image_key is not None:
         _validate_image_key_ownership(body.image_key, user.id)
+        await _verify_image_uploaded(body.image_key)
 
     # 사진-only 입력 시 raw_text placeholder fallback. body.raw_text가 None이거나
     # (실제 trim된) 빈 문자열일 가능성을 Pydantic이 차단하므로 None 체크만으로 충분.
@@ -335,9 +369,11 @@ async def update_meal(
       Story 2.1 D4 시맨틱(`raw_text=null` 송신은 no-op)으로 SQL 레벨 unreachable.
       별도 가드 X (YAGNI, 추가 SELECT round-trip 0).
     """
-    # Story 2.2 — image_key ownership 검증 (None=클리어는 검증 대상 X).
+    # Story 2.2 — image_key ownership 검증 + R2 head_object HEAD-check (P21 / D1).
+    # None=클리어는 검증 대상 X.
     if body.image_key is not None:
         _validate_image_key_ownership(body.image_key, user.id)
+        await _verify_image_uploaded(body.image_key)
 
     # P5 — `updated_at`는 모델 ``onupdate=text("now()")``가 자동 갱신 → 명시 set 불필요.
     # Story 2.2 — `model_fields_set`로 *송신 여부* 검사 (D4 시맨틱).

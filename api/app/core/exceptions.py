@@ -240,10 +240,13 @@ class MealQueryValidationError(MealError):
 class MealImageError(MealError):
     """식단 사진 도메인 예외 base (R2 presigned URL / 업로드 검증 / cross-user 도용 등).
 
-    `MealError` 하위 — `meals.image.*` 코드 카탈로그.
+    `MealError` 하위 — `meals.image.*` 코드 카탈로그. *Abstract base* — 직접
+    instantiate 금지(모든 서브클래스가 status/code/title을 명시 override).
+    direct-raise 방어로 default `status=400`을 유지(이전 500 default가 leak 시
+    server-error 위장하던 가능성 차단).
     """
 
-    status: ClassVar[int] = 500
+    status: ClassVar[int] = 400
     code: ClassVar[str] = "meals.image.error"
     title: ClassVar[str] = "Meal Image Error"
 
@@ -260,10 +263,14 @@ class R2UploadValidationError(MealImageError):
 
 
 class R2NotConfiguredError(MealImageError):
-    """R2 환경변수 5종(`r2_account_id`, `r2_access_key_id`, `r2_secret_access_key`,
-    `r2_bucket`) 미설정 — dev/CI fail-fast 503. prod에서는 부팅 시 settings 검증으로
-    조기 차단해야 하나 현재 baseline은 runtime fail-fast(Story 8 hardening 시 부팅
-    검증 추가)."""
+    """R2 환경변수 4종(`r2_account_id`, `r2_access_key_id`, `r2_secret_access_key`,
+    `r2_bucket`) 미설정 시 503 fail-fast — dev/CI 부팅 통과 + 첫 호출 시 차단.
+
+    `r2_public_base_url`은 *optional 5번째 envvar* — 미설정 시
+    `<account_id>.r2.dev/<bucket>` fallback 사용(adapter._resolve_public_url). 즉
+    R2 *클라이언트 생성*에 필수는 4종이며, 5번째는 *표시 URL prefix override*만 담당.
+    prod에서는 부팅 시 settings 검증으로 조기 차단해야 하나 현재 baseline은 runtime
+    fail-fast(Story 8 hardening 시 부팅 검증 추가)."""
 
     status: ClassVar[int] = 503
     code: ClassVar[str] = "meals.image.r2_unconfigured"
@@ -279,3 +286,13 @@ class MealImageOwnershipError(MealImageError):
     status: ClassVar[int] = 400
     code: ClassVar[str] = "meals.image.foreign_key_rejected"
     title: ClassVar[str] = "Image key does not belong to current user"
+
+
+class MealImageNotUploadedError(MealImageError):
+    """`image_key`가 R2에 실제로 PUT 되지 않은 상태 — `head_object` HEAD-check 실패
+    (P21 / D1 결정). 클라이언트가 presign 발급 후 PUT 단계 실패/생략한 경우 또는
+    악의적 attach 시도(orphan 키 사용) 차단. R2 storage abuse + 깨진 image_url 방어."""
+
+    status: ClassVar[int] = 400
+    code: ClassVar[str] = "meals.image.not_uploaded"
+    title: ClassVar[str] = "Image key not uploaded to R2"

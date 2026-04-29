@@ -15,7 +15,7 @@
  * - `accessibilityRole="button"` 모든 CTA.
  */
 
-import { Linking, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Alert, Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 
 export type PermissionKind = 'camera' | 'mediaLibrary';
 
@@ -68,9 +68,14 @@ export function PermissionDeniedView({
   const handlePrimary = canAskAgain
     ? onRetryRequest
     : () => {
-        // RN 표준 API — iOS/Android 양쪽 표준. 실패 시(rare) 무시 — 플랫폼이 OS 다이얼로그
-        // 노출 못하면 사용자에게 별도 안내 불가 (어차피 fallback CTA가 있음).
-        void Linking.openSettings();
+        // RN 표준 API — iOS/Android 양쪽 표준. P13 fix — OEM Android에서 settings deep
+        // link 부재 시 silent fail이 아니라 사용자에게 안내 (catch + Alert).
+        Linking.openSettings().catch(() => {
+          Alert.alert(
+            '설정을 열 수 없어요',
+            '기기 설정 > 앱 권한에서 직접 허용해주세요.',
+          );
+        });
       };
   const secondaryLabel = fallbackLabel ?? copy.defaultFallbackLabel;
 

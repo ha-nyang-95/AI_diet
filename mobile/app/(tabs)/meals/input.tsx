@@ -23,7 +23,7 @@
  * - 클라이언트 1차 가드: *raw_text 또는 image_key 최소 1* 미충족 시 Alert + early return.
  */
 import { Stack, router, useLocalSearchParams } from 'expo-router';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, StyleSheet, View } from 'react-native';
 import { useQueryClient, type QueryClient } from '@tanstack/react-query';
 import * as ImagePicker from 'expo-image-picker';
@@ -74,11 +74,27 @@ function _normalizeMimeType(
   raw: string | undefined,
 ): MealImagePresignRequest['content_type'] | null {
   if (!raw) return null;
-  const normalized = raw.toLowerCase();
-  return (SUPPORTED_MIME as readonly string[]).includes(normalized)
-    ? (normalized as MealImagePresignRequest['content_type'])
+  // P6 — charset suffix(`; charset=binary` Android 일부 picker) 제거 + lowercase + 별칭.
+  const cleaned = raw.split(';')[0].trim().toLowerCase();
+  // image/jpg는 비표준 별칭 — image/jpeg로 정규화.
+  const aliased = cleaned === 'image/jpg' ? 'image/jpeg' : cleaned;
+  return (SUPPORTED_MIME as readonly string[]).includes(aliased)
+    ? (aliased as MealImagePresignRequest['content_type'])
     : null;
 }
+
+// P6 — picker가 mimeType 미반환(iOS HEIC 일부 케이스)일 때 URI 확장자 fallback.
+function _inferMimeFromUri(uri: string): string | undefined {
+  const lower = uri.toLowerCase();
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+  if (lower.endsWith('.png')) return 'image/png';
+  if (lower.endsWith('.webp')) return 'image/webp';
+  if (lower.endsWith('.heic')) return 'image/heic';
+  if (lower.endsWith('.heif')) return 'image/heif';
+  return undefined;
+}
+
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 
 interface DeniedState {
   kind: PermissionKind;
@@ -109,6 +125,15 @@ export default function MealInputScreen() {
 
   const cameraPermission = useCameraPermission();
   const mediaLibraryPermission = useMediaLibraryPermission();
+
+  // P8 — unmount 시 in-flight upload 결과의 setState 차단 (React stale-state 경고 방지).
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (!isPatchCacheMiss) return;
@@ -202,7 +227,9 @@ export default function MealInputScreen() {
     if (result.canceled || result.assets.length === 0) return;
 
     const asset = result.assets[0];
-    const mime = _normalizeMimeType(asset.mimeType);
+    // P6 — mimeType 누락 시 URI 확장자 fallback (iOS HEIC 일부 케이스 cover).
+    const rawMime = asset.mimeType ?? _inferMimeFromUri(asset.uri);
+    const mime = _normalizeMimeType(rawMime);
     if (!mime) {
       Alert.alert(
         '지원하지 않는 형식',
@@ -210,22 +237,41 @@ export default function MealInputScreen() {
       );
       return;
     }
-    if (!asset.fileSize || asset.fileSize < 1) {
-      Alert.alert('업로드 실패', '이미지 크기를 확인할 수 없어요. 다시 시도해주세요.');
+
+    // P23 (D4 결정) — fileSize 미반환/0 시 차단하지 않고 blob 측정으로 fallback.
+    // Android Q+ 일부 picker가 HEIC/대용량 파일에서 fileSize를 반환하지 않는 케이스
+    // 사용자 차단 회피. blob 측정 비용은 한 번 fetch (uploadImageToR2 내부에서 다시
+    // fetch — RN 0.81 기준 redundant 호출이지만 캐시되어 비용 미미).
+    let declaredSize = asset.fileSize ?? 0;
+    if (declaredSize < 1) {
+      try {
+        const probe = await fetch(asset.uri);
+        const probeBlob = await probe.blob();
+        declaredSize = probeBlob.size;
+      } catch {
+        Alert.alert('업로드 실패', '이미지를 불러올 수 없어요. 다시 시도해주세요.');
+        return;
+      }
+    }
+    if (declaredSize < 1) {
+      Alert.alert('업로드 실패', '0 byte 이미지는 업로드할 수 없어요.');
       return;
     }
-    if (asset.fileSize > 10 * 1024 * 1024) {
+    if (declaredSize > MAX_UPLOAD_BYTES) {
       Alert.alert('이미지가 너무 커요', '10 MB 이하의 이미지를 사용해주세요.');
       return;
     }
 
     setIsUploading(true);
     try {
-      const uploaded = await uploadImageToR2(asset.uri, mime, asset.fileSize);
+      const uploaded = await uploadImageToR2(asset.uri, mime, declaredSize);
+      // P8 — unmount 후 도달 시 setState 호출 회피 (React stale-state 경고 + memory leak).
+      if (!isMountedRef.current) return;
       setImageKey(uploaded.image_key);
       setImageLocalUri(asset.uri);
       setImageClearedExplicitly(false);
     } catch (err) {
+      if (!isMountedRef.current) return;
       if (err instanceof MealImageUploadError) {
         const reason =
           err.status === 'timeout'
@@ -241,7 +287,9 @@ export default function MealInputScreen() {
         Alert.alert('이미지 업로드 실패', '잠시 후 다시 시도해주세요.');
       }
     } finally {
-      setIsUploading(false);
+      if (isMountedRef.current) {
+        setIsUploading(false);
+      }
     }
   };
 

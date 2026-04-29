@@ -16,15 +16,35 @@ import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.adapters import r2 as r2_adapter
+from app.core.config import settings as _settings
 from app.db.models.consent import Consent
 from app.db.models.meal import Meal
 from app.db.models.user import User
 from app.main import app
 from tests.conftest import auth_headers
+
+
+@pytest.fixture
+def _r2_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """test settings에 R2 환경변수 5종 + boto3 client singleton 무효화 (P11 fix —
+    test_meals_images_router.py 패턴 정합).
+
+    P21 — `head_object_exists`는 기본 *True* mock(객체 존재 가정). 미존재 시나리오는
+    별도 테스트에서 monkeypatch override.
+    """
+    monkeypatch.setattr(_settings, "r2_account_id", "test-account-id")
+    monkeypatch.setattr(_settings, "r2_access_key_id", "test-access-key")
+    monkeypatch.setattr(_settings, "r2_secret_access_key", "test-secret-key")
+    monkeypatch.setattr(_settings, "r2_bucket", "test-bucket")
+    monkeypatch.setattr(_settings, "r2_public_base_url", "https://cdn.example.com")
+    r2_adapter._reset_client_for_tests()
+    monkeypatch.setattr(r2_adapter, "head_object_exists", lambda image_key: True)
 
 UserFactory = Callable[..., Awaitable[User]]
 ConsentFactory = Callable[..., Awaitable[Consent]]
@@ -646,15 +666,11 @@ async def test_post_meal_with_image_key_only_creates_with_placeholder(
     client: AsyncClient,
     user_factory: UserFactory,
     consent_factory: ConsentFactory,
-    monkeypatch: object,
+    _r2_configured: None,
 ) -> None:
-    """사진-only 입력 — `raw_text`는 자동 placeholder, `image_key` 저장."""
-    # `image_url` derive를 위해 r2_account_id + r2_bucket이 필요(설정값으로 충분).
-    from app.core.config import settings as _settings
-
-    monkeypatch.setattr(_settings, "r2_account_id", "test-account", raising=False)  # type: ignore[attr-defined]
-    monkeypatch.setattr(_settings, "r2_bucket", "test-bucket", raising=False)  # type: ignore[attr-defined]
-
+    """사진-only 입력 — `raw_text`는 자동 placeholder, `image_key` 저장.
+    P10/P11 fix — `_r2_configured` 공통 fixture로 R2 설정 단일화 (typing object 제거).
+    """
     user = await user_factory()
     await consent_factory(user)
     image_key = _image_key_for(user)
@@ -675,6 +691,7 @@ async def test_post_meal_with_image_key_and_raw_text_stores_both(
     client: AsyncClient,
     user_factory: UserFactory,
     consent_factory: ConsentFactory,
+    _r2_configured: None,
 ) -> None:
     user = await user_factory()
     await consent_factory(user)
@@ -786,6 +803,7 @@ async def test_patch_meal_replaces_image_key(
     client: AsyncClient,
     user_factory: UserFactory,
     consent_factory: ConsentFactory,
+    _r2_configured: None,
 ) -> None:
     """PATCH로 새 image_key 명시 송신 → 갱신."""
     user = await user_factory()
@@ -822,3 +840,114 @@ async def test_patch_meal_foreign_image_key_returns_400(
     )
     assert response.status_code == 400
     assert response.json()["code"] == "meals.image.foreign_key_rejected"
+
+
+# --- Code Review (2026-04-29) — P4/P20b/P21 회귀 테스트 ----------------------------
+
+
+async def test_meal_response_includes_image_url_when_image_key_set(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+    _r2_configured: None,
+) -> None:
+    """P4 — AC12 명시 테스트. `image_url`이 정확히 `f"{r2_public_base_url}/{image_key}"`.
+
+    `_r2_configured` fixture가 `r2_public_base_url="https://cdn.example.com"` 설정 →
+    `image_url == "https://cdn.example.com/{image_key}"` *exact-equality* 검증.
+    기존 `test_post_meal_with_image_key_only_creates_with_placeholder`는 substring
+    `image_key in image_url`만 검증해 derivation 공식 검증이 누락됐던 갭 메움.
+    """
+    user = await user_factory()
+    await consent_factory(user)
+    image_key = _image_key_for(user)
+
+    response = await client.post(
+        "/v1/meals",
+        json={"image_key": image_key},
+        headers=auth_headers(user),
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["image_url"] == f"https://cdn.example.com/{image_key}"
+
+
+async def test_post_meal_image_key_with_traversal_returns_400(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """P20b — `..` traversal 차단. Pydantic regex(P2)가 1차 게이트로 reject.
+
+    `meals/<self>/../<other>/x.jpg` 형태는 prefix 검사만으로는 통과하지만 regex는
+    UUID 형식 + 단일 slash만 허용 → `validation.error`로 차단(ownership reject 전 단계).
+    """
+    user_a = await user_factory()
+    user_b = await user_factory()
+    await consent_factory(user_a)
+
+    traversal_key = f"meals/{user_a.id}/../{user_b.id}/{uuid.uuid4()}.jpg"
+
+    response = await client.post(
+        "/v1/meals",
+        json={"image_key": traversal_key},
+        headers=auth_headers(user_a),
+    )
+    # Pydantic pattern fail → 400 + validation.error.
+    assert response.status_code == 400
+    assert response.json()["code"] == "validation.error"
+
+
+async def test_post_meal_image_key_invalid_format_returns_400(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """P20b — 빈 문자열·잘못된 ext·malformed 키는 Pydantic regex로 reject."""
+    user = await user_factory()
+    await consent_factory(user)
+
+    invalid_keys = [
+        "",  # 빈 문자열
+        "meals/x/y.jpg",  # UUID 아님
+        f"meals/{user.id}/{uuid.uuid4()}.gif",  # ext whitelist 위반
+        f"meals/{user.id}/{uuid.uuid4()}.jpg/extra",  # 추가 segment
+        f"meals/{user.id}//{uuid.uuid4()}.jpg",  # duplicate slash
+    ]
+
+    for bad_key in invalid_keys:
+        response = await client.post(
+            "/v1/meals",
+            json={"image_key": bad_key},
+            headers=auth_headers(user),
+        )
+        assert response.status_code == 400, f"expected 400 for key={bad_key!r}, got {response.status_code}"
+        assert response.json()["code"] == "validation.error", f"unexpected code for key={bad_key!r}"
+
+
+async def test_post_meal_unuploaded_image_key_returns_400(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+    _r2_configured: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P21 — `head_object_exists` False 시 `meals.image.not_uploaded` 400.
+
+    클라이언트가 presign 발급 후 PUT 미수행하고 image_key를 attach 시도하는 시나리오 —
+    R2 storage abuse + 깨진 image_url 방어.
+    """
+    # _r2_configured는 head_object_exists를 True mock — 본 테스트는 False로 override.
+    monkeypatch.setattr(r2_adapter, "head_object_exists", lambda image_key: False)
+
+    user = await user_factory()
+    await consent_factory(user)
+    image_key = _image_key_for(user)
+
+    response = await client.post(
+        "/v1/meals",
+        json={"image_key": image_key},
+        headers=auth_headers(user),
+    )
+    assert response.status_code == 400, response.text
+    assert response.json()["code"] == "meals.image.not_uploaded"

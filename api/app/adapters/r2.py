@@ -6,22 +6,30 @@ write는 백엔드 발급 presigned URL(5분 만료), read는 public CDN URL 직
 
 `image_key` 형식: `meals/{user_id}/{uuid4}.{ext}` — user-scoped prefix로 (a)
 cross-user enumeration 차단, (b) Story 5.2 R2 GC를 user_id 단위 prefix delete로
-단순화, (c) `MealCreateRequest.image_key` ownership 검증을 startswith 1줄로 충족.
+단순화, (c) `MealCreateRequest.image_key` ownership 검증을 1줄로 충족(P2 — UUID
+형식 + ext whitelist + path traversal 차단을 Pydantic regex로 통합).
 
 본 모듈은 raw boto3 client 생성을 *모듈 lazy singleton*으로 격리 — 매 호출 새
 client 생성 시 50ms 오버헤드. settings 환경변수 미설정 시 ``R2NotConfiguredError``
 raise (dev/CI 부팅 통과 + runtime fail-fast).
+
+P1 — `_client` 보호: ``threading.Lock`` double-checked locking. boto3 import는
+모듈 최상단(lazy import 제거 — 부팅 +150ms는 1회뿐 + cold-path event-loop block 회피).
+sync boto3 호출은 라우터에서 ``asyncio.to_thread``로 격리(event loop 보호).
 """
 
 from __future__ import annotations
 
+import threading
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final, Literal
 
+import boto3
 import structlog
 from botocore.client import Config
+from botocore.exceptions import ClientError
 
 from app.core.config import settings
 from app.core.exceptions import R2NotConfiguredError, R2UploadValidationError
@@ -56,7 +64,9 @@ _CONTENT_TYPE_TO_EXT: Final[dict[str, str]] = {
 
 # 모듈 lazy singleton — boto3 client는 thread-safe + 매 호출 새 instance는 ~50ms 오버헤드.
 # 타입은 boto3 동적이라 Any 사용 — `mypy_boto3_s3` stubs는 yagni.
+# P1 — concurrent first request에서 race로 다중 client 생성하던 것을 Lock으로 차단.
 _client: Any = None
+_client_lock = threading.Lock()
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,33 +96,40 @@ def _get_client() -> Any:
 
     R2 sigv4 강제 — `signature_version="s3v4"` 누락 시 R2가 *Unauthorized* 반환.
     region_name="auto"는 R2 표준(엣지에서 자동 라우팅).
+
+    P1 — double-checked locking으로 concurrent 첫 호출 race 차단. ``_client``는
+    선검사로 lock 우회(hot path 무비용), 미생성 시 lock 안에서 재검사 후 build.
     """
     global _client
+    # Hot path — Lock 우회 (set은 GIL/원자적 참조).
     if _client is not None:
         return _client
 
-    # AC2 명시 4종(account_id, access_key_id, secret_access_key, bucket) 검증.
-    # public_url은 optional — fallback이 있어 None이어도 OK.
-    if not settings.r2_account_id:
-        raise R2NotConfiguredError("R2 not configured: r2_account_id missing")
-    if not settings.r2_access_key_id:
-        raise R2NotConfiguredError("R2 not configured: r2_access_key_id missing")
-    if not settings.r2_secret_access_key:
-        raise R2NotConfiguredError("R2 not configured: r2_secret_access_key missing")
-    if not settings.r2_bucket:
-        raise R2NotConfiguredError("R2 not configured: r2_bucket missing")
+    with _client_lock:
+        # Double-check — lock 진입 전 다른 스레드가 이미 생성한 경우 재사용.
+        if _client is not None:
+            return _client
 
-    import boto3  # late import — boto3 import는 ~150 ms, dev/CI 부팅 fast-path 보호.
+        # AC2 명시 4종(account_id, access_key_id, secret_access_key, bucket) 검증.
+        # public_url은 optional — fallback이 있어 None이어도 OK.
+        if not settings.r2_account_id:
+            raise R2NotConfiguredError("R2 not configured: r2_account_id missing")
+        if not settings.r2_access_key_id:
+            raise R2NotConfiguredError("R2 not configured: r2_access_key_id missing")
+        if not settings.r2_secret_access_key:
+            raise R2NotConfiguredError("R2 not configured: r2_secret_access_key missing")
+        if not settings.r2_bucket:
+            raise R2NotConfiguredError("R2 not configured: r2_bucket missing")
 
-    _client = boto3.client(
-        "s3",
-        endpoint_url=f"https://{settings.r2_account_id}.r2.cloudflarestorage.com",
-        aws_access_key_id=settings.r2_access_key_id,
-        aws_secret_access_key=settings.r2_secret_access_key,
-        region_name="auto",
-        config=Config(signature_version="s3v4"),
-    )
-    return _client
+        _client = boto3.client(
+            "s3",
+            endpoint_url=f"https://{settings.r2_account_id}.r2.cloudflarestorage.com",
+            aws_access_key_id=settings.r2_access_key_id,
+            aws_secret_access_key=settings.r2_secret_access_key,
+            region_name="auto",
+            config=Config(signature_version="s3v4"),
+        )
+        return _client
 
 
 def _reset_client_for_tests() -> None:
@@ -140,17 +157,48 @@ def _generate_image_key(user_id: uuid.UUID, ext: str) -> str:
     return f"meals/{user_id}/{uuid.uuid4()}.{ext}"
 
 
-def _resolve_public_url(image_key: str) -> str:
-    """`r2_public_base_url` 우선, 미설정 시 `*.r2.dev` fallback.
+def resolve_public_url(image_key: str) -> str | None:
+    """`r2_public_base_url` 우선, 미설정 시 `*.r2.dev` fallback. R2 미설정 시 None.
 
     Cloudflare custom domain 또는 `<account_id>.r2.dev/<bucket>` 표준. dev/CI에서
     `r2_public_base_url`은 비어 있을 수 있으나 `r2_account_id` + `r2_bucket`은 R2
     클라이언트 생성에서 이미 검증됨.
+
+    P3 — R2가 fully unconfigured(envvar 모두 빈 문자열)인 환경(dev/CI/seed)에서
+    legacy meal row가 `image_key`를 가지고 있더라도 broken `https:///<key>` URL
+    대신 ``None``을 반환(스키마 안정성 + 미설정 환경 가시화). 호출 측은 None을
+    응답 `image_url` 그대로 forward.
     """
     base = settings.r2_public_base_url.rstrip("/")
     if base:
         return f"{base}/{image_key}"
-    return f"https://{settings.r2_account_id}.r2.dev/{settings.r2_bucket}/{image_key}"
+    if settings.r2_account_id and settings.r2_bucket:
+        return f"https://{settings.r2_account_id}.r2.dev/{settings.r2_bucket}/{image_key}"
+    return None
+
+
+def head_object_exists(image_key: str) -> bool:
+    """R2에 ``image_key`` 객체가 실제로 존재하는지 HEAD-check (P21 — D1 결정).
+
+    ``MealCreateRequest`` / ``MealUpdateRequest``가 `image_key`를 수용할 때 호출 —
+    클라이언트가 presign 발급 후 실제 PUT을 수행했는지 검증. 미PUT 키 attach 차단
+    (R2 storage abuse + 깨진 image_url 방어).
+
+    R2 미설정 시 ``R2NotConfiguredError`` 전파 — 라우터는 503 변환.
+
+    HEAD 비용: ~50 ms latency + R2 Class A operation 1건 (1M 호출/$4.5 — 미미).
+    """
+    client = _get_client()
+    try:
+        client.head_object(Bucket=settings.r2_bucket, Key=image_key)
+    except ClientError as e:
+        # 404/403/NoSuchKey 모두 *미존재*로 일원화 (enumeration 방어 + R2 응답 형식 변동 흡수).
+        error_code = e.response.get("Error", {}).get("Code", "")
+        if error_code in {"404", "NoSuchKey", "Not Found", "403", "Forbidden"}:
+            return False
+        # 다른 에러(5xx, 네트워크 등)는 전파 — 글로벌 핸들러가 500.
+        raise
+    return True
 
 
 def create_presigned_upload(
@@ -186,7 +234,9 @@ def create_presigned_upload(
         },
         ExpiresIn=PRESIGNED_URL_EXPIRES_SECONDS,
     )
-    public_url = _resolve_public_url(image_key)
+    # public_url은 dev/CI에서 None일 수 있으나(P3) presign 발급은 r2_account_id +
+    # r2_bucket이 검증된 상태(`_get_client()`)라 사실상 항상 non-None. 방어로 안전 처리.
+    public_url = resolve_public_url(image_key) or ""
     expires_at = datetime.now(UTC) + timedelta(seconds=PRESIGNED_URL_EXPIRES_SECONDS)
 
     # NFR-S5 — `upload_url` raw 출력 X (서명 토큰 노출 차단). image_key/content_type/length만.

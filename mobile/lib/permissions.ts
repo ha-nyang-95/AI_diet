@@ -30,9 +30,13 @@ export interface PermissionHookResult {
   canAskAgain: boolean;
 }
 
-function _normalizeStatus(status: ImagePicker.PermissionStatus): PermissionStatus {
-  if (status === ImagePicker.PermissionStatus.GRANTED) return 'granted';
-  if (status === ImagePicker.PermissionStatus.DENIED) return 'denied';
+function _normalizeStatus(status: ImagePicker.PermissionStatus | string): PermissionStatus {
+  // P18 — iOS 14+ Limited Photo Library Access를 granted로 매핑. expo-image-picker는
+  // limited 모드에서도 picker가 정상 동작(사용자가 허용한 사진 부분집합 노출). enum에는
+  // LIMITED가 없어 string 비교(`'limited'`)로 처리. denied로 매핑하면 사용자가 "다시 요청"
+  // 버튼만 보이고 picker는 영원히 사용 불가 → UX stuck. granted 매핑이 expo의 의도.
+  if (status === 'granted' || status === 'limited') return 'granted';
+  if (status === 'denied') return 'denied';
   return 'undetermined';
 }
 
@@ -48,7 +52,10 @@ export function useCameraPermission(): PermissionHookResult {
   };
 
   return {
-    status: permission ? _normalizeStatus(permission.status) : 'undetermined',
+    // P17 — permission이 null(hook 미해결 첫 frame)이면 status='undetermined' + canAskAgain=true.
+    // 이 상태로 `request()` 호출 시 expo-image-picker가 내부적으로 첫 권한 fetch를 강제하므로
+    // 안전(race window 0). 'undetermined' 매핑은 *첫 prompt 미진행 상태*와 동일 시맨틱.
+    status: permission == null ? 'undetermined' : _normalizeStatus(permission.status),
     request,
     canAskAgain: permission?.canAskAgain ?? true,
   };
@@ -66,7 +73,10 @@ export function useMediaLibraryPermission(): PermissionHookResult {
   };
 
   return {
-    status: permission ? _normalizeStatus(permission.status) : 'undetermined',
+    // P17 — permission이 null(hook 미해결 첫 frame)이면 status='undetermined' + canAskAgain=true.
+    // 이 상태로 `request()` 호출 시 expo-image-picker가 내부적으로 첫 권한 fetch를 강제하므로
+    // 안전(race window 0). 'undetermined' 매핑은 *첫 prompt 미진행 상태*와 동일 시맨틱.
+    status: permission == null ? 'undetermined' : _normalizeStatus(permission.status),
     request,
     canAskAgain: permission?.canAskAgain ?? true,
   };
