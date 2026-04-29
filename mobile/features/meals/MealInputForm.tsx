@@ -9,9 +9,19 @@
  */
 import { zodResolver } from '@hookform/resolvers/zod';
 import { Controller, useForm } from 'react-hook-form';
-import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import {
+  KeyboardAvoidingView,
+  Platform,
+  Pressable,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from 'react-native';
 
 import { mealCreateSchema, type MealCreateFormData } from './mealSchema';
+
+const RAW_TEXT_MAX_LENGTH = 2000;
 
 interface MealInputFormProps {
   defaultValues?: MealCreateFormData;
@@ -20,6 +30,8 @@ interface MealInputFormProps {
   onSubmit: (data: MealCreateFormData) => void | Promise<void>;
   /** API 에러를 raw_text 필드 에러로 표시할 때 사용. 비울 시 미표시. */
   serverError?: string | null;
+  /** P14 — 입력 변경 시 stale `serverError`를 클리어하는 콜백. */
+  onClearServerError?: () => void;
 }
 
 export function MealInputForm({
@@ -28,6 +40,7 @@ export function MealInputForm({
   submitLabel,
   onSubmit,
   serverError,
+  onClearServerError,
 }: MealInputFormProps) {
   const {
     control,
@@ -41,17 +54,28 @@ export function MealInputForm({
   const fieldErrorMessage = errors.raw_text?.message ?? serverError ?? null;
 
   return (
-    <View style={styles.container}>
+    // P13 — 작은 화면(iPhone SE 등)에서 키보드 올라올 때 submit 버튼 가림 방지.
+    <KeyboardAvoidingView
+      style={styles.container}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+    >
       <Controller
         control={control}
         name="raw_text"
         render={({ field: { onChange, onBlur, value } }) => (
           <TextInput
             value={value}
-            onChangeText={onChange}
+            onChangeText={(text) => {
+              onChange(text);
+              // P14 — 사용자가 입력을 수정하면 stale server error 자동 클리어.
+              if (serverError && onClearServerError) onClearServerError();
+            }}
             onBlur={onBlur}
             multiline
             numberOfLines={6}
+            // P12 — OS-level hard cap (paste 등으로 2000자 초과 시 즉시 차단,
+            // submit 시점이 아닌 입력 시점에 사용자 인지).
+            maxLength={RAW_TEXT_MAX_LENGTH}
             placeholder="예: 삼겹살 1인분, 김치찌개, 소주 2잔"
             style={[styles.input, fieldErrorMessage ? styles.inputError : null]}
             accessibilityLabel="식단 텍스트 입력"
@@ -75,7 +99,7 @@ export function MealInputForm({
       >
         <Text style={styles.buttonText}>{isSubmitting ? '저장 중…' : submitLabel}</Text>
       </Pressable>
-    </View>
+    </KeyboardAvoidingView>
   );
 }
 

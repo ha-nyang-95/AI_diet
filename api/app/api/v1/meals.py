@@ -22,7 +22,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import uuid
 from datetime import date, datetime, timedelta
 from typing import Annotated
@@ -33,7 +32,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from sqlalchemy import func, insert, select, update
 
 from app.api.deps import DbSession, current_user, require_basic_consents
-from app.core.exceptions import MealNotFoundError
+from app.core.exceptions import MealNotFoundError, MealQueryValidationError
 from app.db.models.meal import Meal
 from app.db.models.user import User
 
@@ -45,12 +44,25 @@ router = APIRouter()
 # --- Pydantic 스키마 (snake_case 양방향) -----------------------------------
 
 
+def _reject_naive_ate_at(v: datetime | None) -> datetime | None:
+    """``ate_at`` naive datetime 거부 (P19 / D3 결정).
+
+    Postgres ``timestamptz``가 naive datetime을 *세션 TZ*로 해석 → 같은 ``"12:00"``
+    문자열이 클라이언트 TZ별로 다른 절대 시각으로 저장되는 wire 모호성 차단. 모바일
+    ``Date.toISOString()``는 항상 ``Z``-suffixed UTC 송신 → 정상 클라이언트 영향 0.
+    """
+    if v is not None and v.tzinfo is None:
+        raise ValueError("ate_at must include a timezone (e.g., '2026-04-29T12:00:00+09:00')")
+    return v
+
+
 class MealCreateRequest(BaseModel):
     """``POST /v1/meals`` body — `extra="forbid"`로 silent unknown field 차단.
 
-    ``raw_text`` 빈 문자열·whitespace-only 거부 (1차 게이트). ``ate_at`` 미지정 시
-    DB-side ``now()`` fallback (server_default). 미래 시점 거부는 도메인 룰 미존재
-    (catch-up 시나리오 허용).
+    ``raw_text`` 빈 문자열·whitespace-only 거부 (1차 게이트, trim 정규화 — 모바일
+    ``zod.trim()``과 wire 단일화 / P1). ``ate_at`` 미지정 시 DB-side ``now()``
+    fallback (server_default). 미래 시점 거부는 도메인 룰 미존재 (catch-up
+    시나리오 허용). naive datetime은 거부 (P19 / D3 결정).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -61,14 +73,24 @@ class MealCreateRequest(BaseModel):
     @field_validator("raw_text")
     @classmethod
     def _validate_not_whitespace(cls, v: str) -> str:
-        """trim 후 길이 재검증 — 공백만 입력된 본문 차단."""
-        if not v.strip():
+        """trim 후 길이 재검증 — 공백만 입력된 본문 차단 + 정규화 (P1)."""
+        stripped = v.strip()
+        if not stripped:
             raise ValueError("raw_text must not be whitespace-only")
-        return v
+        return stripped
+
+    @field_validator("ate_at")
+    @classmethod
+    def _validate_ate_at_tz(cls, v: datetime | None) -> datetime | None:
+        return _reject_naive_ate_at(v)
 
 
 class MealUpdateRequest(BaseModel):
-    """``PATCH /v1/meals/{meal_id}`` body — 모든 필드 None 시 400 (최소 1 필드 필수)."""
+    """``PATCH /v1/meals/{meal_id}`` body — 모든 필드 None 시 400 (최소 1 필드 필수).
+
+    ``raw_text=null``과 *필드 부재*는 동일 처리 (no-op, D4 결정). naive ``ate_at``
+    거부 (P19 / D3 결정). raw_text는 trim 정규화 (P1).
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -78,9 +100,17 @@ class MealUpdateRequest(BaseModel):
     @field_validator("raw_text")
     @classmethod
     def _validate_not_whitespace(cls, v: str | None) -> str | None:
-        if v is not None and not v.strip():
+        if v is None:
+            return None
+        stripped = v.strip()
+        if not stripped:
             raise ValueError("raw_text must not be whitespace-only")
-        return v
+        return stripped
+
+    @field_validator("ate_at")
+    @classmethod
+    def _validate_ate_at_tz(cls, v: datetime | None) -> datetime | None:
+        return _reject_naive_ate_at(v)
 
     @model_validator(mode="after")
     def _at_least_one_field(self) -> MealUpdateRequest:
@@ -147,14 +177,13 @@ async def create_meal(
     created = result.scalar_one()
     response = _meal_to_response(created)
     await db.commit()
-    with contextlib.suppress(Exception):
-        logger.info(
-            "meals.created",
-            user_id=str(user.id),
-            meal_id=str(created.id),
-            raw_text_len=len(body.raw_text),
-            ate_at_iso=created.ate_at.isoformat(),
-        )
+    logger.info(
+        "meals.created",
+        user_id=str(user.id),
+        meal_id=str(created.id),
+        raw_text_len=len(body.raw_text),
+        ate_at_iso=created.ate_at.isoformat(),
+    )
     return response
 
 
@@ -165,14 +194,24 @@ async def list_meals(
     from_date: Annotated[date | None, Query()] = None,
     to_date: Annotated[date | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
-    cursor: Annotated[str | None, Query()] = None,  # noqa: ARG001 — Story 2.4 입력
+    cursor: Annotated[str | None, Query()] = None,
 ) -> MealListResponse:
     """자기 식단 목록 조회 — 인증만 (PIPA Art.35).
 
     ``WHERE user_id = current_user.id AND deleted_at IS NULL`` 강제 — 다른 사용자
     노출 / soft-deleted 노출 회귀 차단. ``ORDER BY ate_at DESC`` (partial index hit).
-    ``cursor``는 *수신만* — 본 스토리는 처리 X. ``next_cursor``는 항상 ``null``.
+
+    날짜 wire 시맨틱(KST/UTC drift)은 Story 2.4 deferred (W50). ``cursor`` 비-null
+    송신은 거부 (P18 / D2 결정 — silent 무시 → 무한 루프 footgun 차단). ``next_cursor``
+    는 항상 ``null``.
     """
+    # P18 — `cursor` 비-null 거부 (D2 결정).
+    if cursor is not None:
+        raise MealQueryValidationError("cursor pagination not yet supported (Story 2.4)")
+    # P15 — `from_date > to_date` 거부 (typo / swap → silent empty list 회피).
+    if from_date is not None and to_date is not None and from_date > to_date:
+        raise MealQueryValidationError("from_date must not be after to_date")
+
     stmt = select(Meal).where(Meal.user_id == user.id, Meal.deleted_at.is_(None))
     if from_date is not None:
         stmt = stmt.where(Meal.ate_at >= from_date)
@@ -200,7 +239,8 @@ async def update_meal(
     소유권 미일치 / 존재 X / soft-deleted 모두 동일 404 + ``code=meals.not_found``
     (enumeration 차단).
     """
-    values: dict[str, object] = {"updated_at": func.now()}
+    # P5 — `updated_at`는 모델 ``onupdate=text("now()")``가 자동 갱신 → 명시 set 불필요.
+    values: dict[str, object] = {}
     changed_fields: list[str] = []
     if body.raw_text is not None:
         values["raw_text"] = body.raw_text
@@ -225,13 +265,12 @@ async def update_meal(
         raise MealNotFoundError("meal not found")
     response = _meal_to_response(updated)
     await db.commit()
-    with contextlib.suppress(Exception):
-        logger.info(
-            "meals.updated",
-            user_id=str(user.id),
-            meal_id=str(meal_id),
-            changed_fields=changed_fields,
-        )
+    logger.info(
+        "meals.updated",
+        user_id=str(user.id),
+        meal_id=str(meal_id),
+        changed_fields=changed_fields,
+    )
     return response
 
 
@@ -246,6 +285,7 @@ async def delete_meal(
     물리 삭제 X (soft delete만). 30일 grace + 물리 파기는 Story 5.2 책임. 이미
     soft-deleted된 meal은 404 (멱등 *조회* 결과 일관성 + enumeration 차단).
     """
+    # P5 — `updated_at`는 모델 ``onupdate=text("now()")``가 자동 갱신.
     result = await db.execute(
         update(Meal)
         .where(
@@ -253,17 +293,16 @@ async def delete_meal(
             Meal.user_id == user.id,
             Meal.deleted_at.is_(None),
         )
-        .values(deleted_at=func.now(), updated_at=func.now())
+        .values(deleted_at=func.now())
         .returning(Meal.id)
     )
     deleted_id = result.scalar_one_or_none()
     if deleted_id is None:
         raise MealNotFoundError("meal not found")
     await db.commit()
-    with contextlib.suppress(Exception):
-        logger.info(
-            "meals.deleted",
-            user_id=str(user.id),
-            meal_id=str(meal_id),
-        )
+    logger.info(
+        "meals.deleted",
+        user_id=str(user.id),
+        meal_id=str(meal_id),
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)

@@ -1,6 +1,6 @@
 # Story 2.1: 식단 텍스트 입력 + CRUD
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -148,7 +148,7 @@ So that **사진을 찍지 않아도 빠르게 한 끼를 기록할 수 있다.*
 
       **POST /v1/meals (AC2):**
       - `test_post_meal_creates_returns_201` — 정상 입력 → 201 + `MealResponse` 7 필드 + DB row 검증
-      - `test_post_meal_with_explicit_ate_at_returns_201` — `ate_at` 명시 입력 → 200 + 응답 `ate_at == 입력값`
+      - `test_post_meal_with_explicit_ate_at_returns_201` — `ate_at` 명시 입력 → 201 + 응답 `ate_at == 입력값`
       - `test_post_meal_blocks_user_without_basic_consents_returns_403` — 동의 미통과 → 403 + `code=consent.basic.missing`
       - `test_post_meal_unauthenticated_returns_401` — 헤더 없음 → 401 + `code=auth.access_token.invalid`
       - `test_post_meal_empty_raw_text_returns_400` — `raw_text=""` 또는 `"  "` (whitespace-only) → 400 + `code=validation.error`
@@ -279,6 +279,58 @@ So that **사진을 찍지 않아도 빠르게 한 끼를 기록할 수 있다.*
 - [x] 7.2 smoke 검증 4 시나리오 — AC10 그대로(local docker compose up 환경에서 사용자가 별도 수행). 본 task는 *Dev Agent Record Completion Notes에 결과 기록* 만 — 백엔드 게이트(pytest/ruff/mypy clean) + 모바일 게이트(tsc/lint clean) 통과로 충분(Story 1.5/1.6 패턴 정합).
 - [x] 7.3 Dev Agent Record + File List + Completion Notes 작성 후 `Status: review` 전환.
 - [x] 7.4 `_bmad-output/implementation-artifacts/sprint-status.yaml` — `2-1-식단-텍스트-입력-crud` → `review` 갱신 + epic-2 → `in-progress` 자동 갱신(첫 스토리이므로 create-story가 이미 했어야 함 — review 시점에 중복 검증).
+
+### Review Findings (2026-04-29 — code review of 2-1-식단-텍스트-입력-crud)
+
+> 3 레이어(Blind Hunter / Edge Case Hunter / Acceptance Auditor) 어드버서리얼 리뷰 결과. 총 40 raw findings → 중복제거·분류 후 4 decision-needed / 17 patch / 8 defer / 5 dismiss.
+
+#### Decision-needed → 해결 (2026-04-29 — 사용자 "추천 진행" 채택)
+
+- [x] [Review][Decision] **D1 — `from_date`/`to_date` 타임존 시맨틱** → **defer (W50)**. 사유: Story 2.4 일별 기록 화면이 7일/30일 history + 날짜 picker 도입하면서 wire 재설계 → 본 시점 wire 변경은 throwaway 작업. 본 스토리 baseline은 KST/UTC 비대칭(0-9시 식사 누락) 알려진 한계로 명시.
+- [x] [Review][Decision] **D2 — 페이지네이션 `cursor` 수신만 허용 vs 명시적 거부** → **patch (P18)**: 비-null `cursor` 시 400 + `code=validation.error`. 사유: silent 무시는 무한 루프/중복 데이터 footgun, fail-closed가 스펙 line 64 "수신만"의 가장 안전한 해석.
+- [x] [Review][Decision] **D3 — `ate_at` naive datetime 허용 정책** → **patch (P19)**: `@field_validator("ate_at")`로 `tzinfo is None` 거부. 사유: wire 명시성, 모바일 `Date.toISOString()` 항상 Z-suffixed 송신이라 깨짐 없음, D1 defer 기간 절대 시각 일관성 확보.
+- [x] [Review][Decision] **D4 — PATCH `raw_text=null` 시맨틱** → **patch (P6 통합)**: 현행(absent ≡ explicit null ≡ no-op) 유지 + `{"raw_text": null}` 회귀 테스트 1건 추가로 의도 박제. 사유: explicit null과 absent 동등 처리는 합리적 default.
+
+#### Patch (17)
+
+- [x] [Review][Patch] **P1 — 서버 `_validate_not_whitespace`가 trim된 값 반환** [`api/app/api/v1/meals.py:159-165`] — 모바일 zod는 `trim()`하나 서버는 원본 보존 → 클라이언트별 저장값 분기. `return v.strip()`로 wire 정규화 단일화.
+- [x] [Review][Patch] **P2 — 카드 삭제 더블탭 가드** [`mobile/app/(tabs)/meals/index.tsx`] — Alert "삭제" 더블탭 시 동일 DELETE 2회 발사 → 두 번째가 404로 "삭제 실패" Alert. `deleteMutation.isPending` 체크로 진행 중 차단.
+- [x] [Review][Patch] **P3 — DELETE 404 → 조용한 invalidate** [`mobile/features/meals/api.ts useDeleteMealMutation`] — 네트워크 재시도/더블탭으로 두 번째 DELETE가 404면 사용자 시점에선 *이미 삭제 성공*. `onError`에서 `code === 'meals.not_found'` 분기 → Alert 생략 + `invalidateQueries(['meals'])`만.
+- [x] [Review][Patch] **P4 — PATCH 모드 캐시 미스 시 list로 바운스** [`mobile/app/(tabs)/meals/input.tsx:50-69`] — `meal_id` 있고 `findMealInCache` null이면 빈 폼이 "식단 수정" 헤더로 노출 + 사용자가 작성한 텍스트로 *원문 silent 덮어쓰기* 가능. `if (isPatchMode && !editingMeal) { router.replace('/(tabs)/meals'); return null; }` (또는 toast).
+- [x] [Review][Patch] **P5 — PATCH/DELETE에서 명시적 `updated_at=func.now()` 제거** [`api/app/api/v1/meals.py:301, 354`] — `Meal.updated_at`은 `onupdate=text("now()")` 정의로 ORM이 자동 갱신. 명시 set은 redundant + AC5 line 88(`deleted_at = func.now()` 단일 UPDATE) 미세 deviation. 단순화.
+- [x] [Review][Patch] **P6 — `extra="forbid"` + null 필드 회귀 테스트 추가** [`api/tests/test_meals_router.py`] — `{"raw_text": null}`(D4 결정 후), `{"unknown_field": "x"}` 케이스 부재. 각 1건 추가.
+- [x] [Review][Patch] **P7 — `test_get_meals_filter_by_date_range` 시간 결정성 확보** [`api/tests/test_meals_router.py`] — `datetime.now(UTC)` 기준 ate_at 생성은 UTC 자정 근처 CI에서 flaky. `freezegun` 또는 fixed `datetime(2024, 1, 15, 12, 0, tzinfo=UTC)` 기준으로 교체.
+- [x] [Review][Patch] **P8 — `tabBarIcon` 누락 (Task 4.1 미구현)** [`mobile/app/(tabs)/_layout.tsx:69-71`] — Task 4.1 line 246은 `<Ionicons name="restaurant" />` 등 명시. 현 diff는 title-only로 탭 바 아이콘 부재. `@expo/vector-icons` Ionicons import + meals/settings 양쪽 `tabBarIcon` 추가.
+- [x] [Review][Patch] **P9 — `(tabs)/_layout.tsx` `href: null` + `<Redirect>` 의도 주석** [`mobile/app/(tabs)/_layout.tsx`] — 둘 다 의도된 설계(`href: null`은 탭 바 hide / `<Redirect>`는 deeplink `/(tabs)` 안전성)지만 코드 reader에게 모호. 1줄 주석으로 명시.
+- [x] [Review][Patch] **P10 — `useQueryClient` ReturnType 타이핑을 `QueryClient` 클래스 타입으로 교체** [`mobile/app/(tabs)/meals/input.tsx:1409-1413`] — `import type { QueryClient } from '@tanstack/react-query';` + `queryClient: QueryClient`. 비-컴포넌트 유틸에서 hook을 type-only import하는 패턴 회피.
+- [x] [Review][Patch] **P11 — 스펙 AC10 line 151 typo (200 → 201)** [`_bmad-output/.../2-1-...md:151`] — 테스트명은 `..._returns_201`인데 설명문은 "→ 200". AC2가 201 mandate. 스펙 텍스트 정정.
+- [x] [Review][Patch] **P12 — `MealInputForm` TextInput에 `maxLength={2000}`** [`mobile/features/meals/MealInputForm.tsx`] — 사용자가 2500자 paste 후 submit 시 비로소 zod 에러. OS 레벨 hard cap으로 사전 차단.
+- [x] [Review][Patch] **P13 — `MealInputForm`을 `KeyboardAvoidingView`로 래핑** [`mobile/features/meals/MealInputForm.tsx`] — 작은 화면(iPhone SE)에서 키보드 올라오면 submit 버튼이 키보드 뒤에 가려져 unreachable. `Platform.OS === 'ios' ? 'padding' : 'height'`.
+- [x] [Review][Patch] **P14 — `serverError` 입력 변경 시 자동 클리어** [`mobile/app/(tabs)/meals/input.tsx`, `MealInputForm.tsx`] — submit 실패 → 입력 수정해도 빨간 에러 잔존 → 새 입력 옆에 stale 에러. `onChange` 또는 `onFocus`에서 `setServerError(null)`.
+- [x] [Review][Patch] **P15 — `from_date > to_date` 400 가드** [`api/app/api/v1/meals.py` GET /v1/meals] — 사용자/클라이언트 typo 시 silent empty list → "기록 없음" 빈 화면이 misleading. `if from_date and to_date and from_date > to_date: raise HTTPException(400, "from_date must not be after to_date")`.
+- [x] [Review][Patch] **P16 — `contextlib.suppress(Exception)` 로거 가드 좁히기** [`api/app/api/v1/meals.py:248-256, 326-332, 361-366`] — `structlog.info`가 모든 예외를 silent 삼키는 패턴은 관측성 무효화. `created.ate_at.isoformat()`이 None 위험이면 None 가드를 명시(`if created.ate_at else None`); suppress 자체는 제거.
+- [x] [Review][Patch] **P17 — DEBT: `from_date`/`to_date` 가드 (P15와 동일, 정리)** — *(P15에 통합, 이 항목은 nominal — 무시)*
+- [x] [Review][Patch] **P18 — `cursor` 비-null 거부 (D2 결정)** [`api/app/api/v1/meals.py` GET /v1/meals] — `cursor`가 None이 아닌 값 송신 시 400 + `code=validation.error`. silent 무시 → 무한 루프 차단. 회귀 테스트 1건 추가.
+- [x] [Review][Patch] **P19 — `ate_at` naive datetime 거부 (D3 결정)** [`api/app/api/v1/meals.py` MealCreateRequest + MealUpdateRequest] — `@field_validator("ate_at")`로 `value.tzinfo is None` 시 ValueError. wire 명시성. 회귀 테스트 1건 추가.
+
+#### Deferred (8) — `deferred-work.md` W42–W49 등재
+
+- [x] [Review][Defer] **W42 — `MealError` base abstract guard / 기본 status 재고** [`api/app/core/exceptions.py:381-385`] — deferred, Story 8 hardening
+- [x] [Review][Defer] **W43 — `_parseProblem` JSON 파싱 실패 시 raw text 보존 X (디버그 가시성)** [`mobile/features/meals/api.ts:1773-1782`] — deferred, Story 8 polish
+- [x] [Review][Defer] **W44 — soft-deleted row content 변경 차단 trigger/CHECK 부재** [`api/alembic/versions/0006_meals.py`] — deferred, Story 8 hardening
+- [x] [Review][Defer] **W45 — 부분 인덱스 (`idx_meals_user_id_ate_at_active`) 사용 EXPLAIN 검증 부재** [`api/tests/test_meals_router.py`] — deferred, Story 8 perf smoke
+- [x] [Review][Defer] **W46 — 앱 백그라운드/킬 mid-mutation 시 중복 POST** [`mobile/features/meals/api.ts useCreateMealMutation`] — deferred, Story 2.5 (Idempotency-Key)
+- [x] [Review][Defer] **W47 — `setError("raw_text", ...)` 미사용 (스펙 wording deviation)** [`mobile/app/(tabs)/meals/input.tsx`] — deferred, RHF 필드 에러 API 통일은 design polish 시점
+- [x] [Review][Defer] **W48 — `_create_meal_for(user)` 픽스처가 동의 게이트 우회 (의도 코멘트 부재)** [`api/tests/test_meals_router.py:557-576`] — deferred, 테스트 인프라 cleanup
+- [x] [Review][Defer] **W49 — `MealCard.formatHHmm` 디바이스 로컬 TZ 사용 (D1 결정에 종속)** [`mobile/features/meals/MealCard.tsx:14-21`] — deferred, D1 wire 결정 시 일괄 KST pin 또는 wire TZ 정책에 정합
+
+#### Dismissed (5)
+
+- ~~`populate_existing=True` on `update().returning()` no-op 의심~~ — Story 1.5 확립 패턴(`api/app/api/v1/users.py:177-194`), 동일 세션 identity-map 갱신 목적의 *정상 SQLAlchemy 2.0 사용*. 제거 시 stale ORM state 위험.
+- ~~`created_at` 필드 응답 노출 의문~~ — AC2 line 39가 7-필드 명시(`created_at` 포함), 스펙 정합.
+- ~~`created.ate_at` None 위험~~ — PostgreSQL + asyncpg + SQLAlchemy 2.0 `RETURNING`이 server_default 평가 결과를 반환, 실무 reachable 경로 부재.
+- ~~`MealUpdateRequest`에 `_validate_not_whitespace` 추가는 over-implementation~~ — AC4 line 74("빈 문자열 거부 동일") 의도 정합. positive deviation.
+- ~~Undelete 미지원 (one-way trap)~~ — Story 5.2(회원 탈퇴 + 30일 grace) 책임. 본 스토리 baseline 정상 디자인.
 
 ## Dev Notes
 
@@ -674,3 +726,4 @@ ed1e1d9 fix(story-1.6): CR 13 patches (견고성·내비·회전·접근성·테
 | Date | Author | Note |
 |------|--------|------|
 | 2026-04-29 | Amelia (claude-opus-4-7[1m]) | Story 2.1 baseline 구현 — meals 테이블 + REST CRUD 4종 + 모바일 list/input 화면 + OpenAPI 재생성. Status: ready-for-dev → review. |
+| 2026-04-29 | Amelia (claude-opus-4-7[1m]) | Code review (3 레이어 어드버서리얼) 완료 + 18 patch 적용 (P1-P16 + P18-P19) + 8 defer (W42-W49 + W50). D1 (TZ wire) → Story 2.4 deferred (W50). Backend pytest 168/168 통과 / coverage 80.98% / ruff·mypy clean / 모바일 tsc·lint clean. Status: review → done. |

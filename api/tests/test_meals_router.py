@@ -183,6 +183,62 @@ async def test_post_meal_too_long_raw_text_returns_400(
     assert response.json()["code"] == "validation.error"
 
 
+async def test_post_meal_extra_field_returns_400(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """`extra="forbid"` 회귀 — silent unknown field 차단 (P6 / Review CR 2026-04-29)."""
+    user = await user_factory()
+    await consent_factory(user)
+
+    response = await client.post(
+        "/v1/meals",
+        json={"raw_text": "테스트", "unknown_field": "x"},
+        headers=auth_headers(user),
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "validation.error"
+
+
+async def test_post_meal_naive_ate_at_returns_400(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """naive datetime 거부 (P19 / D3 결정 — wire 명시성)."""
+    user = await user_factory()
+    await consent_factory(user)
+
+    response = await client.post(
+        "/v1/meals",
+        # TZ suffix 없는 naive ISO datetime — Postgres timestamptz가 세션 TZ로 해석
+        # → wire 모호성. 거부 mandate.
+        json={"raw_text": "테스트", "ate_at": "2026-04-29T12:00:00"},
+        headers=auth_headers(user),
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "validation.error"
+
+
+async def test_post_meal_trims_raw_text_whitespace(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """raw_text 좌우 whitespace 정규화 (P1 — 모바일 zod.trim()과 wire 단일화)."""
+    user = await user_factory()
+    await consent_factory(user)
+
+    response = await client.post(
+        "/v1/meals",
+        json={"raw_text": "  삼겹살 1인분  "},
+        headers=auth_headers(user),
+    )
+    assert response.status_code == 201
+    assert response.json()["raw_text"] == "삼겹살 1인분"
+
+
 # --- GET /v1/meals (AC3) ---
 
 
@@ -233,7 +289,9 @@ async def test_get_meals_filter_by_date_range(
     user = await user_factory()
     await consent_factory(user)
 
-    today = datetime.now(UTC)
+    # P7 — `datetime.now(UTC)`는 UTC 자정 근처 CI에서 flaky. 고정 reference로 결정성 확보.
+    reference_now = datetime(2024, 6, 15, 12, 0, tzinfo=UTC)
+    today = reference_now
     yesterday = today - timedelta(days=1)
     two_days_ago = today - timedelta(days=2)
 
@@ -251,6 +309,40 @@ async def test_get_meals_filter_by_date_range(
     raw_texts = [m["raw_text"] for m in body["meals"]]
     assert "이틀 전" not in raw_texts
     assert {"오늘", "어제"} == set(raw_texts)
+
+
+async def test_get_meals_from_after_to_returns_400(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """`from_date > to_date` 거부 (P15 — typo/swap → silent empty list 회피)."""
+    user = await user_factory()
+    await consent_factory(user)
+
+    response = await client.get(
+        "/v1/meals?from_date=2026-12-01&to_date=2026-11-01",
+        headers=auth_headers(user),
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "meals.query.invalid"
+
+
+async def test_get_meals_cursor_not_supported_returns_400(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """`cursor` 비-null 거부 (P18 / D2 결정 — silent 무시 → 무한 루프 footgun 차단)."""
+    user = await user_factory()
+    await consent_factory(user)
+
+    response = await client.get(
+        "/v1/meals?cursor=anything",
+        headers=auth_headers(user),
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "meals.query.invalid"
 
 
 async def test_get_meals_unauthenticated_returns_401(client: AsyncClient) -> None:
@@ -381,6 +473,48 @@ async def test_patch_meal_empty_body_returns_400(
     response = await client.patch(
         f"/v1/meals/{meal.id}",
         json={},
+        headers=auth_headers(user),
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "validation.error"
+
+
+async def test_patch_meal_explicit_null_raw_text_acts_as_no_op(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """`raw_text=null`은 *필드 부재*와 동등 처리 — no-op (D4 결정 의도 박제 / P6)."""
+    user = await user_factory()
+    await consent_factory(user)
+    meal = await _create_meal_for(user, raw_text="원래 텍스트")
+    new_ate_at = datetime(2024, 6, 15, 12, 0, tzinfo=UTC)
+
+    response = await client.patch(
+        f"/v1/meals/{meal.id}",
+        json={"raw_text": None, "ate_at": new_ate_at.isoformat()},
+        headers=auth_headers(user),
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    # raw_text는 미변경, ate_at만 갱신.
+    assert body["raw_text"] == "원래 텍스트"
+    assert datetime.fromisoformat(body["ate_at"]) == new_ate_at
+
+
+async def test_patch_meal_naive_ate_at_returns_400(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """PATCH도 naive datetime 거부 (P19 / D3 결정 정합)."""
+    user = await user_factory()
+    await consent_factory(user)
+    meal = await _create_meal_for(user)
+
+    response = await client.patch(
+        f"/v1/meals/{meal.id}",
+        json={"ate_at": "2026-04-29T12:00:00"},
         headers=auth_headers(user),
     )
     assert response.status_code == 400

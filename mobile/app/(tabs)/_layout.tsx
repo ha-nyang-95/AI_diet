@@ -1,3 +1,4 @@
+import { Ionicons } from '@expo/vector-icons';
 import { Redirect, Tabs, usePathname } from 'expo-router';
 
 import { useAuth } from '@/lib/auth';
@@ -65,10 +66,30 @@ export default function TabsLayout() {
 
   return (
     <Tabs screenOptions={{ headerShown: false }}>
-      {/* index 라우트는 redirect-only — 탭 바에서 hide (Expo Router 표준 hide 패턴). */}
+      {/*
+       * P9 — index 라우트는 *redirect-only*: `(tabs)/index.tsx`의 `<Redirect>`가
+       * deeplink `/(tabs)` 진입 시 안전성을 보존하고, 본 `href: null`이 탭 바에서만
+       * 항목을 hide. 둘 다 의도된 직교 책임 (deeplink 안전성 vs 탭 바 노출).
+       */}
       <Tabs.Screen name="index" options={{ href: null }} />
-      <Tabs.Screen name="meals" options={{ title: '식단' }} />
-      <Tabs.Screen name="settings" options={{ title: '설정' }} />
+      <Tabs.Screen
+        name="meals"
+        options={{
+          title: '식단',
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="restaurant" color={color} size={size} />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="settings"
+        options={{
+          title: '설정',
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="settings" color={color} size={size} />
+          ),
+        }}
+      />
     </Tabs>
   );
 }

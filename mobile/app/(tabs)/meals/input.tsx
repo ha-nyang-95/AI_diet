@@ -15,9 +15,9 @@
  * - 5xx / 네트워크 → Alert.
  */
 import { Stack, router, useLocalSearchParams } from 'expo-router';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Alert, StyleSheet, View } from 'react-native';
-import { useQueryClient } from '@tanstack/react-query';
+import { useQueryClient, type QueryClient } from '@tanstack/react-query';
 
 import { MealInputForm } from '@/features/meals/MealInputForm';
 import {
@@ -32,7 +32,7 @@ import type {
 } from '@/features/meals/mealSchema';
 
 function findMealInCache(
-  queryClient: ReturnType<typeof useQueryClient>,
+  queryClient: QueryClient,
   meal_id: string,
 ): MealResponse | null {
   // 모든 ['meals', ...] 캐시 entry를 순회 — 어떤 from_date/to_date 조합이든 적중하면
@@ -56,6 +56,22 @@ export default function MealInputScreen() {
     [meal_id, queryClient],
   );
   const isPatchMode = Boolean(meal_id);
+  // P4 — PATCH 모드 + 캐시 미스 → 빈 폼이 *식단 수정* 헤더로 노출되어 사용자
+  // 입력으로 원문 silent 덮어쓰기 위험. 1회 알림 후 list로 회귀.
+  const isPatchCacheMiss = isPatchMode && !editingMeal;
+
+  useEffect(() => {
+    if (!isPatchCacheMiss) return;
+    Alert.alert('식단을 찾을 수 없습니다', '목록으로 돌아갑니다.', [
+      {
+        text: '확인',
+        onPress: () => {
+          const target = '/(tabs)/meals' as Parameters<typeof router.replace>[0];
+          router.replace(target);
+        },
+      },
+    ]);
+  }, [isPatchCacheMiss]);
 
   const createMutation = useCreateMealMutation();
   const updateMutation = useUpdateMealMutation();
@@ -121,6 +137,15 @@ export default function MealInputScreen() {
     }
   };
 
+  // P4 — PATCH 캐시 미스 시 폼 렌더링 차단 (Alert 후 list로 replace됨).
+  if (isPatchCacheMiss) {
+    return (
+      <View style={styles.container}>
+        <Stack.Screen options={{ title: headerTitle }} />
+      </View>
+    );
+  }
+
   return (
     <View style={styles.container}>
       <Stack.Screen options={{ title: headerTitle }} />
@@ -130,6 +155,7 @@ export default function MealInputScreen() {
         submitLabel={submitLabel}
         onSubmit={onSubmit}
         serverError={serverError}
+        onClearServerError={() => setServerError(null)}
       />
     </View>
   );

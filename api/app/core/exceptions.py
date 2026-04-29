@@ -223,3 +223,12 @@ class MealNotFoundError(MealError):
     status: ClassVar[int] = 404
     code: ClassVar[str] = "meals.not_found"
     title: ClassVar[str] = "Meal not found"
+
+
+class MealQueryValidationError(MealError):
+    """`/v1/meals` GET 쿼리 파라미터 validation 실패 — `from_date > to_date` (P15)
+    또는 `cursor` 비-null 송신(P18, Story 2.4 입력)."""
+
+    status: ClassVar[int] = 400
+    code: ClassVar[str] = "meals.query.invalid"
+    title: ClassVar[str] = "Meal query validation error"

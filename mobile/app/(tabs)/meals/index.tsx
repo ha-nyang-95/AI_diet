@@ -21,6 +21,7 @@ import {
   Text,
   View,
 } from 'react-native';
+import { useQueryClient } from '@tanstack/react-query';
 
 import { MealCard } from '@/features/meals/MealCard';
 import {
@@ -47,6 +48,7 @@ export default function MealsListScreen() {
     to_date: today,
   });
   const deleteMutation = useDeleteMealMutation();
+  const queryClient = useQueryClient();
 
   const handleAddPress = useCallback(() => {
     const target = '/(tabs)/meals/input' as Parameters<typeof router.push>[0];
@@ -62,8 +64,21 @@ export default function MealsListScreen() {
 
   const handleDeleteConfirmed = useCallback(
     (meal: MealResponse) => {
+      // P2 — 더블탭 가드: 진행 중인 삭제 mutation이 있으면 추가 호출 무시
+      // (RN Alert는 native dedupe 부재 → 같은 식단에 대한 중복 DELETE 차단).
+      if (deleteMutation.isPending) return;
       deleteMutation.mutate(meal.id, {
         onError: (err: unknown) => {
+          // P3 — 404 `meals.not_found`는 retry/race로 *이미 삭제된* 상태 →
+          // 사용자 시점에서 *성공* 동등. invalidate만 하고 silent (Alert 생략).
+          if (
+            err instanceof MealSubmitError &&
+            err.status === 404 &&
+            err.code === 'meals.not_found'
+          ) {
+            void queryClient.invalidateQueries({ queryKey: ['meals'] });
+            return;
+          }
           const message =
             err instanceof MealSubmitError
               ? `삭제 실패 — ${err.detail ?? `(${err.status})`}`
@@ -72,7 +87,7 @@ export default function MealsListScreen() {
         },
       });
     },
-    [deleteMutation],
+    [deleteMutation, queryClient],
   );
 
   const handleDelete = useCallback(
