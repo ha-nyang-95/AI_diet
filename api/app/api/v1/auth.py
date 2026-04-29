@@ -86,6 +86,10 @@ class UserPublic(BaseModel):
     role: str
     # Story 1.5 — 모바일/Web 클라이언트가 signIn 직후 4번째 가드(profile) 분기에 사용.
     profile_completed_at: datetime | None
+    # Story 1.6 — *최초 온보딩 흐름 통과 시점* (멱등 set, profile 수정 시 변경 X).
+    # 신규 사용자는 null. Web ``AuthUser``는 Story 1.2 baseline에서 이미 보유.
+    # Mobile ``AuthUser``는 본 스토리에서 추가 — 향후 *환영 메시지*(Story 4.x) hook.
+    onboarded_at: datetime | None
 
 
 class GoogleLoginResponseMobile(BaseModel):
@@ -198,6 +202,7 @@ def _user_to_public(user: User) -> UserPublic:
         display_name=user.display_name,
         picture_url=user.picture_url,
         profile_completed_at=user.profile_completed_at,
+        onboarded_at=user.onboarded_at,
         role=user.role,
     )
 

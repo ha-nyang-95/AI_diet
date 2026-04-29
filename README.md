@@ -196,6 +196,37 @@ Story 1.2부터 Google 로그인을 사용하려면 Google Cloud Console에서 O
   생성. SQLAlchemy 모델 선언과 alembic SQL이 *동일 SOT*(`app.domain.allergens.KOREAN_22_ALLERGENS`
   module-level import)로 동기 — autogenerate diff 0건 보장.
 
+### 온보딩 튜토리얼 SOP (Story 1.6)
+
+- **Onboarding chain 6단계 도식 (Story 1.3·1.4·1.5·1.6 누적)**:
+  ```
+  로그인 → /onboarding/disclaimer → /terms → /privacy → /automated-decision → /tutorial → /profile → /(tabs)/meals
+  ```
+  - `disclaimer / terms / privacy` (Story 1.3 4 surface) + `automated-decision` (Story 1.4 PIPA
+    별도 동의) + `tutorial` (Story 1.6 사용법 3 슬라이드) + `profile` (Story 1.5 6 입력) — 6 화면
+    순차 통과 시 `(tabs)/meals` 진입. mobile-only chain — Web `/onboarding`은 `disclaimer ·
+    automated-decision · profile` 3 path로 minimal UI(architecture line 985 정합).
+- **`users.onboarded_at` vs `users.profile_completed_at` 의미 분리**:
+  - `onboarded_at`: *최초 온보딩 흐름 통과 시점*. 첫 `POST /v1/users/me/profile` 시 한 번만
+    DB `func.coalesce(User.onboarded_at, func.now())`로 멱등 set. 이후 재 POST(Story 5.1
+    프로필 수정)에도 *변경 X* — 사용자 *최초 가입 audit*용 단일 출처.
+  - `profile_completed_at`: *최신 프로필 기록 시점*. 매 POST 갱신.
+  - 두 컬럼 모두 `UserMeResponse` (`GET /v1/users/me`) + `UserPublic` (signIn 응답)로 forward.
+- **`tutorial-seen` AsyncStorage 키**:
+  - 키: `bn:onboarding-tutorial-seen` (boolean stringified — `'1'` 저장, 미존재 시 false 간주).
+  - 모듈: `mobile/features/onboarding/tutorialState.ts` — `getTutorialSeen() / setTutorialSeen(true) /
+    clearOnboardingState()` 3 helper export.
+  - clear 정책: `mobile/lib/auth.tsx:signOut`이 `clearAuth()` (토큰 clear, secure-store 책임)
+    호출 직후 `clearOnboardingState()` (onboarding state clear, tutorialState 책임)를 *순차
+    await* — 사용자 A 로그아웃 후 B 로그인 시 A의 seen 잔존이 B에게 전파 차단.
+  - 책임 분리: `secure-store.ts`는 *토큰 전용* 유지(`secure-store.ts:4` "AsyncStorage 평문 저장
+    금지" 주석은 NFR-S1 토큰 보호 context). 비-민감 client preference는 `tutorialState`가 별도
+    AsyncStorage에서 관리.
+- **Epic 1 종료 — 기반 인프라 + 인증 + 온보딩·동의 (1.1~1.6) 6 스토리 완료**:
+  Story 1.1(부트스트랩) · 1.2(Google OAuth + JWT) · 1.3(약관·개인정보 동의 4-surface) · 1.4(PIPA
+  자동화 의사결정) · 1.5(건강 프로필 22종 알레르기) · 1.6(온보딩 튜토리얼 + Epic 1 종료). Epic 2
+  (식단 입력 + 일별 기록 + 권한 흐름) 진입 준비 완료.
+
 ### 8시간 체크리스트
 
 - [ ] (1h) `docker compose up` 4개 컨테이너 healthy 확인

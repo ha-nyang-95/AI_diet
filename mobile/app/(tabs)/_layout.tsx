@@ -50,12 +50,14 @@ export default function TabsLayout() {
     >[0]['href'];
     return <Redirect href={target} />;
   }
-  // Story 1.5 — 4번째 가드: 건강 프로필 미입력 시 onboarding/profile로 redirect.
+  // Story 1.6 — 4번째 가드 redirect target = tutorial(tutorial이 자체 seen flag로 분기).
+  // tutorial 화면이 AsyncStorage tutorial-seen flag로 first-time vs resume 분기 →
+  // seen=true이면 즉시 /profile로 push, seen=false이면 3 슬라이드 노출.
   // Story 5.1이 도입할 *프로필 수정* 화면(/settings/profile)은 본 가드를 우회해야 함 —
   // 향후 같은 settings 우회 패턴 적용.
   if (!user?.profile_completed_at) {
     const next = encodeURIComponent(pathname || '/(tabs)');
-    const target = `/(auth)/onboarding/profile?next=${next}` as Parameters<
+    const target = `/(auth)/onboarding/tutorial?next=${next}` as Parameters<
       typeof Redirect
     >[0]['href'];
     return <Redirect href={target} />;

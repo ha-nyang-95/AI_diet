@@ -90,3 +90,15 @@
 - **W30 — `+'20'` opacity hex hack** [mobile profile.tsx:198, 241] — design system 도입 시점 일괄 정리.
 - **W31 — `ProfileSubmitError` 위치인자 생성자** [mobile useHealthProfile.ts:14-26] — API 갱신 시 object param으로 변경.
 - **W32 — `Numeric(5,1)` 상한과 CHECK 500.0 mismatch (defense-in-depth)** [alembic 0005] — Numeric(5,1)은 max 9999.9, CHECK는 500.0. 현 동작 무영향, 정밀도 명세 명시 시점에 일괄 정리.
+
+## Deferred from: code review of 1-6-온보딩-튜토리얼 (2026-04-29)
+
+- **W33 — `?next=` 쿼리 forward + 처리** [mobile/app/(auth)/onboarding/tutorial.tsx Redirect, mobile/app/(tabs)/_layout.tsx:58-62] — onboarding 모든 화면이 forward만 수행, 처리 X. tutorial.tsx도 `<Redirect href={PROFILE_ROUTE} />`로 next 미전파, `setTutorialSeen` 후 `router.replace(PROFILE_ROUTE)`도 동일. Story 1.3 W7 재deferred(spec deferred-work 명시) — Story 5.1 또는 Story 8 polish 시점에 일괄 whitelist + 처리.
+- **W34 — 단일 디바이스 다중 사용자(family/employee) tutorial-seen 격리** [mobile/lib/auth.tsx, tutorialState.ts] — A signOut 없이 B signIn 시 A의 seen flag 상속해 B에게 tutorial 강제 스킵. Spec Story 8 polish 명시. 재검토 시점에 user_id-suffix 키(`bn:onboarding-tutorial-seen-{user_id}`) 또는 signIn 시점 clear 정책 도입.
+- **W35 — Color contrast WCAG AA 검증** [mobile/app/(auth)/onboarding/tutorial.tsx 색상값 #666·#1a73e8] — Skip 텍스트 #666 on #fff ~5.7:1, primary 버튼 #fff on #1a73e8 ~4.7:1로 WCAG AA borderline. Design system 도입(Story 8) 시점에 일괄 정리.
+- **W36 — `asyncio.sleep(0.05)` flaky test smell** [api/tests/test_users_profile_router.py:243] — Postgres `NOW()` 50ms 내 advance 가정. 부하된 CI에서 `profile_completed_at` 동등 비교 깨질 가능성. Deterministic clock fixture(`freezegun`) 도입 시점에 polish.
+- **W37 — `app.state.session_maker` 직접 접근(fixture isolation 우회)** [api/tests/test_users_profile_router.py:270 등] — 글로벌 app state 결합. 향후 request-scope DI refactor 시 4 신규 케이스 silent 회귀. 테스트 infra refactor 시점.
+- **W38 — 로그 이벤트명 `users.profile.updated` 첫 onboard vs profile edit 미구분** [api/app/api/v1/users.py:194] — 다운스트림 로그 분석이 boolean field 파싱 의존. 별도 `users.onboarded` 이벤트 분리는 Story 7 audit 정제 시점.
+- **W39 — `handleNext` last-slide pre-`isLast` render gap** [mobile/app/(auth)/onboarding/tutorial.tsx:73-78] — `currentIndex` state 갱신과 `isLast` 파생 상태 사이 race. *다음* 탭이 last-slide 직전 시점에 떨어지면 finish 미실행. minor.
+- **W40 — `finish()` 도중 unmount → setState 또는 storage write race** [mobile/app/(auth)/onboarding/tutorial.tsx:46-53, 80-83] — `cancelled` 가드는 `setSeenChecked`만 보호, `finish()`의 `setTutorialSeen` write는 unmount 후에도 진행. minor.
+- **W41 — Concurrent first-POST 시 audit 로그 `first_time=True` 2회 발사** [api/app/api/v1/users.py:175] — DB COALESCE는 atomic이나 ORM 캐시값 읽고 로그만 cosmetic. Story 7 audit 정제 시점.

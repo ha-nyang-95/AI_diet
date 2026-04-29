@@ -10,6 +10,8 @@ import { QueryClient } from '@tanstack/react-query';
 import { router } from 'expo-router';
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 
+import { clearOnboardingState } from '@/features/onboarding/tutorialState';
+
 import {
   clearAuth,
   getAccessToken,
@@ -27,6 +29,11 @@ export interface AuthUser {
   // Story 1.5 — 건강 프로필 입력 시점(미입력 시 null). (tabs)/_layout.tsx의 4번째
   // 가드(profile) 분기 입력. 본 필드는 GET /v1/users/me 응답에서 forward됨.
   profile_completed_at: string | null;
+  // Story 1.6 — 최초 온보딩 흐름 통과 시점(멱등 set, profile 수정 시 변경 X).
+  // GET /v1/users/me + POST /v1/auth/google(UserPublic) 응답에서 forward됨. 본
+  // 필드는 향후 *환영 메시지*(Story 4.x) / admin audit(Story 7.x) hook이며 본
+  // 스토리에서는 *값 노출*만 — UI 활용 X.
+  onboarded_at: string | null;
 }
 
 export interface ConsentStatus {
@@ -114,6 +121,7 @@ async function performRefresh(): Promise<string | null> {
   }
   if (!response.ok) {
     await clearAuth();
+    await clearOnboardingState();
     onSessionCleared?.();
     return null;
   }
@@ -122,6 +130,7 @@ async function performRefresh(): Promise<string | null> {
     body = (await response.json()) as RefreshResponse;
   } catch {
     await clearAuth();
+    await clearOnboardingState();
     onSessionCleared?.();
     return null;
   }
@@ -252,7 +261,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             // ignore — 로컬 클리어는 계속 진행
           }
         }
+        // 토큰 clear는 보안 critical(secure-store 책임), onboarding state clear는
+        // UX(tutorialState 책임). 두 책임을 분리 + 순차 await — Promise.all로 묶지
+        // 않는 이유는 실패 시 fallback 의미 분명 + secure-store.ts의 *토큰 전용*
+        // 책임을 유지(secure-store.ts:4 "AsyncStorage 평문 저장 금지" 주석 정합).
+        // tutorialState helper는 내부에서 AsyncStorage 실패를 swallow하나, 라우팅·
+        // user state 클리어가 차단되지 않도록 호출 자체에도 try/catch 가드(defense-in-depth).
         await clearAuth();
+        try {
+          await clearOnboardingState();
+        } catch {
+          // ignore — signOut의 후속 라우팅이 절대 차단되면 안 됨.
+        }
         setUser(null);
         setConsentStatusState(null);
         router.replace('/(auth)/login');
