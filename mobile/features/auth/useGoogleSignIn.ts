@@ -7,12 +7,15 @@
  *
  * Implicit flow / @react-native-google-signin 도입 절대 금지(architecture 위반).
  *
- * Expo Go 분기 (`Constants.appOwnership === 'expo'`): iOS/Android 네이티브 client ID는
- * 패키지명/SHA-1로 매칭되는데 Expo Go의 컨테이너 앱(`host.exp.exponent`)은 우리 앱의
- * 신원과 다르다. 그대로 전달하면 Google이 `Error 400: invalid_request`로 차단(README의
- * "Expo Go 개발 환경에서는 Web client ID를 모든 플랫폼에 사용" SOP 정합). 따라서 Expo Go
- * 한정으로 webClientId만 전달해 expo-auth-session이 Web/Expo proxy 흐름으로 진입하게 한다.
- * 네이티브 EAS standalone 빌드에서는 세 ID 모두 전달(기존 동작 유지).
+ * Expo Go 분기 (`Constants.executionEnvironment === 'storeClient'`): iOS/Android 네이티브
+ * client ID는 패키지명/SHA-1로 매칭되는데 Expo Go의 컨테이너 앱(`host.exp.exponent`)은
+ * 우리 앱의 신원과 다르다. 그대로 전달하면 Google이 `Error 400: invalid_request`로 차단
+ * (README의 "Expo Go 개발 환경에서는 Web client ID를 모든 플랫폼에 사용" SOP 정합). 따라서
+ * Expo Go 한정으로 webClientId만 전달해 expo-auth-session이 Web/Expo proxy 흐름으로
+ * 진입하게 한다. 네이티브 EAS standalone 빌드에서는 세 ID 모두 전달(기존 동작 유지).
+ *
+ * `Constants.appOwnership`은 SDK 44+에서 deprecated — `executionEnvironment`가 modern API.
+ * Expo Go 값은 `'storeClient'`(`ExecutionEnvironment.StoreClient` enum 정합).
  */
 import Constants from 'expo-constants';
 import * as Google from 'expo-auth-session/providers/google';
@@ -25,7 +28,7 @@ import { useAuth } from '@/lib/auth';
 
 const API_BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL ?? 'http://localhost:8000';
 
-const IS_EXPO_GO = Constants.appOwnership === 'expo';
+const IS_EXPO_GO = Constants.executionEnvironment === 'storeClient';
 
 interface GoogleLoginResponseMobile {
   access_token: string;
