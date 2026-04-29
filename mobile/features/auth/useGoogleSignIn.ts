@@ -1,12 +1,20 @@
 /**
- * Google OAuth 로그인 훅 (Story 1.2).
+ * Google OAuth 로그인 훅 (Story 1.2 / Epic 0 dev-loop fix).
  *
  * - expo-auth-session/providers/google + responseType=Code + PKCE auto.
  * - 성공 시 (a) 백엔드 `POST /v1/auth/google` 호출, (b) AuthProvider.signIn으로 토큰 저장,
  *   (c) `(tabs)`로 라우팅.
  *
  * Implicit flow / @react-native-google-signin 도입 절대 금지(architecture 위반).
+ *
+ * Expo Go 분기 (`Constants.appOwnership === 'expo'`): iOS/Android 네이티브 client ID는
+ * 패키지명/SHA-1로 매칭되는데 Expo Go의 컨테이너 앱(`host.exp.exponent`)은 우리 앱의
+ * 신원과 다르다. 그대로 전달하면 Google이 `Error 400: invalid_request`로 차단(README의
+ * "Expo Go 개발 환경에서는 Web client ID를 모든 플랫폼에 사용" SOP 정합). 따라서 Expo Go
+ * 한정으로 webClientId만 전달해 expo-auth-session이 Web/Expo proxy 흐름으로 진입하게 한다.
+ * 네이티브 EAS standalone 빌드에서는 세 ID 모두 전달(기존 동작 유지).
  */
+import Constants from 'expo-constants';
 import * as Google from 'expo-auth-session/providers/google';
 import { router } from 'expo-router';
 import { Platform } from 'react-native';
@@ -16,6 +24,8 @@ import type { AuthUser } from '@/lib/auth';
 import { useAuth } from '@/lib/auth';
 
 const API_BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL ?? 'http://localhost:8000';
+
+const IS_EXPO_GO = Constants.appOwnership === 'expo';
 
 interface GoogleLoginResponseMobile {
   access_token: string;
@@ -32,6 +42,7 @@ export interface UseGoogleSignInResult {
 }
 
 function pickClientId(): string | undefined {
+  if (IS_EXPO_GO) return process.env.EXPO_PUBLIC_GOOGLE_OAUTH_CLIENT_ID_WEB;
   if (Platform.OS === 'ios') return process.env.EXPO_PUBLIC_GOOGLE_OAUTH_CLIENT_ID_IOS;
   if (Platform.OS === 'android') {
     return process.env.EXPO_PUBLIC_GOOGLE_OAUTH_CLIENT_ID_ANDROID;
@@ -45,8 +56,12 @@ export function useGoogleSignIn(nextPath?: string): UseGoogleSignInResult {
   const [error, setError] = useState<string | null>(null);
 
   const [request, , promptAsync] = Google.useAuthRequest({
-    iosClientId: process.env.EXPO_PUBLIC_GOOGLE_OAUTH_CLIENT_ID_IOS,
-    androidClientId: process.env.EXPO_PUBLIC_GOOGLE_OAUTH_CLIENT_ID_ANDROID,
+    ...(IS_EXPO_GO
+      ? {}
+      : {
+          iosClientId: process.env.EXPO_PUBLIC_GOOGLE_OAUTH_CLIENT_ID_IOS,
+          androidClientId: process.env.EXPO_PUBLIC_GOOGLE_OAUTH_CLIENT_ID_ANDROID,
+        }),
     webClientId: process.env.EXPO_PUBLIC_GOOGLE_OAUTH_CLIENT_ID_WEB,
     scopes: ['openid', 'email', 'profile'],
   });
