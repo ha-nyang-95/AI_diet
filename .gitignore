@@ -101,4 +101,5 @@ logs/
 _bmad-output/temp/
 # CR 산출물 — bmad-code-review가 매 run마다 regen하는 로컬 캐시 (diff patch +
 # 3-layer findings). 머지 후 stale 상태가 되어 commit 대상 X.
-_bmad-output/implementation-artifacts/.review-*
+# Glob `**`로 _bmad-output/ 내 어느 하위 폴더든 커버 (Gemini PR #8 review 채택).
+_bmad-output/**/.review-*
