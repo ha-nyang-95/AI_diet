@@ -122,6 +122,12 @@ export interface paths {
          *     expire 시키므로, expired 객체 속성 접근이 lazy-load를 trigger해
          *     ``sqlalchemy.exc.MissingGreenlet`` (async context lazy-load 금지) 가능.
          *     RETURNING으로 메모리에 이미 로드된 데이터를 commit 전에 직렬화 후 commit.
+         *
+         *     Story 1.6 — ``onboarded_at = func.coalesce(User.onboarded_at, func.now())``로 단일
+         *     UPDATE 안에서 *기존 NULL이면 now() set, 이미 set이면 그대로* (멱등). Story 5.1
+         *     프로필 수정 시점에도 ``onboarded_at``은 변경되지 않아 *최초 온보딩 시점*이 보존됨.
+         *     ``onboarded_first_time`` 로깅은 update 직전 ORM 객체 값으로 판별(NFR-S5: user_id만
+         *     raw, 다른 민감정보 X).
          */
         post: operations["submit_health_profile_v1_users_me_profile_post"];
         delete?: never;
@@ -493,6 +499,8 @@ export interface components {
             role: string;
             /** Profile Completed At */
             profile_completed_at: string | null;
+            /** Onboarded At */
+            onboarded_at: string | null;
         };
         /** ValidationError */
         ValidationError: {
