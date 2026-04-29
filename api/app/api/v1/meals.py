@@ -107,7 +107,11 @@ class MealCreateRequest(BaseModel):
 
     raw_text: str | None = Field(default=None, min_length=1, max_length=2000)
     ate_at: datetime | None = None
-    image_key: str | None = Field(default=None, max_length=_IMAGE_KEY_MAX_LENGTH, pattern=_IMAGE_KEY_PATTERN)
+    image_key: str | None = Field(
+        default=None,
+        max_length=_IMAGE_KEY_MAX_LENGTH,
+        pattern=_IMAGE_KEY_PATTERN,
+    )
 
     @field_validator("raw_text")
     @classmethod
@@ -149,7 +153,11 @@ class MealUpdateRequest(BaseModel):
 
     raw_text: str | None = Field(default=None, min_length=1, max_length=2000)
     ate_at: datetime | None = None
-    image_key: str | None = Field(default=None, max_length=_IMAGE_KEY_MAX_LENGTH, pattern=_IMAGE_KEY_PATTERN)
+    image_key: str | None = Field(
+        default=None,
+        max_length=_IMAGE_KEY_MAX_LENGTH,
+        pattern=_IMAGE_KEY_PATTERN,
+    )
 
     @field_validator("raw_text")
     @classmethod
@@ -168,15 +176,22 @@ class MealUpdateRequest(BaseModel):
 
     @model_validator(mode="after")
     def _at_least_one_field(self) -> MealUpdateRequest:
-        # `model_fields_set`로 *송신 여부* 검사 (Story 2.2 갱신).
-        # `raw_text=null` (D4 — no-op) 또는 `image_key=null` (클리어) 송신은 *각각의
-        # 의미가 있는* 필드 송신 — 단순 `is None` 검사로는 의미 손실. Story 2.1 validator
-        # 단순화 케이스(`is None`)를 본 스토리에서 갱신.
-        # P16 — set은 `model_fields.keys()`에서 derive(필드 추가 시 drift 자동 차단).
-        # `model_fields_set` 자체가 이미 정의된 필드의 부분집합이므로 추가 intersection
-        # 불필요 — 단 미래 *비-data* 필드(예: meta)가 도입될 경우 set 갱신 필요.
-        if not self.model_fields_set:
-            raise ValueError("at least one of raw_text, ate_at, image_key required")
+        # Story 2.2 갱신: *실제 update가 발생하는* 필드가 하나라도 있는지 확인.
+        # - `image_key`는 `null` 송신이 *clear* 의미 — 송신 여부만 확인.
+        # - `raw_text`/`ate_at`는 `null` 송신이 *no-op*(D4 정합) — 라우터가 무시해
+        #   `update().values()` dict가 빈 채로 SQLAlchemy에 도달하는 footgun 차단.
+        # Gemini Code Assist PR #12 medium 코멘트(discussion 3161733852) 수용.
+        sent = self.model_fields_set
+        has_effective_change = (
+            "image_key" in sent
+            or ("raw_text" in sent and self.raw_text is not None)
+            or ("ate_at" in sent and self.ate_at is not None)
+        )
+        if not has_effective_change:
+            raise ValueError(
+                "at least one effective field required "
+                "(raw_text/ate_at must be non-null, or image_key must be provided)"
+            )
         return self
 
 

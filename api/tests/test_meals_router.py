@@ -921,8 +921,12 @@ async def test_post_meal_image_key_invalid_format_returns_400(
             json={"image_key": bad_key},
             headers=auth_headers(user),
         )
-        assert response.status_code == 400, f"expected 400 for key={bad_key!r}, got {response.status_code}"
-        assert response.json()["code"] == "validation.error", f"unexpected code for key={bad_key!r}"
+        assert response.status_code == 400, (
+            f"expected 400 for key={bad_key!r}, got {response.status_code}"
+        )
+        assert response.json()["code"] == "validation.error", (
+            f"unexpected code for key={bad_key!r}"
+        )
 
 
 async def test_post_meal_unuploaded_image_key_returns_400(

@@ -6,7 +6,7 @@
 - `test_create_presigned_upload_oversize_raises` — content_length 10 MB 초과.
 - `test_create_presigned_upload_unconfigured_raises` — settings env 미설정 시 503 fail-fast.
 - `test_resolve_public_url_returns_none_when_unconfigured` (P3) — R2 미설정 시 None.
-- `test_resolve_public_url_uses_r2_dev_fallback` (P3) — base_url 미설정 + account/bucket 있을 때 fallback.
+- `test_resolve_public_url_uses_r2_dev_fallback` (P3) — base_url 미설정시 r2.dev fallback.
 - `test_head_object_exists_returns_true_on_2xx` (P21) — boto3 client mock head_object 성공.
 - `test_head_object_exists_returns_false_on_404` (P21) — ClientError 404 mock.
 
