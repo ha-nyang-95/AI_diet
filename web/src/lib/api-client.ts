@@ -226,7 +226,10 @@ export interface paths {
          *
          *     ``WHERE user_id = current_user.id AND deleted_at IS NULL`` 강제 — 다른 사용자
          *     노출 / soft-deleted 노출 회귀 차단. ``ORDER BY ate_at DESC`` (partial index hit).
-         *     ``cursor``는 *수신만* — 본 스토리는 처리 X. ``next_cursor``는 항상 ``null``.
+         *
+         *     날짜 wire 시맨틱(KST/UTC drift)은 Story 2.4 deferred (W50). ``cursor`` 비-null
+         *     송신은 거부 (P18 / D2 결정 — silent 무시 → 무한 루프 footgun 차단). ``next_cursor``
+         *     는 항상 ``null``.
          */
         get: operations["list_meals_v1_meals_get"];
         put?: never;
@@ -506,9 +509,10 @@ export interface components {
          * MealCreateRequest
          * @description ``POST /v1/meals`` body — `extra="forbid"`로 silent unknown field 차단.
          *
-         *     ``raw_text`` 빈 문자열·whitespace-only 거부 (1차 게이트). ``ate_at`` 미지정 시
-         *     DB-side ``now()`` fallback (server_default). 미래 시점 거부는 도메인 룰 미존재
-         *     (catch-up 시나리오 허용).
+         *     ``raw_text`` 빈 문자열·whitespace-only 거부 (1차 게이트, trim 정규화 — 모바일
+         *     ``zod.trim()``과 wire 단일화 / P1). ``ate_at`` 미지정 시 DB-side ``now()``
+         *     fallback (server_default). 미래 시점 거부는 도메인 룰 미존재 (catch-up
+         *     시나리오 허용). naive datetime은 거부 (P19 / D3 결정).
          */
         MealCreateRequest: {
             /** Raw Text */
@@ -564,6 +568,9 @@ export interface components {
         /**
          * MealUpdateRequest
          * @description ``PATCH /v1/meals/{meal_id}`` body — 모든 필드 None 시 400 (최소 1 필드 필수).
+         *
+         *     ``raw_text=null``과 *필드 부재*는 동일 처리 (no-op, D4 결정). naive ``ate_at``
+         *     거부 (P19 / D3 결정). raw_text는 trim 정규화 (P1).
          */
         MealUpdateRequest: {
             /** Raw Text */
