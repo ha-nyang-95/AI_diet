@@ -19,6 +19,7 @@ SOT 단일 위치: 본 모듈의 ``KOREAN_22_ALLERGENS`` tuple.
 
 from __future__ import annotations
 
+import unicodedata
 from typing import Final
 
 # 식약처 별표 22종 — 정의 순서는 표시기준 PDF 순(우유 → 메밀 → 땅콩 → … → 기타).
@@ -51,21 +52,33 @@ KOREAN_22_ALLERGENS: Final[tuple[str, ...]] = (
 
 KOREAN_22_ALLERGENS_SET: Final[frozenset[str]] = frozenset(KOREAN_22_ALLERGENS)
 
+# SOT drift fail-fast — 22종 정의 갯수가 23/21로 변경되면 import 시점에 즉시 실패.
+# DB CHECK 제약(<@ ARRAY[...]) + Story 3.5 fit_score 22-단위 테스트가 22를 가정.
+assert len(KOREAN_22_ALLERGENS) == 22, "MFDS spec defines exactly 22 allergens"
+assert len(KOREAN_22_ALLERGENS_SET) == 22, "KOREAN_22_ALLERGENS contains duplicate labels"
+
 
 def is_valid_allergen(value: str) -> bool:
-    """단일 알레르기 라벨이 22종 도메인 내 인지 확인 — Pydantic validator/route 검증에서 사용."""
-    return value in KOREAN_22_ALLERGENS_SET
+    """단일 알레르기 라벨이 22종 도메인 내 인지 확인 — Pydantic validator/route 검증에서 사용.
+
+    ``value``는 NFC 정규화 후 비교(NFD-encoded Hangul 클립보드 paste 호환).
+    """
+    return unicodedata.normalize("NFC", value) in KOREAN_22_ALLERGENS_SET
 
 
 def normalize_allergens(values: list[str]) -> list[str]:
-    """22종 부분집합 검증 + dedup. invalid 항목 발견 시 ``ValueError`` 발생.
+    """22종 부분집합 검증 + dedup + NFC 정규화. invalid 항목 발견 시 ``ValueError`` 발생.
 
     반환 순서는 ``KOREAN_22_ALLERGENS`` 정의 순(결정성). dedup은 frozenset 거친 후
     정의 순 재정렬. 빈 입력 → 빈 리스트.
+
+    NFC 정규화: macOS 클립보드 등 일부 source는 Hangul을 NFD(decomposed jamo)로 인코딩.
+    SOT의 NFC 라벨과 byte 비교가 실패하지 않도록 입력값을 NFC로 normalize 후 비교.
     """
     seen: set[str] = set()
     for v in values:
-        if v not in KOREAN_22_ALLERGENS_SET:
+        normalized = unicodedata.normalize("NFC", v)
+        if normalized not in KOREAN_22_ALLERGENS_SET:
             raise ValueError(f"unknown allergen: {v!r}; must be one of 22 식약처 standard.")
-        seen.add(v)
+        seen.add(normalized)
     return [a for a in KOREAN_22_ALLERGENS if a in seen]

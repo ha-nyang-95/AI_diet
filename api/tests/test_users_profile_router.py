@@ -448,3 +448,102 @@ async def test_get_profile_requires_token_returns_401(
     response = await client.get("/v1/users/me/profile")
     assert response.status_code == 401
     assert response.json()["code"] == "auth.access_token.invalid"
+
+
+# --- 추가 검증 분기 (CR patches: NaN/Inf, max_length, precision, NFC) ---
+
+
+async def test_post_profile_rejects_weight_kg_nan_returns_400(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """weight_kg 가 NaN → 400 (Field allow_inf_nan=False) — DB DataError(500) 회피.
+
+    JSON 표준은 NaN을 허용하지 않으나 일부 클라이언트 라이브러리가 ``\"NaN\"`` literal을
+    포함시킬 수 있어 명시 거부.
+    """
+    user = await user_factory()
+    await consent_factory(user)
+    # JSON spec 외 literal — httpx는 raw string으로 전송 가능. body는 unicode-safe로
+    # 직접 작성 (json= 인자 사용 시 Python json 모듈이 NaN을 허용하기 때문).
+    response = await client.post(
+        "/v1/users/me/profile",
+        content='{"age": 30, "weight_kg": NaN, "height_cm": 175, '
+        '"activity_level": "moderate", "health_goal": "maintenance", "allergies": []}',
+        headers={**auth_headers(user), "Content-Type": "application/json"},
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "validation.error"
+
+
+async def test_post_profile_rejects_weight_kg_too_precise_returns_400(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """weight_kg 소수 둘째 자리 이상 → 400 — DB Numeric(5,1) silent rounding 차단."""
+    user = await user_factory()
+    await consent_factory(user)
+    payload = _valid_payload()
+    payload["weight_kg"] = 70.55  # 둘째 자리 → reject
+
+    response = await client.post(
+        "/v1/users/me/profile",
+        json=payload,
+        headers=auth_headers(user),
+    )
+    assert response.status_code == 400
+    body = response.json()
+    assert body["code"] == "validation.error"
+    assert "decimal place" in str(body)
+
+
+async def test_post_profile_rejects_too_many_allergens_returns_400(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """allergies 배열 길이 22 초과 → 400 — Field max_length=22, DoS 차단."""
+    user = await user_factory()
+    await consent_factory(user)
+    payload = _valid_payload()
+    # 23 elements (대다수 invalid이지만 max_length 검증이 먼저 발화).
+    payload["allergies"] = [f"item_{i}" for i in range(23)]
+
+    response = await client.post(
+        "/v1/users/me/profile",
+        json=payload,
+        headers=auth_headers(user),
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "validation.error"
+
+
+async def test_post_profile_normalizes_nfd_allergen_to_nfc_returns_200(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """NFD-encoded Hangul (decomposed jamo) → NFC 정규화 후 22종 set 매칭 → 200.
+
+    macOS 클립보드 등 일부 source는 한글을 NFD로 인코딩 — 백엔드는 byte 비교 전 NFC
+    normalize로 호환성 확보.
+    """
+    import unicodedata
+
+    user = await user_factory()
+    await consent_factory(user)
+    payload = _valid_payload()
+    nfd_milk = unicodedata.normalize("NFD", "우유")
+    assert nfd_milk != "우유", "test setup: NFD must differ from NFC byte-wise"
+    payload["allergies"] = [nfd_milk]
+
+    response = await client.post(
+        "/v1/users/me/profile",
+        json=payload,
+        headers=auth_headers(user),
+    )
+    assert response.status_code == 200, response.text
+    # 응답은 NFC 라벨로 정규화 — SOT 정의 순.
+    assert response.json()["allergies"] == ["우유"]

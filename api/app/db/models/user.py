@@ -29,7 +29,21 @@ from app.domain.health_profile import (
 # 22종 도메인 CHECK 제약 SQL — alembic 0005 revision의 SQL과 *동일 SOT*.
 # 변경 시 ``app/domain/allergens.py:KOREAN_22_ALLERGENS`` 만 갱신 → 본 식 + alembic
 # CHECK 제약이 자동 동기 → 새 alembic revision으로 drop+recreate.
-_ALLERGEN_LITERALS = ", ".join(f"'{a}'" for a in KOREAN_22_ALLERGENS)
+#
+# Single-quote escape 적용 (defense-in-depth) — 현 22종은 ``'`` 미포함이나, 미래
+# SOT에 apostrophe 라벨이 들어가도 SQL CHECK 깨지지 않도록 ``' → ''`` 변환.
+
+
+def _quote_label(value: str) -> str:
+    if "\x00" in value or "\\" in value:
+        raise ValueError(
+            f"unsafe character in allergen literal: {value!r} "
+            "(NUL or backslash not allowed in SQL CHECK literal)"
+        )
+    return "'" + value.replace("'", "''") + "'"
+
+
+_ALLERGEN_LITERALS = ", ".join(_quote_label(a) for a in KOREAN_22_ALLERGENS)
 _ALLERGIES_CHECK_SQL = f"allergies IS NULL OR allergies <@ ARRAY[{_ALLERGEN_LITERALS}]::text[]"
 
 

@@ -96,7 +96,9 @@ export const healthProfileSchema = z.object({
   weight_kg: z
     .number({ invalid_type_error: '체중을 입력해주세요' })
     .min(1.0, '체중은 1.0 kg 이상이어야 합니다')
-    .max(500.0, '체중은 500.0 kg 이하여야 합니다'),
+    .max(500.0, '체중은 500.0 kg 이하여야 합니다')
+    // 백엔드 ``Numeric(5,1)``의 silent rounding(70.55 → 70.6) 차단 — 1 자리만 허용.
+    .multipleOf(0.1, '체중은 소수 첫째 자리까지 입력해 주세요'),
   height_cm: z
     .number({ invalid_type_error: '신장을 입력해주세요' })
     .int('신장은 정수여야 합니다')
@@ -111,7 +113,8 @@ export const healthProfileSchema = z.object({
   // ``defaultValues: { allergies: [] }``로 초기화 — 폼 검증 시 빈 배열도 valid.
   // ``.default([])`` 미사용 사유: zod input 타입이 optional이 되어 react-hook-form
   // resolver의 TFieldValues와 mismatch 발생.
-  allergies: z.array(z.enum(KOREAN_22_ALLERGENS)),
+  // ``.max(22)`` — 도메인 상한 + DoS 차단 (백엔드 Field max_length=22와 일치).
+  allergies: z.array(z.enum(KOREAN_22_ALLERGENS)).max(22, '알레르기는 최대 22종까지 선택할 수 있습니다'),
 });
 
 export type HealthProfileFormData = z.infer<typeof healthProfileSchema>;

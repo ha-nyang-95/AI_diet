@@ -69,3 +69,24 @@
   2. **CSRF 방어는 별도 layer**: JSON body 요구(`Content-Type: application/json` + `{refresh_token}` 필드)로 form POST CSRF 차단 + SameSite=Lax 쿠키. logout-CSRF 위협 모델은 *피해자 강제 로그아웃*(annoyance 수준) — refresh token 본인만 알기에 무차별 발사 불가.
   3. **refresh token = 본인 식별자**: 평문 32-byte URL-safe random + DB sha256 매칭. token 보유자만 logout 가능 — access token 검증과 동등한 보증.
 - **재검토 시점**: 외부 보안 audit / 외주 클라이언트 보안 요구사항 변경 시. 또는 Story 5.x(전체 디바이스 로그아웃) 도입 시점에 access token 검증 layer 추가 검토.
+
+## Deferred from: code review of 1-5-건강-프로필-입력 (2026-04-29)
+
+- **W15 — Pre-existing `role IN ('user','admin')` text 리터럴 CHECK** [api/app/db/models/user.py:94] — Story 1.2 패턴, 본 스토리 외. role enum 도입 시 일괄 처리.
+- **W16 — `POST /v1/users/me/profile` per-user rate limit 미설정** [api/app/api/v1/users.py:127] — slowapi 운영 polish, Story 8 hardening.
+- **W17 — Web cookie auth CSRF 보호 미명시** — `bn_access` SameSite=Lax 채택 + 명시 CSRF 미들웨어 없음. project-wide cross-cutting (Story 8).
+- **W18 — Migration이 `app.domain.*` import (replay safety vs SOT-sync)** — spec 결정으로 SOT 우선 채택. 향후 22종 변경 cron(Story 8 R8 SOP)과 함께 재검토.
+- **W19 — Migration 0005 downgrade가 사용자 health 데이터 silent drop** [alembic 0005 downgrade] — 운영 rollback runbook (Story 8). 실제 운영 전 backup 절차 명시 필요.
+- **W20 — Web `HealthProfileForm` AbortController 미적용** — Task 7.5 명시 deviation (`isSubmitting`로 차단 충분). Story 8 polish 또는 메모리 누수 이슈 발견 시 도입.
+- **W21 — Mobile `inflightRef` unmount cleanup + AbortController** — react-hook-form `isSubmitting` 우선, Story 8 polish.
+- **W22 — `extra="forbid"` 클라이언트 진화 우려** — 각 endpoint 명시 contract 결정 유지. 7번째 입력 필드 추가 시 OpenAPI 재생성 + 양 클라이언트 deploy chain 검토.
+- **W23 — `field_validator` + `default_factory` 상호작용 명시 미흡** — 현 동작 OK (`[]` default가 `normalize_allergens([])`를 우회하나 결과 동일). Pydantic strict 모드 전환 시 재검토.
+- **W24 — BMR/TDEE float precision drift** [api/app/api/v1/users.py:100, weight_kg float 변환] — Story 3.x BMR 도입 시점 결정 (Decimal 직접 사용 vs float wire format).
+- **W25 — `extractSubmitErrorMessage` 429/413 분기 부재** [mobile profile.tsx + web HealthProfileForm.tsx] — rate limit (W16) 도입 후 polish.
+- **W26 — Web onSubmit catch-all이 비-network 에러 swallow** [web HealthProfileForm.tsx:84-86] — 진단 polish, AbortError/TypeError 분기.
+- **W27 — Mobile `pathname` open-redirect 잠재성** [mobile/app/(tabs)/_layout.tsx:57] — Expo Router pathname 안전 가정. Story 1.6 `?next=` 처리(W7) 시 일괄 whitelist.
+- **W28 — Test `body["weight_kg"] == 70.5` exact float 비교** [api/tests/test_users_profile_router.py 다수] — Pydantic v3 마이그레이션 시점 polish (`pytest.approx`).
+- **W29 — Activity color spectrum 녹색 일색** [mobile healthProfileSchema.ts:75-81] — NFR-A4는 텍스트 라벨로 충족, design polish.
+- **W30 — `+'20'` opacity hex hack** [mobile profile.tsx:198, 241] — design system 도입 시점 일괄 정리.
+- **W31 — `ProfileSubmitError` 위치인자 생성자** [mobile useHealthProfile.ts:14-26] — API 갱신 시 object param으로 변경.
+- **W32 — `Numeric(5,1)` 상한과 CHECK 500.0 mismatch (defense-in-depth)** [alembic 0005] — Numeric(5,1)은 max 9999.9, CHECK는 500.0. 현 동작 무영향, 정밀도 명세 명시 시점에 일괄 정리.

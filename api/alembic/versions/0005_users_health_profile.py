@@ -44,15 +44,32 @@ _HEALTH_GOAL_ENUM = "users_health_goal_enum"
 
 
 def _enum_literals(values: tuple[str, ...]) -> str:
-    return ", ".join(f"'{v}'" for v in values)
+    """ENUM 라벨을 SQL CREATE TYPE 리터럴로 변환 — single-quote escape 적용."""
+    return ", ".join(_sql_quote(v) for v in values)
+
+
+def _sql_quote(value: str) -> str:
+    """SQL single-quote escape — ``' → ''`` (Postgres 표준 + ANSI SQL).
+
+    추가로 NUL byte / backslash 등 위험 문자도 명시 거부 — module-load 시 fail-fast로
+    SOT(``KOREAN_22_ALLERGENS``)에 위험 라벨 추가 시 즉시 마이그레이션 실패.
+    """
+    if "\x00" in value or "\\" in value:
+        raise ValueError(
+            f"unsafe character in allergen literal: {value!r} "
+            "(NUL or backslash not allowed in SQL CHECK literal)"
+        )
+    return "'" + value.replace("'", "''") + "'"
 
 
 def _allergens_array_sql() -> str:
-    """22종 SOT를 SQL 리터럴 배열로 인라인 — single-quote escaping 회피.
+    """22종 SOT를 SQL 리터럴 배열로 인라인 — single-quote escape 적용.
 
-    KOREAN_22_ALLERGENS 라벨에 ``'`` 미포함 검증(현 22종 모두 한국어, 작은따옴표 X).
+    현 22종은 한국어 라벨로 ``'`` 미포함이나, 미래 SOT 갱신 시 apostrophe 라벨이
+    들어가도 SQL 깨지지 않도록 defense-in-depth escape. ``_sql_quote``가 위험 문자
+    감지 시 ``ValueError`` raise → 마이그레이션 실패로 fail-fast.
     """
-    literals = ", ".join(f"'{a}'" for a in KOREAN_22_ALLERGENS)
+    literals = ", ".join(_sql_quote(a) for a in KOREAN_22_ALLERGENS)
     return f"ARRAY[{literals}]::text[]"
 
 

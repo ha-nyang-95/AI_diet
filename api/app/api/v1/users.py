@@ -12,12 +12,12 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import func, select, update
+from sqlalchemy import func, update
 
 from app.api.deps import DbSession, current_user, require_basic_consents
 from app.db.models.user import User
@@ -55,20 +55,36 @@ class HealthProfileSubmitRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     age: int = Field(ge=1, le=150)
-    weight_kg: float = Field(ge=1.0, le=500.0)
+    # ``allow_inf_nan=False`` — NaN/Infinity wire format을 명시 거부 → DB Numeric(5,1)
+    # DataError(500) 회피하고 RFC 7807 400 + ``code=validation.error`` 정상 분기.
+    weight_kg: float = Field(ge=1.0, le=500.0, allow_inf_nan=False)
     height_cm: int = Field(ge=50, le=300)
     activity_level: ActivityLevel
     health_goal: HealthGoal
-    allergies: list[str] = Field(default_factory=list)
+    # ``max_length=22`` — 도메인 상한과 일치, 1M-element duplicate DoS 차단.
+    allergies: list[str] = Field(default_factory=list, max_length=22)
+
+    @field_validator("weight_kg")
+    @classmethod
+    def _validate_weight_precision(cls, v: float) -> float:
+        """소수 첫째 자리까지만 허용 — DB ``Numeric(5,1)``의 silent rounding 차단.
+
+        70.55 같은 값이 백엔드에서 70.6으로 무성 반올림 후 응답되면 사용자가 입력한
+        값과 응답이 불일치 (Story 5.1 prefill UX). 1자리 초과 정밀도는 명시 거부.
+        """
+        if round(v, 1) != v:
+            raise ValueError("weight_kg must have at most 1 decimal place")
+        return v
 
     @field_validator("allergies")
     @classmethod
     def _validate_allergens(cls, v: list[str]) -> list[str]:
-        """22종 부분집합 검증 + dedup + 정의 순 정렬.
+        """22종 부분집합 검증 + dedup + NFC 정규화 + 정의 순 정렬.
 
         invalid 항목 → ``ValueError("unknown allergen: '<value>'; ...")`` raise.
         Pydantic이 ValidationError로 wrap → ``main.py:validation_exception_handler``가
-        RFC 7807 400 + ``errors`` 배열에 ``msg`` 필드로 메시지 forward.
+        RFC 7807 400 + ``errors`` 배열에 ``msg`` 필드로 메시지 forward (top-level
+        ``detail``은 정적 "Request validation failed" — 글로벌 핸들러 회귀 차단).
         """
         return normalize_allergens(v)
 
@@ -93,7 +109,9 @@ def _build_profile_response(user: User) -> HealthProfileResponse:
     """User ORM → HealthProfileResponse 변환.
 
     - ``weight_kg`` ``Decimal | None → float | None`` 명시 변환 (wire format float 정합).
-    - ``allergies`` ``None → []`` 빈 배열 fallback.
+    - ``allergies`` ``None → []`` 빈 배열 fallback (``is not None`` 명시 분기 — DB의 *NULL*과
+      *empty list*를 같은 ``[]`` 응답으로 통합. profile 입력 여부는 ``profile_completed_at``
+      으로 판별).
     """
     return HealthProfileResponse(
         age=user.age,
@@ -101,7 +119,7 @@ def _build_profile_response(user: User) -> HealthProfileResponse:
         height_cm=user.height_cm,
         activity_level=user.activity_level,
         health_goal=user.health_goal,
-        allergies=list(user.allergies) if user.allergies else [],
+        allergies=list(user.allergies) if user.allergies is not None else [],
         profile_completed_at=user.profile_completed_at,
     )
 
@@ -135,9 +153,13 @@ async def submit_health_profile(
     ``users`` row는 OAuth 시점(Story 1.2)에 이미 존재 — INSERT 분기 X. 항상 200.
     재입력(이미 입력된 사용자가 다시 POST)도 200 + 갱신값 반영 + ``profile_completed_at``
     갱신(*최신 프로필 기록 시점*. 과거 입력 history는 audit_logs Story 7.3 책임).
+
+    ``UPDATE ... RETURNING``으로 race-free 응답 — commit 후 별도 SELECT 시
+    동시 다른 device POST가 끼어들면 응답이 *방금 보낸 값*이 아닌 *마지막 commit
+    값*이 되는 race를 차단. ``profile_completed_at`` / ``updated_at`` 양쪽 모두
+    DB-side ``func.now()`` 단일 시계 — Python ``datetime.now()`` 와의 clock skew 회피.
     """
-    now = datetime.now(UTC)
-    await db.execute(
+    result = await db.execute(
         update(User)
         .where(User.id == user.id)
         .values(
@@ -147,15 +169,15 @@ async def submit_health_profile(
             activity_level=body.activity_level,
             health_goal=body.health_goal,
             allergies=body.allergies,
-            profile_completed_at=now,
-            # ``onupdate=text("now()")`` 이벤트가 sync UPDATE에서 정상 발화하나
-            # 명시 set으로 안전망(Story 1.3·1.4 패턴 정합).
+            profile_completed_at=func.now(),
             updated_at=func.now(),
         )
+        .returning(User)
+        .execution_options(populate_existing=True)
     )
+    updated_user = result.scalar_one()
     await db.commit()
-    refreshed = await db.execute(select(User).where(User.id == user.id))
-    return _build_profile_response(refreshed.scalar_one())
+    return _build_profile_response(updated_user)
 
 
 @router.get("/me/profile")

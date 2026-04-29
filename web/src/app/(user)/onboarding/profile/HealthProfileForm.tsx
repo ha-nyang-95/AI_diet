@@ -31,6 +31,13 @@ interface ProblemDetail {
   detail?: string;
 }
 
+function parseNumber(text: string): number | undefined {
+  // 빈 입력 → undefined (zod required로 분기). paste 등으로 NaN 슬립 시도 차단.
+  if (text === "") return undefined;
+  const n = Number(text);
+  return Number.isFinite(n) ? n : undefined;
+}
+
 export default function HealthProfileForm() {
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
@@ -100,9 +107,7 @@ export default function HealthProfileForm() {
               inputMode="numeric"
               className="w-full rounded border border-zinc-300 px-3 py-2 text-sm"
               onBlur={onBlur}
-              onChange={(e) =>
-                onChange(e.target.value === "" ? undefined : Number(e.target.value))
-              }
+              onChange={(e) => onChange(parseNumber(e.target.value))}
               value={value !== undefined ? String(value) : ""}
               aria-label="나이 (정수, 1에서 150 사이)"
             />
@@ -124,9 +129,7 @@ export default function HealthProfileForm() {
               inputMode="decimal"
               className="w-full rounded border border-zinc-300 px-3 py-2 text-sm"
               onBlur={onBlur}
-              onChange={(e) =>
-                onChange(e.target.value === "" ? undefined : Number(e.target.value))
-              }
+              onChange={(e) => onChange(parseNumber(e.target.value))}
               value={value !== undefined ? String(value) : ""}
               aria-label="체중 (소수, 1.0에서 500.0 kg 사이)"
             />
@@ -149,9 +152,7 @@ export default function HealthProfileForm() {
               inputMode="numeric"
               className="w-full rounded border border-zinc-300 px-3 py-2 text-sm"
               onBlur={onBlur}
-              onChange={(e) =>
-                onChange(e.target.value === "" ? undefined : Number(e.target.value))
-              }
+              onChange={(e) => onChange(parseNumber(e.target.value))}
               value={value !== undefined ? String(value) : ""}
               aria-label="신장 (정수, 50에서 300 cm 사이)"
             />
@@ -245,14 +246,13 @@ export default function HealthProfileForm() {
           control={control}
           name="allergies"
           render={({ field: { onChange, value } }) => {
-            const current = value ?? [];
+            // ``next`` 계산은 onChange 안에서 — render 시 pre-compute하면 빠른 연속 클릭 시
+            // 같은 render의 stale snapshot으로 두 토글이 서로 덮어써 선택 유실.
             return (
               <div className="flex flex-wrap gap-2">
                 {KOREAN_22_ALLERGENS.map((allergen: KoreanAllergen) => {
+                  const current = value ?? [];
                   const checked = current.includes(allergen);
-                  const next = checked
-                    ? current.filter((a) => a !== allergen)
-                    : [...current, allergen];
                   return (
                     <label
                       key={allergen}
@@ -266,7 +266,14 @@ export default function HealthProfileForm() {
                         type="checkbox"
                         className="sr-only"
                         checked={checked}
-                        onChange={() => onChange(next)}
+                        onChange={() => {
+                          const latest = value ?? [];
+                          onChange(
+                            latest.includes(allergen)
+                              ? latest.filter((a) => a !== allergen)
+                              : [...latest, allergen],
+                          );
+                        }}
                       />
                       {checked ? "✓ " : ""}
                       {allergen}

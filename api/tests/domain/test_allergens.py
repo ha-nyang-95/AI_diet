@@ -85,3 +85,21 @@ def test_normalize_allergens_partial_invalid_raises() -> None:
     """valid + invalid 혼합 입력 → 첫 invalid에서 raise (전체 거부)."""
     with pytest.raises(ValueError, match=r"unknown allergen: 'milk'"):
         normalize_allergens(["우유", "milk"])
+
+
+def test_normalize_allergens_nfd_input_normalized_to_nfc() -> None:
+    """NFD-encoded Hangul (decomposed jamo) → NFC normalize 후 SOT 매칭 (CR patch)."""
+    import unicodedata
+
+    nfd_milk = unicodedata.normalize("NFD", "우유")
+    assert nfd_milk != "우유", "test setup: NFD must differ byte-wise"
+    # NFD 입력도 정상 통과하고 응답은 NFC 라벨.
+    assert normalize_allergens([nfd_milk]) == ["우유"]
+
+
+def test_is_valid_allergen_nfd_input_normalized_to_nfc() -> None:
+    """NFD-encoded Hangul → NFC normalize 후 valid 판정."""
+    import unicodedata
+
+    nfd_milk = unicodedata.normalize("NFD", "우유")
+    assert is_valid_allergen(nfd_milk) is True

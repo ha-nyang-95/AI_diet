@@ -24,7 +24,9 @@ export default async function OnboardingProfilePage() {
   if (!consents?.basic_consents_complete) redirect("/onboarding/disclaimer");
   if (!consents.automated_decision_consent_complete) redirect("/onboarding/automated-decision");
   // 이미 프로필 입력 완료 사용자가 본 페이지 직접 진입 시 dashboard — 중복 POST 회피.
-  if (user.profile_completed_at !== null) redirect("/dashboard");
+  // ``!user.profile_completed_at`` 으로 dashboard guard와 동일 식 — null/undefined 양쪽
+  // 안전, 빈 문자열 같은 falsy non-null 값에 대한 redirect loop 차단.
+  if (user.profile_completed_at) redirect("/dashboard");
 
   return (
     <main className="mx-auto max-w-2xl p-8">

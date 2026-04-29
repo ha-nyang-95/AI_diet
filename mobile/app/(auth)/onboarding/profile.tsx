@@ -60,8 +60,15 @@ function extractSubmitErrorMessage(err: unknown): string {
   return '네트워크 오류로 저장에 실패했습니다. 잠시 후 다시 시도해 주세요.';
 }
 
+function parseNumber(text: string): number | undefined {
+  // 빈 입력 → undefined (zod required로 분기). paste 등으로 NaN 슬립 시도 차단.
+  if (text === '') return undefined;
+  const n = Number(text);
+  return Number.isFinite(n) ? n : undefined;
+}
+
 export default function OnboardingProfile() {
-  const { consentStatus } = useAuth();
+  const { consentStatus, markProfileCompleted } = useAuth();
   const submit = useSubmitHealthProfile();
   // double-tap 방지 — Story 1.3 P10 / Story 1.4 P5 패턴 정합.
   const inflightRef = useRef(false);
@@ -75,12 +82,22 @@ export default function OnboardingProfile() {
     defaultValues: { allergies: [] },
   });
 
+  // bootstrap 미완료 (consentStatus null) — 가드 분기 전에 spinner. direct entry로
+  // consent fetch 완료 전에 form이 노출되어 사용자가 submit하면 백엔드 403 발사 후
+  // 가드가 뒤늦게 발사되는 race 차단.
+  if (consentStatus === null) {
+    return (
+      <View style={styles.center}>
+        <ActivityIndicator />
+      </View>
+    );
+  }
   // 진입 가드 — direct entry 안전망. 정상 흐름은 (tabs) 가드 또는 automated-decision
   // 성공 redirect로 도달.
-  if (consentStatus && !consentStatus.basic_consents_complete) {
+  if (!consentStatus.basic_consents_complete) {
     return <Redirect href="/(auth)/onboarding/disclaimer" />;
   }
-  if (consentStatus && !consentStatus.automated_decision_consent_complete) {
+  if (!consentStatus.automated_decision_consent_complete) {
     return <Redirect href="/(auth)/onboarding/automated-decision" />;
   }
 
@@ -93,6 +110,13 @@ export default function OnboardingProfile() {
     if (inflightRef.current) return;
     inflightRef.current = true;
     submit.mutate(data, {
+      onSuccess: (response) => {
+        // 4번째 가드 stale-cache loop 차단 — user state를 동기 갱신해 (tabs) 가드가
+        // 다음 render에서 즉시 통과하도록.
+        if (response.profile_completed_at) {
+          markProfileCompleted(response.profile_completed_at);
+        }
+      },
       onSettled: () => {
         inflightRef.current = false;
       },
@@ -122,7 +146,7 @@ export default function OnboardingProfile() {
               style={styles.input}
               keyboardType="number-pad"
               onBlur={onBlur}
-              onChangeText={(text) => onChange(text === '' ? undefined : Number(text))}
+              onChangeText={(text) => onChange(parseNumber(text))}
               value={value !== undefined ? String(value) : ''}
               accessibilityLabel="나이 (정수, 1에서 150 사이)"
               accessibilityRole="text"
@@ -143,7 +167,7 @@ export default function OnboardingProfile() {
               style={styles.input}
               keyboardType="decimal-pad"
               onBlur={onBlur}
-              onChangeText={(text) => onChange(text === '' ? undefined : Number(text))}
+              onChangeText={(text) => onChange(parseNumber(text))}
               value={value !== undefined ? String(value) : ''}
               accessibilityLabel="체중 (소수, 1.0에서 500.0 kg 사이)"
               accessibilityRole="text"
@@ -164,7 +188,7 @@ export default function OnboardingProfile() {
               style={styles.input}
               keyboardType="number-pad"
               onBlur={onBlur}
-              onChangeText={(text) => onChange(text === '' ? undefined : Number(text))}
+              onChangeText={(text) => onChange(parseNumber(text))}
               value={value !== undefined ? String(value) : ''}
               accessibilityLabel="신장 (정수, 50에서 300 cm 사이)"
               accessibilityRole="text"
@@ -267,18 +291,24 @@ export default function OnboardingProfile() {
           control={control}
           name="allergies"
           render={({ field: { onChange, value } }) => {
-            const current = value ?? [];
+            // ``next`` 계산은 onPress 안에서 — render 시 pre-compute하면 빠른 연속 탭 시
+            // 같은 render의 stale ``current`` snapshot으로 두 토글이 서로 덮어써 선택 유실.
             return (
               <View style={styles.allergyGrid}>
                 {KOREAN_22_ALLERGENS.map((allergen: KoreanAllergen) => {
+                  const current = value ?? [];
                   const checked = current.includes(allergen);
-                  const next = checked
-                    ? current.filter((a) => a !== allergen)
-                    : [...current, allergen];
                   return (
                     <Pressable
                       key={allergen}
-                      onPress={() => onChange(next)}
+                      onPress={() => {
+                        const latest = value ?? [];
+                        onChange(
+                          latest.includes(allergen)
+                            ? latest.filter((a) => a !== allergen)
+                            : [...latest, allergen],
+                        );
+                      }}
                       accessibilityRole="checkbox"
                       accessibilityState={{ checked }}
                       accessibilityLabel={`알레르기 — ${allergen}`}
@@ -324,6 +354,7 @@ export default function OnboardingProfile() {
 }
 
 const styles = StyleSheet.create({
+  center: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   // NFR-A3 폰트 200% 대응 — flexWrap + 수직 배치(라벨·입력 가로 배치 회피).
   container: {
     padding: 24,
