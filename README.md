@@ -241,6 +241,18 @@ Story 1.2부터 Google 로그인을 사용하려면 Google Cloud Console에서 O
 - Epic 2(*식단 입력 + 일별 기록 + 권한 흐름*) 첫 스토리(2.1) 완료. 후속: 2.2(사진 입력) /
   2.3(OCR 추출) / 2.4(일별 기록 화면 polish) / 2.5(오프라인 텍스트 큐잉 sync).
 
+### 식단 사진 입력 SOP (Story 2.2)
+
+- `POST /v1/meals/images/presign` → R2 직접 업로드(PUT) → `POST /v1/meals` body에 `image_key` 첨부
+  2-step (백엔드 proxy 회피, Railway egress + 메모리 폭발 방지). presigned URL 5분 만료, 10 MB 상한.
+- R2 환경변수 5종(`r2_account_id`, `r2_access_key_id`, `r2_secret_access_key`, `r2_bucket`,
+  `r2_public_base_url`) 미설정 시 503 + `code=meals.image.r2_unconfigured` (dev/CI fail-fast).
+- 카메라/사진첩 권한 거부 시 `PermissionDeniedView` 표준 컴포넌트 + `Linking.openSettings()` 안내.
+  iOS *Don't Allow* / Android *Don't ask again* 구분 (`canAskAgain`) — 설정 deep link만 의미 있는 경로.
+- 사진-only 입력 시 서버가 `raw_text="(사진 입력)"` placeholder fallback (Story 2.3 OCR이 결과로 덮어씀).
+  `image_key`는 `meals/{user_id}/{uuid}.{ext}` 형식 — cross-user 도용 차단(`startswith` ownership 검증).
+- Epic 2 두 번째 스토리(2.2) 완료. 후속: 2.3(OCR Vision 추출 — `image_key`를 입력으로 활용).
+
 ### 8시간 체크리스트
 
 - [ ] (1h) `docker compose up` 4개 컨테이너 healthy 확인

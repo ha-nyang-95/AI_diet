@@ -31,6 +31,7 @@ dependencies = [
     "apscheduler>=3.11",
     "sse-starlette>=2.2",
     "google-auth>=2.36",
+    "boto3>=1.36",
 ]
 
 [dependency-groups]
@@ -65,7 +66,7 @@ plugins = ["pydantic.mypy"]
 mypy_path = "."
 
 [[tool.mypy.overrides]]
-module = ["jose.*", "passlib.*", "pgvector.*", "slowapi.*", "apscheduler.*", "google.*"]
+module = ["jose.*", "passlib.*", "pgvector.*", "slowapi.*", "apscheduler.*", "google.*", "boto3.*", "botocore.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

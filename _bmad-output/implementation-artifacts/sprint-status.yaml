@@ -1,5 +1,5 @@
 # generated: 2026-04-27
-# last_updated: 2026-04-29 (Story 2.1 done — code-review 완료 + 18 patch 적용 + Status: review → done.)
+# last_updated: 2026-04-29 (Story 2.2 review — 사진 입력 + R2 presigned URL + 권한 흐름 구현 완료. 188 백엔드 테스트 통과 + tsc/lint clean. 다음: code-review.)
 # project: AI_diet
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-27
-last_updated: 2026-04-29  # Story 2.1 done — code-review 18 patch 적용 + review → done. epic-2 in-progress 유지 (2.2-2.5 backlog).
+last_updated: 2026-04-29  # Story 2.2 review — 구현 완료(R2 adapter + presign endpoint + 사진 첨부 UI + 권한 흐름). 188 백엔드 테스트 통과(82.44% cov), tsc/lint clean, OpenAPI 재생성. epic-2 in-progress 유지.
 project: AI_diet
 project_key: NOKEY
 tracking_system: file-system
@@ -55,7 +55,7 @@ development_status:
   # Epic 2: 식단 입력 + 일별 기록 + 권한 흐름
   epic-2: in-progress
   2-1-식단-텍스트-입력-crud: done
-  2-2-식단-사진-입력-권한-흐름: backlog
+  2-2-식단-사진-입력-권한-흐름: review
   2-3-ocr-vision-추출-확인-카드: backlog
   2-4-일별-식단-기록-화면: backlog
   2-5-오프라인-텍스트-큐잉-sync: backlog

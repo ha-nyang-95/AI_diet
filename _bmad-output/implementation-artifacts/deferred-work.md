@@ -2,6 +2,12 @@
 
 리뷰·구현 과정에서 식별되었으나 다음 스토리·시점으로 미룬 항목 모음.
 
+## Deferred from: code review of 2-2-식단-사진-입력-권한-흐름 (2026-04-29)
+
+- **DF1 — declared `content_length` vs 실제 R2 PUT body-size enforcement 부재** — `api/app/adapters/r2.py:create_presigned_upload`. 클라이언트가 presign 요청 시 `content_length=1`로 신고 후 50MB body PUT 시 R2 측 거부 게이트 부재 → storage abuse 가능. 사유: spec.md:37("R2 측 enforcement 부재 — Story 8 hardening") 명시 + 본 스토리는 발급 게이트 책임만 담당. **재검토 시점**: Story 8(운영·hardening) — `Content-Length-Range` SigV4 condition 도입 또는 PUT 완료 후 `head_object` size 비교 게이트 추가. 본 스토리에 P21(POST/PATCH attach 시 `head_object` HEAD-check)가 도입되어 *미PUT 키 attach 1차 차단*은 됐으나, *PUT 후 size 우회*는 미해결.
+- **DF2 — `(사진 입력)` placeholder가 사용자 입력과 충돌** — `api/app/api/v1/meals.py:PHOTO_ONLY_RAW_TEXT_PLACEHOLDER`. 사용자가 `raw_text="(사진 입력)"`을 직접 입력하면 자동 fallback과 구분 불가. PATCH explicit-null로 image_key clear 시 `(사진 입력)` 잔존(`test_patch_meal_can_clear_image_key_with_explicit_null`이 contract로 entrench). 사유: Story 2.3(OCR Vision 추출 + 확인 카드) 진입 시 OCR overwrite heuristic 결정과 sentinel 도입을 함께 평가해야 의미적 일관성 ↑. 본 스토리 단독 0008 마이그레이션은 scope 확장 + 후속 재설계 가능성. **재검토 시점**: Story 2.3 — 옵션 후보: (a) `is_placeholder_text BOOLEAN` 컬럼 추가, (b) DB `raw_text` nullable + 응답 시 placeholder derive (Story 2.1 invariant 갱신 필요), (c) zero-width unicode prefix sentinel(예: `​(사진 입력)`).
+- **DF3 — 모바일 R2 PUT body가 full-buffer Blob(streaming X)** — `mobile/features/meals/api.ts:uploadImageToR2`. 현재 `fetch(uri).blob()` → `fetch(upload_url, { body: blob })` 패턴은 단일 사진 전체를 JS heap에 적재 후 PUT. 사유: P5(`expo-file-system.uploadAsync` BINARY_CONTENT streaming) 도입은 신규 의존성 + `app.json` plugin 등록 + Android/iOS 양 플랫폼 회귀 검증 필요로 portfolio 영업 일정에 risk. 현 패턴은 RN 0.81 + 10 MB 한도에서 안정 동작 — heap 영향 미미(256 MB+ 한계 대비). **재검토 시점**: Story 8 polish 또는 expo-file-system이 다른 기능(예: 영수증 첨부, 공유 export)에 자연 도입되는 시점. 도입 시 (a) `app.json` plugin entry + 네이티브 빌드 회귀, (b) `MealImageUploadError` PUT 에러 매핑 갱신, (c) Android `content://` URI 호환 검증.
+
 ## Deferred from: code review of 1-1-프로젝트-부트스트랩 (2026-04-27)
 
 - **mypy `[[tool.mypy.overrides]]` 누락 모듈** — `api/pyproject.toml:46-52`에 langgraph, langchain*, langsmith, sse-starlette, tenacity, structlog 모듈 override 누락. 현재 mypy strict는 통과(import 미발생), 다음 스토리에서 해당 의존 import 도입 시 동시에 등재. 사유: 미사용 의존성에 대한 선제적 무시 규칙은 yagni; 실제 import 추가 시 즉시 처리.
