@@ -87,10 +87,10 @@ async def _truncate_user_tables() -> AsyncIterator[None]:
     engine = create_async_engine(settings.database_url, pool_pre_ping=True)
     try:
         async with engine.begin() as conn:
-            # consents는 users.id ON DELETE CASCADE라 자동 cascade되지만, 명시 prepend로
-            # 가독성 + 후속 모델 추가 시 truncate 누락 회피.
+            # consents / meals 등 dependent 테이블은 users.id ON DELETE CASCADE라 자동
+            # cascade되지만, 명시 prepend로 가독성 + 후속 모델 추가 시 truncate 누락 회피.
             await conn.execute(
-                text("TRUNCATE consents, refresh_tokens, users RESTART IDENTITY CASCADE")
+                text("TRUNCATE meals, consents, refresh_tokens, users RESTART IDENTITY CASCADE")
             )
     finally:
         await engine.dispose()

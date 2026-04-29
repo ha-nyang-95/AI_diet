@@ -63,5 +63,12 @@ export default function TabsLayout() {
     return <Redirect href={target} />;
   }
 
-  return <Tabs screenOptions={{ headerShown: false }} />;
+  return (
+    <Tabs screenOptions={{ headerShown: false }}>
+      {/* index 라우트는 redirect-only — 탭 바에서 hide (Expo Router 표준 hide 패턴). */}
+      <Tabs.Screen name="index" options={{ href: null }} />
+      <Tabs.Screen name="meals" options={{ title: '식단' }} />
+      <Tabs.Screen name="settings" options={{ title: '설정' }} />
+    </Tabs>
+  );
 }
