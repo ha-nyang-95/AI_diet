@@ -112,6 +112,16 @@ export interface paths {
          *     ``users`` row는 OAuth 시점(Story 1.2)에 이미 존재 — INSERT 분기 X. 항상 200.
          *     재입력(이미 입력된 사용자가 다시 POST)도 200 + 갱신값 반영 + ``profile_completed_at``
          *     갱신(*최신 프로필 기록 시점*. 과거 입력 history는 audit_logs Story 7.3 책임).
+         *
+         *     ``UPDATE ... RETURNING``으로 race-free 응답 — commit 후 별도 SELECT 시
+         *     동시 다른 device POST가 끼어들면 응답이 *방금 보낸 값*이 아닌 *마지막 commit
+         *     값*이 되는 race를 차단. ``profile_completed_at`` / ``updated_at`` 양쪽 모두
+         *     DB-side ``func.now()`` 단일 시계 — Python ``datetime.now()`` 와의 clock skew 회피.
+         *
+         *     응답 build는 ``commit`` *이전*에 수행 — AsyncSession은 ``commit`` 후 모든 객체를
+         *     expire 시키므로, expired 객체 속성 접근이 lazy-load를 trigger해
+         *     ``sqlalchemy.exc.MissingGreenlet`` (async context lazy-load 금지) 가능.
+         *     RETURNING으로 메모리에 이미 로드된 데이터를 commit 전에 직렬화 후 commit.
          */
         post: operations["submit_health_profile_v1_users_me_profile_post"];
         delete?: never;
