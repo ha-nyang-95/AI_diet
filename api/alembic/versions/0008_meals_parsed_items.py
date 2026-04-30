@@ -19,6 +19,7 @@ CHECK는 Story 8 hardening / jsonb 구조 변경 마찰).
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 
 import sqlalchemy as sa
@@ -45,16 +46,18 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     # CR P8 fix(2026-04-30) — populated 테이블에서 silent data loss 차단. parsed_items
-    # 가 채워진 row가 1건이라도 있으면 abort. 실수 rollback 방어 + 명시적 force flag
-    # 부재 시 거부 (Story 8 perf hardening 시 force-flag 도입 검토).
+    # 가 채워진 row가 1건이라도 있고 ALEMBIC_ALLOW_DESTRUCTIVE_DOWNGRADE=1이 명시 안 된
+    # 경우 abort. 실수 rollback 방어 + 명시적 force flag 요구.
+    # Gemini PR #14 review(2026-04-30): env var 체크 누락 buglet 수정 — 에러 메시지에서
+    # 안내한 force flag가 실제 코드 분기에 반영되도록 align.
     bind = op.get_bind()
     populated = bind.execute(
         sa.text("SELECT count(*) FROM meals WHERE parsed_items IS NOT NULL")
     ).scalar()
-    if populated and int(populated) > 0:
+    if populated and int(populated) > 0 and os.getenv("ALEMBIC_ALLOW_DESTRUCTIVE_DOWNGRADE") != "1":
         raise RuntimeError(
             f"refusing downgrade: meals.parsed_items contains {populated} populated row(s). "
-            "Manually NULL the column (or set ALEMBIC_ALLOW_DESTRUCTIVE_DOWNGRADE=1 + "
-            "extend this script) to confirm data loss is intended."
+            "Manually NULL the column (or set ALEMBIC_ALLOW_DESTRUCTIVE_DOWNGRADE=1) "
+            "to confirm data loss is intended."
         )
     op.drop_column("meals", "parsed_items")
