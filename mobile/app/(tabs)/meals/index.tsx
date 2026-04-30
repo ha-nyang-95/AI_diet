@@ -11,6 +11,8 @@
  */
 import { Stack, router } from 'expo-router';
 import { useCallback, useMemo, useState } from 'react';
+// CR Gemini #1 (HIGH) — query window가 mount 시점 1회 고정되면 (a) 자정 cross 시 stale,
+// (b) 내일 catch-up 식단 누락. 매 렌더 직접 계산 + to_date를 tomorrow까지 확장.
 import {
   ActionSheetIOS,
   ActivityIndicator,
@@ -46,11 +48,17 @@ export default function MealsListScreen() {
   // (`[meal_id].tsx`와 캐시 공유) → 오프라인 prev/next 시 7일 모두 cache hit (NFR-R4
   // 일자 무관 보장). 백엔드 ASC 정렬 + selectedDate별 filter는 시간순 ASC 그대로 유지
   // (AC4 정합). 한 번 fetch로 여러 일자 navigation 무비용.
-  const sevenDaysAgo = useMemo(() => addDays(todayKst(), -7), []);
-  const todayDate = useMemo(() => todayKst(), []);
+  //
+  // CR Gemini #1 — useMemo([])로 1회 고정 시 자정 cross 시 stale + 내일 catch-up 누락.
+  // 매 렌더 직접 계산 (todayKst은 Intl.DateTimeFormat 1회 호출로 cheap, queryKey는
+  // TanStack Query가 deep-equal hash라 동일 값일 때 refetch 없음). to_date를 *내일까지*
+  // 확장 — AC4 "내일까지 허용" + 사용자가 내일 catch-up 식단 입력 시 표시 정합.
+  const todayDate = todayKst();
+  const sevenDaysAgo = addDays(todayDate, -7);
+  const tomorrowDate = addDays(todayDate, 1);
   const { data, isPending, isError, refetch, isRefetching } = useMealsQuery({
     from_date: sevenDaysAgo,
-    to_date: todayDate,
+    to_date: tomorrowDate,
   });
   const filteredMeals = useMemo(
     () =>
@@ -59,8 +67,7 @@ export default function MealsListScreen() {
       ),
     [data?.meals, selectedDate],
   );
-  // P4 — 다음 일자 버튼 disable 분기 (selectedDate >= 내일).
-  const tomorrowDate = useMemo(() => addDays(todayDate, 1), [todayDate]);
+  // P4 — 다음 일자 버튼 disable 분기 (selectedDate >= 내일 — 모레 이상 navigate 차단).
   const isNextDisabled = selectedDate >= tomorrowDate;
   const deleteMutation = useDeleteMealMutation();
   const queryClient = useQueryClient();

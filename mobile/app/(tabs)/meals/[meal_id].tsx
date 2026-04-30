@@ -33,6 +33,7 @@ import type {
   MealMacros,
   MealResponse,
 } from '@/features/meals/mealSchema';
+import { useOnlineStatus } from '@/lib/use-online-status';
 
 const UUID_PATTERN = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
@@ -91,13 +92,20 @@ export default function MealDetailScreen() {
 
   const queryClient = useQueryClient();
   const deleteMutation = useDeleteMealMutation();
+  // CR Gemini #3 (MEDIUM) — NFR-R4 read-only 정합: 오프라인 시 수정/삭제 차단.
+  // index.tsx와 동일 hook 재사용으로 disable 분기 일관성.
+  const { isOnline, isInternetReachable } = useOnlineStatus();
+  const isOffline = !isOnline || isInternetReachable === false;
 
   // 7일 윈도우 fetch + client-side filter (단건 endpoint 도입 회피 — yagni).
-  const sevenDaysAgo = useMemo(() => addDays(todayKst(), -7), []);
-  const today = useMemo(() => todayKst(), []);
+  // CR Gemini #2 (HIGH) — useMemo([])로 1회 고정 시 자정 cross stale + 내일 catch-up
+  // 식단 누락. 매 렌더 직접 계산 + to_date를 *내일까지* 확장 (index.tsx와 정합).
+  const today = todayKst();
+  const sevenDaysAgo = addDays(today, -7);
+  const tomorrow = addDays(today, 1);
   const { data, isPending, isError, refetch } = useMealsQuery({
     from_date: sevenDaysAgo,
-    to_date: today,
+    to_date: tomorrow,
   });
 
   const meal: MealResponse | undefined = useMemo(
@@ -107,11 +115,16 @@ export default function MealDetailScreen() {
 
   const handleEdit = useCallback(() => {
     if (!meal) return;
+    // CR Gemini #3 — 오프라인 시 read-only (NFR-R4 정합 + index ActionSheet과 동일 흐름).
+    if (isOffline) {
+      Alert.alert('오프라인', '온라인 시 가능합니다.');
+      return;
+    }
     const target = `/(tabs)/meals/input?meal_id=${meal.id}` as Parameters<
       typeof router.push
     >[0];
     router.push(target);
-  }, [meal]);
+  }, [meal, isOffline]);
 
   const handleDeleteConfirmed = useCallback(() => {
     if (!meal || deleteMutation.isPending) return;
@@ -142,6 +155,11 @@ export default function MealDetailScreen() {
 
   const handleDelete = useCallback(() => {
     if (!meal) return;
+    // CR Gemini #3 — 오프라인 차단 (NFR-R4).
+    if (isOffline) {
+      Alert.alert('오프라인', '온라인 시 가능합니다.');
+      return;
+    }
     Alert.alert(
       '식단 삭제',
       '이 식단을 삭제하시겠습니까?',
@@ -151,7 +169,7 @@ export default function MealDetailScreen() {
       ],
       { cancelable: true },
     );
-  }, [handleDeleteConfirmed, meal]);
+  }, [handleDeleteConfirmed, meal, isOffline]);
 
   // 1) 잘못된 UUID — 즉시 에러 화면.
   if (!isValidUuid) {
@@ -305,18 +323,18 @@ export default function MealDetailScreen() {
         <Text style={styles.askButtonHint}>Epic 3 통합 후 활성화</Text>
       </View>
 
-      {/* 액션 버튼 */}
+      {/* 액션 버튼 — CR Gemini #3 정합: 오프라인 시 visual disabled (NFR-R4 read-only). */}
       <View style={styles.actionRow}>
         <Pressable
           onPress={handleEdit}
-          disabled={deleteMutation.isPending}
+          disabled={deleteMutation.isPending || isOffline}
           accessibilityRole="button"
           accessibilityLabel="수정"
-          accessibilityState={{ disabled: deleteMutation.isPending }}
+          accessibilityState={{ disabled: deleteMutation.isPending || isOffline }}
           style={[
             styles.actionButton,
             styles.actionButtonSecondary,
-            deleteMutation.isPending ? styles.actionButtonDisabled : null,
+            deleteMutation.isPending || isOffline ? styles.actionButtonDisabled : null,
           ]}
         >
           <Text style={styles.actionButtonText}>수정</Text>
@@ -325,14 +343,14 @@ export default function MealDetailScreen() {
             isPending 가드는 이미 있으나 Alert 재표시는 별도 — 버튼 자체 disabled로 UX 정합). */}
         <Pressable
           onPress={handleDelete}
-          disabled={deleteMutation.isPending}
+          disabled={deleteMutation.isPending || isOffline}
           accessibilityRole="button"
           accessibilityLabel="삭제"
-          accessibilityState={{ disabled: deleteMutation.isPending }}
+          accessibilityState={{ disabled: deleteMutation.isPending || isOffline }}
           style={[
             styles.actionButton,
             styles.actionButtonDestructive,
-            deleteMutation.isPending ? styles.actionButtonDisabled : null,
+            deleteMutation.isPending || isOffline ? styles.actionButtonDisabled : null,
           ]}
         >
           <Text style={styles.actionButtonDestructiveText}>
