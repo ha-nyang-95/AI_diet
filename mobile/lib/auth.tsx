@@ -74,6 +74,11 @@ export const queryClient = new QueryClient({
     queries: {
       staleTime: 60 * 1000,
       retry: 1,
+      // CR P2 — Story 2.4 NFR-R4 7일 persister 정합. TanStack Query persist는 in-memory
+      // gcTime ≥ persister maxAge가 invariant — gcTime이 default 5분이면 mount 후 5분 idle
+      // 시 query가 GC되어 persister hydrate에도 stale로 즉시 fetch 시도 → 오프라인 시 빈
+      // 화면. persister maxAge(7d)와 동등한 gcTime(7d) 강제로 NFR-R4 보장.
+      gcTime: 7 * 24 * 60 * 60 * 1000,
     },
   },
 });

@@ -225,11 +225,22 @@ export interface paths {
          * @description 자기 식단 목록 조회 — 인증만 (PIPA Art.35).
          *
          *     ``WHERE user_id = current_user.id AND deleted_at IS NULL`` 강제 — 다른 사용자
-         *     노출 / soft-deleted 노출 회귀 차단. ``ORDER BY ate_at DESC`` (partial index hit).
+         *     노출 / soft-deleted 노출 회귀 차단.
          *
-         *     날짜 wire 시맨틱(KST/UTC drift)은 Story 2.4 deferred (W50). ``cursor`` 비-null
-         *     송신은 거부 (P18 / D2 결정 — silent 무시 → 무한 루프 footgun 차단). ``next_cursor``
-         *     는 항상 ``null``.
+         *     Story 2.4 — 날짜 필터는 ``Asia/Seoul`` TZ 자정 boundary로 해석합니다 (W50 해소,
+         *     D1 결정). ``from_date=2026-04-30`` → ``2026-04-30T00:00:00+09:00`` 이상,
+         *     ``to_date=2026-04-30`` → ``2026-05-01T00:00:00+09:00`` 미만. KST 0-9시 식단 누락
+         *     차단(``ate_at='2026-04-30T03:00:00+09:00'`` UTC ``2026-04-29T18:00:00Z``이
+         *     ``from_date=2026-04-30``에 포함). 다중 TZ 지원은 Growth NFR-L4.
+         *
+         *     Story 2.4 — ORDER BY 분기 (D2 결정). 날짜 필터 활성 시 ``ate_at ASC``(시간순 —
+         *     아침→저녁, epic AC line 558), 미적용 시 ``ate_at DESC``(최근 식단 우선, Story 8
+         *     cursor pagination forward-compat). partial index ``idx_meals_user_id_ate_at_active``
+         *     는 양방향 hit.
+         *
+         *     ``cursor`` 비-null 송신은 거부 (P18 / D2 결정 — silent 무시 → 무한 루프 footgun
+         *     차단). ``next_cursor``는 항상 ``null``. ``analysis_summary``는 항상 ``null``
+         *     (Story 3.x ``meal_analyses`` JOIN 책임 — Story 2.4 baseline은 forward-compat 슬롯만).
          */
         get: operations["list_meals_v1_meals_get"];
         put?: never;
@@ -589,6 +600,35 @@ export interface components {
             refresh_token?: string | null;
         };
         /**
+         * MealAnalysisSummary
+         * @description 식단 AI 분석 요약 — Epic 3 ``meal_analyses`` 테이블 1:1 매핑 forward-compat 슬롯.
+         *
+         *     Story 2.4 — Pydantic 인터페이스만 정의. 본 스토리 baseline은 ``MealResponse.analysis_summary``
+         *     *항상 None*(서버 join X) — 실제 채움은 Story 3.3 / 3.5. 별도 endpoint 분리는
+         *     yagni — list 응답에 슬롯 통합(Story 3.x perf hardening 시점에 분리 검토).
+         *
+         *     fields:
+         *
+         *     - ``fit_score``: 0-100 (FR21 정합).
+         *     - ``fit_score_label``: 5단계 텍스트 라벨 — NFR-A4 색약 대응. ``allergen_violation``
+         *       (FR22 알레르기 0점 단락) / ``low`` / ``moderate`` / ``good`` / ``excellent``.
+         *     - ``macros``: 식약처 OpenAPI 표준 키.
+         *     - ``feedback_summary``: 1줄 피드백 (max 120) — FR23 인용형 풀 텍스트는 ``[meal_id].tsx``
+         *       채팅(Story 3.7 SSE).
+         */
+        MealAnalysisSummary: {
+            /** Fit Score */
+            fit_score: number;
+            /**
+             * Fit Score Label
+             * @enum {string}
+             */
+            fit_score_label: "allergen_violation" | "low" | "moderate" | "good" | "excellent";
+            macros: components["schemas"]["MealMacros"];
+            /** Feedback Summary */
+            feedback_summary: string;
+        };
+        /**
          * MealCreateRequest
          * @description ``POST /v1/meals`` body — `extra="forbid"`로 silent unknown field 차단.
          *
@@ -689,13 +729,34 @@ export interface components {
             next_cursor?: string | null;
         };
         /**
-         * MealResponse
-         * @description 식단 단건 응답 — 10 필드 (Story 2.1 7 + 2.2 image_key/image_url + 2.3 parsed_items).
+         * MealMacros
+         * @description 식단 매크로 영양 정보 — 식약처 OpenAPI 표준 키 정합 (architecture line 289).
          *
-         *     ``deleted_at`` / ``image_key`` / ``image_url`` / ``parsed_items`` NULL 시에도
-         *     키 유지 (스키마 안정성). ``image_url``은 derived — `image_key` 있으면
-         *     `_resolve_public_url(image_key)`, 없으면 None (`_meal_to_response` helper에서
-         *     계산).
+         *     Story 2.4 — Epic 3 forward-compat. 모든 필드 ``ge=0`` non-negative 단언. 본 스토리
+         *     baseline은 *항상 None*(서버 join X) — 실제 채움은 Story 3.3 (`meal_analyses` 테이블
+         *     + LangGraph 노드 + ``app/domain/fit_score.py`` 알고리즘) / Story 3.5 (fit_score 룰).
+         */
+        MealMacros: {
+            /** Carbohydrate G */
+            carbohydrate_g: number;
+            /** Protein G */
+            protein_g: number;
+            /** Fat G */
+            fat_g: number;
+            /** Energy Kcal */
+            energy_kcal: number;
+        };
+        /**
+         * MealResponse
+         * @description 식단 단건 응답 — 11 필드 (Story 2.1+2.2+2.3 10 + Story 2.4 analysis_summary).
+         *
+         *     ``deleted_at`` / ``image_key`` / ``image_url`` / ``parsed_items`` /
+         *     ``analysis_summary`` NULL 시에도 키 유지 (스키마 안정성, architecture line 481).
+         *     ``image_url``은 derived — `image_key` 있으면 `_resolve_public_url(image_key)`,
+         *     없으면 None (`_meal_to_response` helper에서 계산).
+         *
+         *     Story 2.4 — ``analysis_summary``는 본 스토리 baseline *항상 None*(서버 join X).
+         *     Story 3.x가 ``meal_analyses`` JOIN으로 채움.
          */
         MealResponse: {
             /**
@@ -733,6 +794,7 @@ export interface components {
             image_url: string | null;
             /** Parsed Items */
             parsed_items: components["schemas"]["ParsedMealItem"][] | null;
+            analysis_summary: components["schemas"]["MealAnalysisSummary"] | null;
         };
         /**
          * MealUpdateRequest

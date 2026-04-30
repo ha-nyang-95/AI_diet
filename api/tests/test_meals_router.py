@@ -15,6 +15,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 from httpx import AsyncClient
@@ -112,7 +113,7 @@ async def test_post_meal_creates_returns_201(
     )
     assert response.status_code == 201, response.text
     body = response.json()
-    # Story 2.3 — 10 필드 (Story 2.2 9 + parsed_items).
+    # Story 2.4 — 11 필드 (Story 2.3 10 + analysis_summary forward-compat 슬롯).
     assert set(body.keys()) == {
         "id",
         "user_id",
@@ -124,6 +125,7 @@ async def test_post_meal_creates_returns_201(
         "image_key",
         "image_url",
         "parsed_items",
+        "analysis_summary",
     }
     assert body["raw_text"] == "삼겹살 1인분, 김치찌개, 소주 2잔"
     assert body["user_id"] == str(user.id)
@@ -133,6 +135,8 @@ async def test_post_meal_creates_returns_201(
     assert body["image_key"] is None
     assert body["image_url"] is None
     assert body["parsed_items"] is None
+    # Story 2.4 — analysis_summary는 항상 None (Story 3.x에서 meal_analyses JOIN 책임).
+    assert body["analysis_summary"] is None
 
     # DB row 직접 검증.
     session_maker: async_sessionmaker[AsyncSession] = app.state.session_maker
@@ -358,6 +362,173 @@ async def test_get_meals_filter_by_date_range(
     raw_texts = [m["raw_text"] for m in body["meals"]]
     assert "이틀 전" not in raw_texts
     assert {"오늘", "어제"} == set(raw_texts)
+
+
+async def test_list_meals_kst_boundary_includes_pre_dawn_korean_time(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """W50 회귀 차단 핵심 — KST 0-9시 식단(UTC 전날)이 KST 일자 조회에 포함.
+
+    Story 2.4 (D1 결정): 날짜 필터를 ``Asia/Seoul`` TZ 자정 boundary로 해석. ``ate_at
+    = 2026-04-30T03:00:00+09:00`` (UTC ``2026-04-29T18:00:00Z``)이 ``from_date=
+    2026-04-30`` 쿼리에 포함되어야 함. baseline 동작은 *제외*(W50 결함).
+    """
+    user = await user_factory()
+    await consent_factory(user)
+
+    kst = ZoneInfo("Asia/Seoul")
+    pre_dawn_kst = datetime(2026, 4, 30, 3, 0, tzinfo=kst)
+    await _create_meal_for(user, raw_text="새벽 식단", ate_at=pre_dawn_kst)
+
+    response = await client.get(
+        "/v1/meals?from_date=2026-04-30&to_date=2026-04-30",
+        headers=auth_headers(user),
+    )
+    assert response.status_code == 200
+    body = response.json()
+    raw_texts = [m["raw_text"] for m in body["meals"]]
+    assert "새벽 식단" in raw_texts
+
+
+async def test_list_meals_kst_boundary_excludes_next_day_pre_dawn(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """다음날 KST 0-9시 식단은 *제외* 단언 — to_date upper boundary 검증."""
+    user = await user_factory()
+    await consent_factory(user)
+
+    kst = ZoneInfo("Asia/Seoul")
+    next_day_pre_dawn_kst = datetime(2026, 5, 1, 1, 0, tzinfo=kst)
+    await _create_meal_for(user, raw_text="다음날 새벽", ate_at=next_day_pre_dawn_kst)
+
+    response = await client.get(
+        "/v1/meals?from_date=2026-04-30&to_date=2026-04-30",
+        headers=auth_headers(user),
+    )
+    assert response.status_code == 200
+    body = response.json()
+    raw_texts = [m["raw_text"] for m in body["meals"]]
+    assert "다음날 새벽" not in raw_texts
+    # CR P9 — 필터가 끊겨 0건이어도 `not in` 단언이 통과하는 false positive 차단.
+    # 본 테스트는 *해당 일자 식단을 1건 생성*하지 않았으므로 결과 0건이 정확.
+    assert len(body["meals"]) == 0
+
+
+async def test_list_meals_from_date_only_kst_lower_bound(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """``from_date`` 단독 — KST 자정 이상만 포함."""
+    user = await user_factory()
+    await consent_factory(user)
+
+    kst = ZoneInfo("Asia/Seoul")
+    before = datetime(2026, 4, 29, 23, 30, tzinfo=kst)  # KST 23:30 — from 이전 일자
+    after = datetime(2026, 4, 30, 0, 30, tzinfo=kst)  # KST 00:30 — from 일자
+    await _create_meal_for(user, raw_text="전날 23시반", ate_at=before)
+    await _create_meal_for(user, raw_text="당일 0시반", ate_at=after)
+
+    response = await client.get(
+        "/v1/meals?from_date=2026-04-30",
+        headers=auth_headers(user),
+    )
+    assert response.status_code == 200
+    raw_texts = [m["raw_text"] for m in response.json()["meals"]]
+    assert "전날 23시반" not in raw_texts
+    assert "당일 0시반" in raw_texts
+
+
+async def test_list_meals_to_date_only_kst_upper_bound_inclusive(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """``to_date`` 단독 — to_date 일자 KST 자정 자체는 포함, 다음날 KST 자정 미만."""
+    user = await user_factory()
+    await consent_factory(user)
+
+    kst = ZoneInfo("Asia/Seoul")
+    same_day_late = datetime(2026, 4, 30, 23, 59, tzinfo=kst)
+    next_day_early = datetime(2026, 5, 1, 0, 30, tzinfo=kst)
+    await _create_meal_for(user, raw_text="당일 23시 59분", ate_at=same_day_late)
+    await _create_meal_for(user, raw_text="다음날 0시 30분", ate_at=next_day_early)
+
+    response = await client.get(
+        "/v1/meals?to_date=2026-04-30",
+        headers=auth_headers(user),
+    )
+    assert response.status_code == 200
+    raw_texts = [m["raw_text"] for m in response.json()["meals"]]
+    assert "당일 23시 59분" in raw_texts
+    assert "다음날 0시 30분" not in raw_texts
+
+
+async def test_list_meals_no_date_filter_returns_desc_order(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """D2 결정 — 날짜 필터 미적용 시 ate_at DESC (최근 식단 우선)."""
+    user = await user_factory()
+    await consent_factory(user)
+
+    kst = ZoneInfo("Asia/Seoul")
+    earlier = datetime(2026, 4, 30, 8, 0, tzinfo=kst)
+    later = datetime(2026, 4, 30, 19, 0, tzinfo=kst)
+    await _create_meal_for(user, raw_text="아침", ate_at=earlier)
+    await _create_meal_for(user, raw_text="저녁", ate_at=later)
+
+    response = await client.get("/v1/meals", headers=auth_headers(user))
+    assert response.status_code == 200
+    raw_texts = [m["raw_text"] for m in response.json()["meals"]]
+    assert raw_texts == ["저녁", "아침"]  # DESC
+
+
+async def test_list_meals_with_date_filter_returns_asc_order(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """D2 결정 — 날짜 필터 활성 시 ate_at ASC (시간순 — 아침→저녁)."""
+    user = await user_factory()
+    await consent_factory(user)
+
+    kst = ZoneInfo("Asia/Seoul")
+    morning = datetime(2026, 4, 30, 8, 0, tzinfo=kst)
+    evening = datetime(2026, 4, 30, 19, 0, tzinfo=kst)
+    await _create_meal_for(user, raw_text="아침", ate_at=morning)
+    await _create_meal_for(user, raw_text="저녁", ate_at=evening)
+
+    response = await client.get(
+        "/v1/meals?from_date=2026-04-30&to_date=2026-04-30",
+        headers=auth_headers(user),
+    )
+    assert response.status_code == 200
+    raw_texts = [m["raw_text"] for m in response.json()["meals"]]
+    assert raw_texts == ["아침", "저녁"]  # ASC
+
+
+async def test_list_meals_response_includes_analysis_summary_null(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """Story 2.4 — 응답에 ``analysis_summary: null`` 키 항상 노출 (스키마 안정성)."""
+    user = await user_factory()
+    await consent_factory(user)
+    await _create_meal_for(user, raw_text="분석 슬롯 테스트")
+
+    response = await client.get("/v1/meals", headers=auth_headers(user))
+    assert response.status_code == 200
+    meals = response.json()["meals"]
+    assert len(meals) == 1
+    assert "analysis_summary" in meals[0]
+    assert meals[0]["analysis_summary"] is None
 
 
 async def test_get_meals_from_after_to_returns_400(
