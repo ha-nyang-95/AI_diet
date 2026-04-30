@@ -1291,3 +1291,254 @@ async def test_meal_response_includes_parsed_items_when_set(
     body = response.json()
     assert len(body["meals"]) == 1
     assert body["meals"][0]["parsed_items"] == parsed_items
+
+
+# --- Story 2.5 — POST /v1/meals Idempotency-Key 처리 (W46 흡수) ---------------
+
+
+def _new_idempotency_key() -> str:
+    """UUID v4 — 라우터의 ``_IDEMPOTENCY_KEY_PATTERN`` 통과 보장."""
+    return str(uuid.uuid4())
+
+
+async def test_post_meal_with_idempotency_key_first_time_returns_201_with_key_persisted(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """첫 송신 → 201 + DB row의 ``idempotency_key`` 저장 단언."""
+    user = await user_factory()
+    await consent_factory(user)
+    key = _new_idempotency_key()
+
+    response = await client.post(
+        "/v1/meals",
+        json=_valid_meal_payload(),
+        headers={**auth_headers(user), "Idempotency-Key": key},
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    # 응답 wire에는 idempotency_key 노출 X (Story 2.5 D1 — 클라이언트 입력 echo 회피).
+    assert "idempotency_key" not in body
+
+    session_maker: async_sessionmaker[AsyncSession] = app.state.session_maker
+    async with session_maker() as session:
+        result = await session.execute(select(Meal).where(Meal.user_id == user.id))
+        meals = result.scalars().all()
+    assert len(meals) == 1
+    assert meals[0].idempotency_key == key
+
+
+async def test_post_meal_with_idempotency_key_duplicate_returns_200_same_row(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """같은 헤더 두 번 송신 → 두 응답 모두 같은 ``meal.id`` + 두 번째는 200 (W46 closed 단언)."""
+    user = await user_factory()
+    await consent_factory(user)
+    key = _new_idempotency_key()
+    headers = {**auth_headers(user), "Idempotency-Key": key}
+
+    first = await client.post("/v1/meals", json=_valid_meal_payload(), headers=headers)
+    assert first.status_code == 201, first.text
+    first_body = first.json()
+
+    second = await client.post("/v1/meals", json=_valid_meal_payload(), headers=headers)
+    assert second.status_code == 200, second.text
+    second_body = second.json()
+    assert second_body["id"] == first_body["id"]
+
+    session_maker: async_sessionmaker[AsyncSession] = app.state.session_maker
+    async with session_maker() as session:
+        result = await session.execute(select(Meal).where(Meal.user_id == user.id))
+        meals = result.scalars().all()
+    assert len(meals) == 1
+
+
+async def test_post_meal_without_idempotency_key_creates_new_row(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """헤더 미송신 → 201 + ``idempotency_key IS NULL`` (회귀 차단)."""
+    user = await user_factory()
+    await consent_factory(user)
+
+    response = await client.post(
+        "/v1/meals",
+        json=_valid_meal_payload(),
+        headers=auth_headers(user),
+    )
+    assert response.status_code == 201, response.text
+
+    session_maker: async_sessionmaker[AsyncSession] = app.state.session_maker
+    async with session_maker() as session:
+        result = await session.execute(select(Meal).where(Meal.user_id == user.id))
+        meal = result.scalar_one()
+    assert meal.idempotency_key is None
+
+
+async def test_post_meal_with_idempotency_key_invalid_uuid_returns_400(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """``Idempotency-Key: not-a-uuid`` → 400 + code ``meals.idempotency_key.invalid``."""
+    user = await user_factory()
+    await consent_factory(user)
+
+    response = await client.post(
+        "/v1/meals",
+        json=_valid_meal_payload(),
+        headers={**auth_headers(user), "Idempotency-Key": "not-a-uuid"},
+    )
+    assert response.status_code == 400, response.text
+    assert response.json()["code"] == "meals.idempotency_key.invalid"
+
+
+async def test_post_meal_with_idempotency_key_invalid_v4_format_returns_400(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """UUID v1 형식 → 400 (`v4` 강제 — 13번째 nibble은 4여야 함)."""
+    user = await user_factory()
+    await consent_factory(user)
+    # UUID v1 sample (13번째 nibble = '1'). v4 regex `4[0-9a-fA-F]{3}` 미일치.
+    uuid_v1 = "c232ab00-9414-11ec-b909-0242ac120002"
+
+    response = await client.post(
+        "/v1/meals",
+        json=_valid_meal_payload(),
+        headers={**auth_headers(user), "Idempotency-Key": uuid_v1},
+    )
+    assert response.status_code == 400, response.text
+    assert response.json()["code"] == "meals.idempotency_key.invalid"
+
+
+async def test_post_meal_with_idempotency_key_different_users_isolated(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """사용자 A의 키를 B가 송신 → B의 user_id 정합 row 신규 생성 (200 X)."""
+    user_a = await user_factory()
+    user_b = await user_factory()
+    await consent_factory(user_a)
+    await consent_factory(user_b)
+    key = _new_idempotency_key()
+
+    first = await client.post(
+        "/v1/meals",
+        json=_valid_meal_payload(),
+        headers={**auth_headers(user_a), "Idempotency-Key": key},
+    )
+    assert first.status_code == 201, first.text
+    first_body = first.json()
+
+    second = await client.post(
+        "/v1/meals",
+        json=_valid_meal_payload(),
+        headers={**auth_headers(user_b), "Idempotency-Key": key},
+    )
+    # B는 별 row 신규 생성 — 201 (200 X).
+    assert second.status_code == 201, second.text
+    second_body = second.json()
+    assert second_body["id"] != first_body["id"]
+    assert second_body["user_id"] == str(user_b.id)
+
+
+async def test_post_meal_with_idempotency_key_conflicts_with_deleted_returns_409(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """A가 key X로 식단 생성 → soft delete → 같은 key X로 재 POST → 409 +
+    code ``meals.idempotency_key.conflict_deleted``."""
+    user = await user_factory()
+    await consent_factory(user)
+    key = _new_idempotency_key()
+    headers = {**auth_headers(user), "Idempotency-Key": key}
+
+    first = await client.post("/v1/meals", json=_valid_meal_payload(), headers=headers)
+    assert first.status_code == 201, first.text
+    meal_id = first.json()["id"]
+
+    delete_resp = await client.delete(f"/v1/meals/{meal_id}", headers=auth_headers(user))
+    assert delete_resp.status_code == 204
+
+    second = await client.post("/v1/meals", json=_valid_meal_payload(), headers=headers)
+    assert second.status_code == 409, second.text
+    assert second.json()["code"] == "meals.idempotency_key.conflict_deleted"
+
+
+async def test_post_meal_with_idempotency_key_race_simulated_two_inserts_same_key(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """동시 2 POST 같은 key → 둘 다 같은 ``meal.id`` (1 INSERT, 1 race-loser → replay)."""
+    import asyncio as _asyncio
+
+    user = await user_factory()
+    await consent_factory(user)
+    key = _new_idempotency_key()
+    headers = {**auth_headers(user), "Idempotency-Key": key}
+
+    first, second = await _asyncio.gather(
+        client.post("/v1/meals", json=_valid_meal_payload(), headers=headers),
+        client.post("/v1/meals", json=_valid_meal_payload(), headers=headers),
+    )
+    statuses = sorted([first.status_code, second.status_code])
+    # 두 응답 status는 {201, 200} 또는 {200, 200}(둘 다 1차 SELECT hit) 또는 {201, 201}
+    # (둘 다 race winner — 이론 불가, partial UNIQUE가 차단). 정상 분기는 {201, 200}.
+    assert statuses == [200, 201] or statuses == [200, 200]
+    assert first.json()["id"] == second.json()["id"]
+
+    session_maker: async_sessionmaker[AsyncSession] = app.state.session_maker
+    async with session_maker() as session:
+        result = await session.execute(select(Meal).where(Meal.user_id == user.id))
+        meals = result.scalars().all()
+    assert len(meals) == 1
+
+
+async def test_post_meal_idempotency_key_idempotent_replay_does_not_change_raw_text(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """같은 key + 다른 raw_text 두 번째 POST → 두 응답 모두 첫 raw_text (body diff 무시)."""
+    user = await user_factory()
+    await consent_factory(user)
+    key = _new_idempotency_key()
+    headers = {**auth_headers(user), "Idempotency-Key": key}
+
+    first = await client.post("/v1/meals", json={"raw_text": "원본 식단 A"}, headers=headers)
+    assert first.status_code == 201, first.text
+    first_body = first.json()
+    assert first_body["raw_text"] == "원본 식단 A"
+
+    second = await client.post("/v1/meals", json={"raw_text": "다른 식단 B"}, headers=headers)
+    assert second.status_code == 200, second.text
+    # Stripe/Toss 표준 — 키 == 한 번 시맨틱 (body dedup X). 첫 raw_text 그대로 replay.
+    assert second.json()["raw_text"] == "원본 식단 A"
+
+
+async def test_patch_meal_with_idempotency_key_header_ignored(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """PATCH에 ``Idempotency-Key`` 송신 — 헤더 무시 + 정상 처리 (회귀 0건)."""
+    user = await user_factory()
+    await consent_factory(user)
+    meal = await _create_meal_for(user, raw_text="기존")
+
+    response = await client.patch(
+        f"/v1/meals/{meal.id}",
+        json={"raw_text": "수정"},
+        headers={**auth_headers(user), "Idempotency-Key": _new_idempotency_key()},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["raw_text"] == "수정"

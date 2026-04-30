@@ -10,7 +10,7 @@
  * - 시간순 ASC 정렬은 백엔드 ORDER BY 분기(D2) — 클라이언트 정렬 0.
  */
 import { Stack, router } from 'expo-router';
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 // CR Gemini #1 (HIGH) — query window가 mount 시점 1회 고정되면 (a) 자정 cross 시 stale,
 // (b) 내일 catch-up 식단 누락. 매 렌더 직접 계산 + to_date를 tomorrow까지 확장.
 import {
@@ -27,6 +27,7 @@ import {
 import { useQueryClient } from '@tanstack/react-query';
 
 import { MealCard } from '@/features/meals/MealCard';
+import { OfflineMealCard } from '@/features/meals/OfflineMealCard';
 import {
   MealSubmitError,
   useDeleteMealMutation,
@@ -40,6 +41,13 @@ import {
   todayKst,
 } from '@/features/meals/dateUtils';
 import type { MealResponse } from '@/features/meals/mealSchema';
+import { useAuth, authFetch } from '@/lib/auth';
+import {
+  flushQueue,
+  removeQueueItem,
+  useOfflineQueue,
+  type OfflineQueueItem,
+} from '@/lib/offline-queue';
 import { useOnlineStatus } from '@/lib/use-online-status';
 
 export default function MealsListScreen() {
@@ -74,6 +82,86 @@ export default function MealsListScreen() {
   const { isOnline, isInternetReachable } = useOnlineStatus();
   const isOffline = !isOnline || isInternetReachable === false;
   const today = isToday(selectedDate);
+
+  // Story 2.5 — 오프라인 큐 + 자동 flush.
+  const { user } = useAuth();
+  const userId = user?.id ?? '';
+  const queueItems = useOfflineQueue(userId);
+  const queueSize = queueItems.length;
+  const [isFlushing, setIsFlushing] = useState(false);
+  // `useOnlineStatus` 변경 detect용 prev ref. 첫 렌더(prev=undefined) + current=true 분기는
+  // 의도적 — 앱 cold start 시 잔존 큐가 있으면 자동 sync (D6 정합).
+  const prevOnlineRef = useRef<boolean | undefined>(undefined);
+
+  const triggerFlush = useCallback(async () => {
+    if (!userId || isFlushing) return;
+    setIsFlushing(true);
+    try {
+      const result = await flushQueue(userId, authFetch);
+      if (result.flushed_count > 0) {
+        // 서버 row가 list에 들어가도록 refetch.
+        void queryClient.invalidateQueries({ queryKey: ['meals'] });
+      }
+      if (result.failed_permanent_count > 0) {
+        Alert.alert(
+          '식단을 동기화할 수 없어요',
+          '입력 오류로 일부 식단이 거부되어 폐기되었습니다. 다시 입력해주세요.',
+        );
+      }
+    } catch {
+      // flush 자체 실패는 silent (transient — 다음 트리거에서 재시도).
+    } finally {
+      setIsFlushing(false);
+    }
+  }, [userId, isFlushing, queryClient]);
+
+  useEffect(() => {
+    const prev = prevOnlineRef.current;
+    prevOnlineRef.current = isOnline;
+    // offline → online 전이 또는 첫 렌더(undefined → true) 시 flush 자동 호출.
+    if (isOnline && prev !== true && queueSize > 0) {
+      void triggerFlush();
+    }
+  }, [isOnline, queueSize, triggerFlush]);
+
+  const handleQueueRetry = useCallback(
+    (_clientId: string) => {
+      if (!isOnline) {
+        Alert.alert(
+          '오프라인 상태',
+          '온라인 시 자동으로 동기화됩니다.',
+        );
+        return;
+      }
+      void triggerFlush();
+    },
+    [isOnline, triggerFlush],
+  );
+
+  const handleQueueDiscard = useCallback(
+    (clientId: string) => {
+      Alert.alert(
+        '큐 항목 폐기',
+        '이 식단을 폐기하시겠습니까? 동기화되지 않은 입력은 영구 손실됩니다.',
+        [
+          { text: '취소', style: 'cancel' },
+          {
+            text: '폐기',
+            style: 'destructive',
+            onPress: () => {
+              if (!userId) return;
+              void removeQueueItem(userId, clientId);
+            },
+          },
+        ],
+        { cancelable: true },
+      );
+    },
+    [userId],
+  );
+
+  // 오늘 일자에서만 큐 카드 노출 — 다른 일자는 server row 위주(epic AC line 573 정합).
+  const showQueueCards = today && queueSize > 0;
 
   const handleAddPress = useCallback(() => {
     const target = '/(tabs)/meals/input' as Parameters<typeof router.push>[0];
@@ -264,6 +352,19 @@ export default function MealsListScreen() {
         </View>
       ) : null}
 
+      {/* Story 2.5 — 동기화 대기 배지 (헤더 영역 아래 별 row). 큐 size > 0 시 노출. */}
+      {queueSize > 0 ? (
+        <View
+          style={styles.queueBanner}
+          accessibilityLiveRegion="polite"
+          accessibilityLabel={`동기화 대기 ${queueSize}건`}
+        >
+          <Text style={styles.queueBannerText}>
+            {`동기화 대기 ${queueSize}건${isFlushing ? ' — 동기화 중' : ''}`}
+          </Text>
+        </View>
+      ) : null}
+
       {isPending ? (
         <View style={styles.centered}>
           <ActivityIndicator />
@@ -280,7 +381,7 @@ export default function MealsListScreen() {
             <Text style={styles.retryButtonText}>다시 시도</Text>
           </Pressable>
         </View>
-      ) : filteredMeals.length === 0 ? (
+      ) : filteredMeals.length === 0 && !showQueueCards ? (
         <View style={styles.centered}>
           {today ? (
             <>
@@ -302,15 +403,31 @@ export default function MealsListScreen() {
         </View>
       ) : (
         <FlatList
-          data={filteredMeals}
-          keyExtractor={(item) => item.id}
-          renderItem={({ item }) => (
-            <MealCard
-              meal={item}
-              onCardPress={handleCardPress}
-              onActionPress={handleActionPress}
-            />
-          )}
+          data={[
+            ...(showQueueCards
+              ? queueItems.map((q) => ({ kind: 'queue' as const, item: q }))
+              : []),
+            ...filteredMeals.map((m) => ({ kind: 'server' as const, item: m })),
+          ]}
+          keyExtractor={(entry) =>
+            entry.kind === 'queue' ? `queue:${entry.item.client_id}` : entry.item.id
+          }
+          renderItem={({ item: entry }) =>
+            entry.kind === 'queue' ? (
+              <OfflineMealCard
+                item={entry.item as OfflineQueueItem}
+                onRetry={handleQueueRetry}
+                onDiscard={handleQueueDiscard}
+                isFlushing={isFlushing}
+              />
+            ) : (
+              <MealCard
+                meal={entry.item as MealResponse}
+                onCardPress={handleCardPress}
+                onActionPress={handleActionPress}
+              />
+            )
+          }
           contentContainerStyle={styles.listContent}
           refreshing={isRefetching}
           onRefresh={refetch}
@@ -422,6 +539,21 @@ const styles = StyleSheet.create({
     color: '#664d03',
     fontSize: 13,
     fontWeight: '500',
+    flexShrink: 1,
+    flexWrap: 'wrap',
+    lineHeight: 18,
+  },
+  queueBanner: {
+    backgroundColor: '#fef3c7',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#fde68a',
+  },
+  queueBannerText: {
+    color: '#92400e',
+    fontSize: 13,
+    fontWeight: '600',
     flexShrink: 1,
     flexWrap: 'wrap',
     lineHeight: 18,

@@ -1,5 +1,5 @@
 # generated: 2026-04-27
-# last_updated: 2026-04-30 (Story 2.4 done — CR 11 patches 적용 완료: KST overflow 가드(P22) + gcTime 7d + MealAnalysisSummary score-label 정합 validator + 다음 일자 disable(AC4) + actionButton race 가드 + useOnlineStatus 초기 fetch + [meal_id] 삭제 disabled UI + confidence guard + 7일 윈도우 client filter(D1 옵션 b) + 회귀 테스트 2종. 백엔드 232 passed(coverage 83.54%) + 모바일 tsc/lint clean.)
+# last_updated: 2026-04-30 (Story 2.5 ready-for-dev — 오프라인 텍스트 큐잉 + Idempotency-Key 처리 baseline 컨텍스트 작성. AC 12건 + Tasks 10개 + W46(Story 2.1 deferred) 흡수 명시 + AsyncStorage FIFO 큐(D2) + meals.idempotency_key 컬럼 + partial UNIQUE(D1) + 200 idempotent replay + race-free SELECT-INSERT-CATCH + 사진/PATCH 오프라인 차단 + 100건 hard cap. Story 2.4 done 유지(CR 11 patches + Gemini CR 3 patches 적용 완료).)
 # project: AI_diet
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-27
-last_updated: 2026-04-30  # Story 2.4 done — DS 완료 후 CR 11 patches 적용. KST overflow 가드(P22 — to_date=9999-12-31 차단) + queryClient gcTime 7d(NFR-R4 persist 정합) + MealAnalysisSummary cross-field validator(score-label 정합) + 다음 일자 disable(AC4 "내일까지 허용") + MealCard actionButton race 가드 + useOnlineStatus 초기 NetInfo.fetch sync + [meal_id] 수정/삭제 disabled UI + parsed_items.confidence nullish guard + index.tsx 7일 윈도우 fetch + client filter(D1 옵션 b — queryKey detail과 통일, NFR-R4 일자 무관 보장) + DF42 closed + 회귀 테스트 2종 신규. 백엔드 232 테스트 통과(coverage 83.54%) + 모바일 tsc/lint clean. epic-2 in-progress 유지.
+last_updated: 2026-04-30  # Story 2.5 review — DS 완료. 백엔드(alembic 0009 + Idempotency 흐름 + race-free helper + pytest 244 + 83% coverage) + 모바일(offline-queue.ts FIFO 큐 + 자동 flush + 배지 + OfflineMealCard) + OpenAPI 재생성 + README/deferred-work 갱신. W46 closed (Story 2.1 deferred 흡수). 신규 deferred 11건. epic-2 in-progress 유지(Story 2.1~2.4 done, 2.5 review).
 project: AI_diet
 project_key: NOKEY
 tracking_system: file-system
@@ -58,7 +58,7 @@ development_status:
   2-2-식단-사진-입력-권한-흐름: done
   2-3-ocr-vision-추출-확인-카드: done
   2-4-일별-식단-기록-화면: done
-  2-5-오프라인-텍스트-큐잉-sync: backlog
+  2-5-오프라인-텍스트-큐잉-sync: review
   epic-2-retrospective: optional
 
   # Epic 3: AI 영양 분석 (Self-RAG + 인용 피드백)

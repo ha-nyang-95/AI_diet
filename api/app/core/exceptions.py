@@ -340,3 +340,31 @@ class MealParsedItemsRequiresImageKeyError(MealImageError):
     status: ClassVar[int] = 400
     code: ClassVar[str] = "meals.parsed_items.requires_image_key"
     title: ClassVar[str] = "parsed_items requires image_key"
+
+
+# --- Meal Idempotency 계층 (Story 2.5 — 오프라인 텍스트 큐잉 + Idempotency-Key 처리) ---
+
+
+class MealIdempotencyKeyInvalidError(MealError):
+    """``Idempotency-Key`` 헤더 형식 위반(UUID v4 regex 미일치, length ≠ 36 등).
+
+    헤더는 클라이언트가 ``expo-crypto`` ``randomUUID()``로 생성하므로 실제 위반
+    가능성은 낮으나 *adversarial / schema drift* 방어. application-level regex
+    1차 게이트(Pydantic 우회 — 헤더 의존성). Story 2.5 D2 결정 — `meals.*`
+    카탈로그 일관성 우선 + Story 6.x 결제 webhook idempotency 도입 시점에
+    cross-cutting base 분리 검토(deferred-work DF33)."""
+
+    status: ClassVar[int] = 400
+    code: ClassVar[str] = "meals.idempotency_key.invalid"
+    title: ClassVar[str] = "Idempotency-Key invalid"
+
+
+class MealIdempotencyKeyConflictDeletedError(MealError):
+    """soft-deleted row와 같은 ``idempotency_key`` 재사용 시도 — partial UNIQUE
+    제약은 ``deleted_at`` 무관(전체 row에 unique)이라 INSERT 시도 시 충돌. race-rare
+    분기(사용자가 같은 키로 두 번 송신, 첫 row 삭제 후 재시도) — 사용자에게 *"이미
+    삭제된 식단입니다 — 다시 입력해주세요"* 안내. 새 키로 재시도 유도."""
+
+    status: ClassVar[int] = 409
+    code: ClassVar[str] = "meals.idempotency_key.conflict_deleted"
+    title: ClassVar[str] = "Idempotency key conflicts with deleted meal"

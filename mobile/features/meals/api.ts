@@ -21,6 +21,7 @@
  * Story 2.2 업로드 timeout과 *역할 분리* — 업로드는 사용자 stuck 차단, parse는 백엔드 신뢰).
  */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { randomUUID } from 'expo-crypto';
 
 import { authFetch } from '@/lib/auth';
 
@@ -102,10 +103,26 @@ async function fetchMeals(params: MealsListQuery | undefined): Promise<MealListR
   return (await response.json()) as MealListResponse;
 }
 
-async function createMeal(body: MealCreateRequest): Promise<MealResponse> {
+/**
+ * Story 2.5 — `Idempotency-Key` 자동 첨부 (W46 흡수). UUID v4는 호출 측이 생성하거나
+ * 미지정 시 기본 ``randomUUID()`` 1회 자동 생성. 서버 partial UNIQUE + 200 idempotent
+ * replay로 앱 백그라운드/킬 mid-mutation 중복 POST 차단.
+ *
+ * `opts.idempotencyKey`가 명시되면 헤더 첨부, 미명시 시 자동 생성. 회귀 차단을 위해
+ * 명시적 `null` 송신은 헤더 미첨부 (legacy fallback) — but 본 스토리 baseline에서는
+ * 항상 자동 생성 (`useCreateMealMutation` 정합).
+ */
+async function createMeal(
+  body: MealCreateRequest,
+  opts?: { idempotencyKey?: string | null },
+): Promise<MealResponse> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (opts?.idempotencyKey != null) {
+    headers['Idempotency-Key'] = opts.idempotencyKey;
+  }
   const response = await authFetch('/v1/meals', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify(body),
   });
   if (!response.ok) {
@@ -246,10 +263,18 @@ export function useMealsQuery(params?: MealsListQuery) {
   });
 }
 
+/**
+ * Story 2.5 — `useCreateMealMutation`은 매 mutate 호출 시 ``randomUUID()``로
+ * Idempotency-Key 자동 생성 + 헤더 첨부 (W46 흡수). 호출 측은 변경 X — 단순 `mutate(body)`.
+ * 같은 mutate 재호출은 매번 새 UUID — *키 == 한 번* 시맨틱 (Stripe/Toss 정합).
+ *
+ * 오프라인 큐잉은 hook 외부 책임 — `(tabs)/meals/input.tsx`가 `useOnlineStatus`
+ * `!isOnline` 시 `enqueueMealCreate(...)` 직접 호출. hook은 *온라인 가정*.
+ */
 export function useCreateMealMutation() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: createMeal,
+    mutationFn: (body: MealCreateRequest) => createMeal(body, { idempotencyKey: randomUUID() }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['meals'] });
     },

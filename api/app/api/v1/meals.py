@@ -1,4 +1,4 @@
-"""``/v1/meals`` — 식단 텍스트·사진·OCR 입력 + CRUD (Story 2.1 + 2.2 + 2.3).
+"""``/v1/meals`` — 식단 텍스트·사진·OCR 입력 + CRUD (Story 2.1 + 2.2 + 2.3 + 2.5).
 
 4 endpoint:
 - ``POST /v1/meals``                — 식단 생성 (require_basic_consents)
@@ -16,8 +16,16 @@
   race-free + 소유권 + soft-delete 검증 통합 (Story 1.5 ``users.py:177-194`` 패턴).
 - DB-side ``func.now()`` 단일 시계 — Python ``datetime.now()`` 회피.
 - soft delete만 — 30일 grace + 물리 파기는 Story 5.2 책임.
-- ``Idempotency-Key`` 헤더는 *수신 허용* (CORS 등록), *처리는 Story 2.5*.
 - ``raw_text`` *내용*은 로그에 raw 출력 X — ``raw_text_len``만 forward (NFR-S5).
+
+Story 2.5 추가 (W46 흡수):
+- ``POST /v1/meals``에 ``Idempotency-Key`` 헤더 처리 — UUID v4 형식 검증 + race-free
+  SELECT-INSERT-CATCH-SELECT 패턴 (RFC 9110 200 idempotent replay). 같은 키 재송신
+  시 기존 row 200 응답, 첫 INSERT는 그대로 201.
+- soft-deleted row와 같은 키 재사용 시도는 ``MealIdempotencyKeyConflictDeletedError(409)``
+  분기 — 사용자가 새 키로 재시도하도록 안내.
+- PATCH/DELETE는 헤더 무시 — *POST 흐름만* idempotency 처리. PATCH/DELETE에 헤더
+  송신돼도 분기 X (회귀 0건).
 
 Story 2.2 추가:
 - ``image_key`` (R2 object key) 필드 추가 — `MealCreateRequest`/`MealUpdateRequest`/
@@ -47,20 +55,26 @@ Story 2.3 추가:
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 from datetime import date, datetime, time, timedelta
 from typing import Annotated, Final, Literal
 from zoneinfo import ZoneInfo
 
 import structlog
-from fastapi import APIRouter, Depends, Query, Response, status
+from fastapi import APIRouter, Depends, Header, Query, Response, status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from sqlalchemy import func, insert, select, update
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters import r2 as r2_adapter
 from app.adapters.openai_adapter import ParsedMealItem
 from app.api.deps import DbSession, current_user, require_basic_consents
 from app.core.exceptions import (
+    BalanceNoteError,
+    MealIdempotencyKeyConflictDeletedError,
+    MealIdempotencyKeyInvalidError,
     MealImageNotUploadedError,
     MealImageOwnershipError,
     MealNotFoundError,
@@ -96,6 +110,27 @@ PHOTO_ONLY_RAW_TEXT_PLACEHOLDER = "(사진 입력)"
 # Story 2.3 — POST `parsed_items` 최대 항목 수 (Pydantic Field max_length).
 # AbuseGuard: 영업 데모 한정 합리적 상한 + Story 8 tunable.
 _PARSED_ITEMS_MAX_LENGTH: Final[int] = 20
+
+# Story 2.5 — `Idempotency-Key` 헤더는 UUID v4 형식 강제. Python `uuid.UUID(version=4)`
+# 회피(version arg가 무시되는 케이스 존재) — application-level regex 명시 (Story 2.2
+# `_IMAGE_KEY_PATTERN` 패턴 정합). 길이 36자 hard cap 동시 강제 (over-length DoS 차단).
+_IDEMPOTENCY_KEY_PATTERN: Final[str] = (
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+)
+_IDEMPOTENCY_KEY_REGEX: Final[re.Pattern[str]] = re.compile(_IDEMPOTENCY_KEY_PATTERN)
+_IDEMPOTENCY_KEY_LENGTH: Final[int] = 36
+
+
+def _validate_idempotency_key(key: str | None) -> None:
+    """``Idempotency-Key`` 헤더 형식 검증 (Story 2.5).
+
+    None은 통과(헤더 미송신 케이스 — 기존 baseline 정합). 형식 위반은 즉시
+    ``MealIdempotencyKeyInvalidError(400)`` raise. UUID v4 regex + 길이 36 강제.
+    """
+    if key is None:
+        return
+    if len(key) != _IDEMPOTENCY_KEY_LENGTH or not _IDEMPOTENCY_KEY_REGEX.match(key):
+        raise MealIdempotencyKeyInvalidError("Idempotency-Key must be a valid UUID v4 (RFC 4122)")
 
 
 def _format_parsed_items_to_raw_text(items: list[ParsedMealItem]) -> str:
@@ -429,11 +464,93 @@ async def _verify_image_uploaded(image_key: str) -> None:
 # --- Endpoints -------------------------------------------------------------
 
 
-@router.post("", status_code=status.HTTP_201_CREATED)
+async def _create_meal_idempotent_or_replay(
+    db: AsyncSession,
+    values: dict[str, object],
+    idempotency_key: str | None,
+) -> tuple[Meal, bool]:
+    """Race-free SELECT-then-INSERT-then-CATCH-then-SELECT 패턴 (Story 2.5).
+
+    Returns ``(meal, was_replay)`` — ``was_replay=True`` 시 라우터가 200 OK로 응답
+    분기 (RFC 9110 idempotent retry).
+
+    흐름:
+    1. ``idempotency_key`` None → 기존 단순 INSERT … RETURNING (회귀 0건).
+    2. 헤더 송신 → ``select(...).where(user_id, idempotency_key, deleted_at IS NULL)``
+       1차 조회 → 있으면 (existing, True) 반환.
+    3. 1차 조회 미존재 → ``insert(...).returning(Meal)`` 시도. ``IntegrityError``
+       catch 시 ``await db.rollback()`` 후 *전체 row*(deleted_at 포함) 재 SELECT —
+       soft-deleted hit이면 ``MealIdempotencyKeyConflictDeletedError(409)`` raise,
+       active hit이면 (existing, True) 반환, 둘 다 0건이면 5xx fallback.
+
+    rollback 후 재 SELECT는 ``db.execute``로 신규 transaction 시작 — SQLAlchemy
+    AsyncSession은 rollback 후 implicit begin 지원.
+    """
+    if idempotency_key is None:
+        result = await db.execute(insert(Meal).values(**values).returning(Meal))
+        return result.scalar_one(), False
+
+    user_id = values["user_id"]
+    # 1차 조회 — active row만(soft-deleted 제외).
+    existing = (
+        await db.execute(
+            select(Meal).where(
+                Meal.user_id == user_id,
+                Meal.idempotency_key == idempotency_key,
+                Meal.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        return existing, True
+
+    # 2차 시도 — INSERT + RETURNING. UNIQUE 제약 위반(race) 시 catch + 재 SELECT.
+    insert_values = {**values, "idempotency_key": idempotency_key}
+    try:
+        result = await db.execute(insert(Meal).values(**insert_values).returning(Meal))
+        return result.scalar_one(), False
+    except IntegrityError:
+        await db.rollback()
+        # 재 SELECT — deleted_at 무관 (soft-deleted row 충돌 분기 위해 필터 X).
+        replay = (
+            await db.execute(
+                select(Meal).where(
+                    Meal.user_id == user_id,
+                    Meal.idempotency_key == idempotency_key,
+                )
+            )
+        ).scalar_one_or_none()
+        if replay is None:
+            # race lost + 재 SELECT 0건 — 비정상 상태(예: 다른 transaction 미커밋).
+            # 5xx fallback (BalanceNoteError default 500).
+            raise BalanceNoteError(
+                "idempotent replay race resolution failed (no row found after IntegrityError)"
+            ) from None
+        if replay.deleted_at is not None:
+            raise MealIdempotencyKeyConflictDeletedError(
+                "Idempotency-Key collides with a soft-deleted meal — please use a new key"
+            ) from None
+        return replay, True
+
+
+@router.post(
+    "",
+    status_code=status.HTTP_201_CREATED,
+    responses={
+        200: {
+            "description": "Idempotent replay (Story 2.5 — same Idempotency-Key)",
+            "model": MealResponse,
+        },
+        400: {"description": "Validation failed (raw_text / image_key / Idempotency-Key)"},
+        409: {"description": "Idempotency-Key collides with soft-deleted meal"},
+    },
+)
 async def create_meal(
     body: MealCreateRequest,
     db: DbSession,
     user: Annotated[User, Depends(require_basic_consents)],
+    response: Response,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> MealResponse:
     """식단 생성 — INSERT + RETURNING으로 race-free 응답.
 
@@ -442,7 +559,15 @@ async def create_meal(
 
     Story 2.2: ``image_key`` ownership 검증 + 사진-only 입력 시 ``raw_text`` placeholder
     fallback (`PHOTO_ONLY_RAW_TEXT_PLACEHOLDER`). Story 2.3 OCR이 결과로 덮어씀.
+
+    Story 2.5 (W46 흡수): ``Idempotency-Key`` 헤더 송신 시 같은 키 재송신은
+    ``200 OK`` 응답 (RFC 9110 idempotent retry — resource는 이미 존재). 첫 INSERT는
+    그대로 ``201 Created``. ``Idempotency-Key``는 *키 == 한 번* 시맨틱 — 같은 키 +
+    다른 ``raw_text``는 첫 응답을 그대로 replay (body diff 무시 — Stripe/Toss 표준 정합).
     """
+    # Story 2.5 — Idempotency-Key 형식 검증 (UUID v4 + 길이 36).
+    _validate_idempotency_key(idempotency_key)
+
     # Story 2.2 — image_key ownership 검증 (Pydantic 통과 후 router-inline) +
     # P21 R2 head_object HEAD-check (D1 결정 — orphan/미PUT 키 attach 차단).
     if body.image_key is not None:
@@ -472,21 +597,32 @@ async def create_meal(
     if body.parsed_items is not None:
         values["parsed_items"] = [item.model_dump() for item in body.parsed_items]
 
-    result = await db.execute(insert(Meal).values(**values).returning(Meal))
-    created = result.scalar_one()
-    response = _meal_to_response(created)
+    # Story 2.5 — race-free SELECT-then-INSERT-then-CATCH-then-SELECT (W46 흡수).
+    meal, was_replay = await _create_meal_idempotent_or_replay(db, values, idempotency_key)
+    response_body = _meal_to_response(meal)
     await db.commit()
-    logger.info(
-        "meals.created",
-        user_id=str(user.id),
-        meal_id=str(created.id),
-        raw_text_len=len(effective_raw_text),
-        ate_at_iso=created.ate_at.isoformat(),
-        has_image=body.image_key is not None,
-        has_parsed_items=body.parsed_items is not None,
-        parsed_items_count=len(body.parsed_items) if body.parsed_items else 0,
-    )
-    return response
+
+    if was_replay:
+        # RFC 9110 — idempotent retry returns 200 (resource already exists).
+        response.status_code = status.HTTP_200_OK
+        logger.info(
+            "meals.create.idempotent_replay",
+            user_id=str(user.id),
+            meal_id=str(meal.id),
+        )
+    else:
+        logger.info(
+            "meals.created",
+            user_id=str(user.id),
+            meal_id=str(meal.id),
+            raw_text_len=len(effective_raw_text),
+            ate_at_iso=meal.ate_at.isoformat(),
+            has_image=body.image_key is not None,
+            has_parsed_items=body.parsed_items is not None,
+            parsed_items_count=len(body.parsed_items) if body.parsed_items else 0,
+            has_idempotency_key=idempotency_key is not None,
+        )
+    return response_body
 
 
 @router.get("")

@@ -288,6 +288,21 @@ Story 1.2부터 Google 로그인을 사용하려면 Google Cloud Console에서 O
 - Epic 2 네 번째 스토리(2.4) 완료. 후속: 2.5(오프라인 텍스트 큐잉 — *쓰기 캐시*) / Story 3.x가
   `analysis_summary` 슬롯 wire / Story 3.7가 `[meal_id].tsx` SSE 통합.
 
+### 오프라인 텍스트 큐잉 + 자동 sync SOP (Story 2.5)
+
+- `mobile/lib/offline-queue.ts` AsyncStorage FIFO 큐(`bn:offline-queue:meal:<user_id>` per-user
+  namespace) + 100건 hard cap + module-level mutex(single-flight) + `useOfflineQueue` hook.
+- 백엔드 `POST /v1/meals` `Idempotency-Key` 헤더 처리 — `meals.idempotency_key` TEXT NULL 컬럼 +
+  `(user_id, idempotency_key) WHERE idempotency_key IS NOT NULL` partial UNIQUE index + race-free
+  SELECT-INSERT-CATCH-SELECT + 200 idempotent replay (RFC 9110, W46 흡수).
+- 자동 flush — `useOnlineStatus` offline → online 전이 시 `flushQueue` 자동 호출 + 지수 backoff
+  1s/2s/4s + jitter ±20% 3회 후 큐 잔존(manual retry).
+- 사진 입력 + PATCH/DELETE 오프라인 차단 (epic AC) — 사진은 R2/Vision 모두 *온라인 필수*, PATCH는
+  *진입 차단*만(Story 8 polish 시점에 PATCH 큐잉 검토 — DF27).
+- 큐 size 100 hard cap — 초과 시 Alert *"오프라인 대기 항목이 너무 많아요(100+)"*. 4xx validation
+  은 영구 실패(큐 즉시 제거 + Alert 안내), 5xx/네트워크는 transient(잔존 + backoff).
+- Epic 2 다섯 스토리(2.1~2.5) 모두 done — Epic 3 AI 영양 분석(Self-RAG + 인용 피드백) 진입 준비 완료.
+
 ### 8시간 체크리스트
 
 - [ ] (1h) `docker compose up` 4개 컨테이너 healthy 확인
