@@ -1,5 +1,5 @@
 # generated: 2026-04-27
-# last_updated: 2026-04-30 (Story 2.4 done — CR 11 patches 적용 완료: KST overflow 가드(P22) + gcTime 7d + MealAnalysisSummary score-label 정합 validator + 다음 일자 disable(AC4) + actionButton race 가드 + useOnlineStatus 초기 fetch + [meal_id] 삭제 disabled UI + confidence guard + 7일 윈도우 client filter(D1 옵션 b) + 회귀 테스트 2종. 백엔드 232 passed(coverage 83.54%) + 모바일 tsc/lint clean.)
+# last_updated: 2026-04-30 (Story 2.5 done — CR 16 patches 적용 + 3 decision-needed 해결 완료. 백엔드 pytest 244 + ruff/format/mypy clean + 모바일 tsc/lint clean. P1 per-userId mutex + P2 R-M-W 직렬화 + P3 IntegrityError 인덱스명 한정 + P4 race [200,201] 단일 + P5 PATCH offline ref guard + P6 401abort/429transient/400-422 영구 + P7 ate_at +09:00 KST + P8 3회 send cap + P9 UUID v4 검증 + P10 빈 userId 가드 + P11 4xx Alert raw_text 발췌 + P12 Idempotency-Key trim + P13 last_error 마스킹 + P14 item shape 검증 + P15 stuck_count + P16 resetAttempts(DF46 closed). DN1 ActionSheet 카드 액션 단일 노출 + DN3 summary 유지(스펙 정정). DF54-DF69 신규 15건 등재. epic-2 in-progress 유지(Story 2.1~2.5 done).)
 # project: AI_diet
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-27
-last_updated: 2026-04-30  # Story 2.4 done — DS 완료 후 CR 11 patches 적용. KST overflow 가드(P22 — to_date=9999-12-31 차단) + queryClient gcTime 7d(NFR-R4 persist 정합) + MealAnalysisSummary cross-field validator(score-label 정합) + 다음 일자 disable(AC4 "내일까지 허용") + MealCard actionButton race 가드 + useOnlineStatus 초기 NetInfo.fetch sync + [meal_id] 수정/삭제 disabled UI + parsed_items.confidence nullish guard + index.tsx 7일 윈도우 fetch + client filter(D1 옵션 b — queryKey detail과 통일, NFR-R4 일자 무관 보장) + DF42 closed + 회귀 테스트 2종 신규. 백엔드 232 테스트 통과(coverage 83.54%) + 모바일 tsc/lint clean. epic-2 in-progress 유지.
+last_updated: 2026-04-30  # Story 2.5 done — CR 16 patches + 3 decisions resolved. 백엔드 pytest 244 통과(83% cov) + 모바일 tsc/lint clean. P1 per-userId mutex + P8 3회 send cap + P16 resetAttempts(DF46 closed) 등 16 patches. DF54-DF69 신규 15 deferred. epic-2 in-progress 유지(Story 2.1~2.5 done, epic-3 진입 준비).
 project: AI_diet
 project_key: NOKEY
 tracking_system: file-system
@@ -58,7 +58,7 @@ development_status:
   2-2-식단-사진-입력-권한-흐름: done
   2-3-ocr-vision-추출-확인-카드: done
   2-4-일별-식단-기록-화면: done
-  2-5-오프라인-텍스트-큐잉-sync: backlog
+  2-5-오프라인-텍스트-큐잉-sync: done
   epic-2-retrospective: optional
 
   # Epic 3: AI 영양 분석 (Self-RAG + 인용 피드백)

@@ -67,3 +67,38 @@ export function isToday(date: string): boolean {
 export function isoToKstDate(isoString: string): string {
   return _enCAFormatter.format(new Date(isoString));
 }
+
+const _enUSDateTimeFormatter = new Intl.DateTimeFormat('en-US', {
+  timeZone: KST_TIME_ZONE,
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  hourCycle: 'h23',
+});
+
+/**
+ * Story 2.5 D3 + CR P7 — *현재 KST 시각*을 ISO 8601 + `+09:00` offset 형식으로 반환.
+ *
+ * `Date.prototype.toISOString()`은 항상 `Z`(UTC) suffix — Story 2.5 큐잉 wire 계약은
+ * `+09:00` TZ-aware 명시이므로 별도 포맷 필요. ICU `Intl.DateTimeFormat`로 KST 분해 후
+ * `YYYY-MM-DDTHH:mm:ss+09:00`로 재조립.
+ *
+ * 다국가 TZ 지원은 Growth NFR-L4 — 본 헬퍼는 단일 KST 강제(서비스 1차 시장).
+ */
+export function nowKstIso(): string {
+  const parts = _enUSDateTimeFormatter.formatToParts(new Date());
+  const get = (type: Intl.DateTimeFormatPartTypes): string =>
+    parts.find((p) => p.type === type)?.value ?? '00';
+  const year = get('year');
+  const month = get('month');
+  const day = get('day');
+  // Hermes ICU 일부 빌드가 자정에 `'24:00'`을 반환하는 회귀 사례 — `'24'` → `'00'` 정규화.
+  const rawHour = get('hour');
+  const hour = rawHour === '24' ? '00' : rawHour;
+  const minute = get('minute');
+  const second = get('second');
+  return `${year}-${month}-${day}T${hour}:${minute}:${second}+09:00`;
+}

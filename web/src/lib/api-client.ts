@@ -253,6 +253,11 @@ export interface paths {
          *
          *     Story 2.2: ``image_key`` ownership 검증 + 사진-only 입력 시 ``raw_text`` placeholder
          *     fallback (`PHOTO_ONLY_RAW_TEXT_PLACEHOLDER`). Story 2.3 OCR이 결과로 덮어씀.
+         *
+         *     Story 2.5 (W46 흡수): ``Idempotency-Key`` 헤더 송신 시 같은 키 재송신은
+         *     ``200 OK`` 응답 (RFC 9110 idempotent retry — resource는 이미 존재). 첫 INSERT는
+         *     그대로 ``201 Created``. ``Idempotency-Key``는 *키 == 한 번* 시맨틱 — 같은 키 +
+         *     다른 ``raw_text``는 첫 응답을 그대로 replay (body diff 무시 — Stripe/Toss 표준 정합).
          */
         post: operations["create_meal_v1_meals_post"];
         delete?: never;
@@ -1378,6 +1383,7 @@ export interface operations {
         parameters: {
             query?: never;
             header?: {
+                "Idempotency-Key"?: string | null;
                 Authorization?: string | null;
             };
             path?: never;
@@ -1391,6 +1397,15 @@ export interface operations {
             };
         };
         responses: {
+            /** @description Idempotent replay (Story 2.5 — same Idempotency-Key) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MealResponse"];
+                };
+            };
             /** @description Successful Response */
             201: {
                 headers: {
@@ -1399,6 +1414,20 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["MealResponse"];
                 };
+            };
+            /** @description Validation failed (raw_text / image_key / Idempotency-Key) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Idempotency-Key collides with soft-deleted meal */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {

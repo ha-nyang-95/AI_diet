@@ -35,6 +35,7 @@
  * - `onSubmit` body: `parsed_items = parsedItems` (POST/PATCH 둘 다, ocrConfirmed=true 시).
  */
 import { Stack, router, useLocalSearchParams } from 'expo-router';
+import { randomUUID } from 'expo-crypto';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, StyleSheet, View } from 'react-native';
 import { useQueryClient, type QueryClient } from '@tanstack/react-query';
@@ -60,8 +61,16 @@ import type {
   MealUpdateRequest,
   ParsedMealItem,
 } from '@/features/meals/mealSchema';
+import { nowKstIso } from '@/features/meals/dateUtils';
 import { formatParsedItemsToRawText } from '@/features/meals/parsedItemsFormat';
+import { useAuth } from '@/lib/auth';
+import {
+  enqueueMealCreate,
+  OfflineQueueFullError,
+  OFFLINE_QUEUE_MAX_SIZE,
+} from '@/lib/offline-queue';
 import { useCameraPermission, useMediaLibraryPermission } from '@/lib/permissions';
+import { useOnlineStatus } from '@/lib/use-online-status';
 
 function findMealInCache(
   queryClient: QueryClient,
@@ -121,6 +130,9 @@ export default function MealInputScreen() {
   const { meal_id } = useLocalSearchParams<{ meal_id?: string }>();
   const queryClient = useQueryClient();
   const [serverError, setServerError] = useState<string | null>(null);
+  // Story 2.5 — 오프라인 분기 + 큐잉 + 사진/PATCH 차단을 위한 상태.
+  const { isOnline } = useOnlineStatus();
+  const { user } = useAuth();
 
   const editingMeal = useMemo(
     () => (meal_id ? findMealInCache(queryClient, meal_id) : null),
@@ -128,6 +140,33 @@ export default function MealInputScreen() {
   );
   const isPatchMode = Boolean(meal_id);
   const isPatchCacheMiss = isPatchMode && !editingMeal;
+
+  // Story 2.5 — PATCH 모드 진입 시 오프라인이면 즉시 차단(편집 자체는 *온라인 필수*).
+  // 본 스토리 baseline은 *진입 차단*만 — PATCH 큐잉은 Story 8 polish (DF43).
+  // CR P5 — ref guard로 *진입당 1회*만 fire (이전 구현은 매 render 시 Alert 스택 + back 과다 pop).
+  const patchOfflineGuardFiredRef = useRef(false);
+  useEffect(() => {
+    if (!isPatchMode || isPatchCacheMiss) return;
+    if (isOnline) {
+      // 온라인 복귀 시 다시 가드 reset(같은 화면에서 토글 케이스).
+      patchOfflineGuardFiredRef.current = false;
+      return;
+    }
+    if (patchOfflineGuardFiredRef.current) return;
+    patchOfflineGuardFiredRef.current = true;
+    Alert.alert(
+      '오프라인 상태',
+      '오프라인에서는 식단 수정/삭제가 불가합니다. 온라인 시 다시 시도해주세요.',
+      [
+        {
+          text: '확인',
+          onPress: () => {
+            router.back();
+          },
+        },
+      ],
+    );
+  }, [isPatchMode, isPatchCacheMiss, isOnline]);
 
   // Story 2.2 — 사진 첨부 state.
   const [imageKey, setImageKey] = useState<string | null>(editingMeal?.image_key ?? null);
@@ -228,6 +267,16 @@ export default function MealInputScreen() {
   };
 
   const handlePickImage = async (kind: ImagePickKind) => {
+    // Story 2.5 — 사진 입력 오프라인 차단 (epic AC line 576). 권한 prompt 진입 차단으로
+    // UX 명료성 (사용자가 권한 거부 흐름과 오프라인 흐름 혼동 회피).
+    if (!isOnline) {
+      Alert.alert(
+        '오프라인 상태',
+        '사진은 온라인에서 처리 가능 — 텍스트로 입력하거나 온라인 시 다시 시도해주세요.',
+        [{ text: '확인' }],
+      );
+      return;
+    }
     setDeniedState(null);
     const permissionState = kind === 'camera' ? cameraPermission : mediaLibraryPermission;
     const permKind: PermissionKind = kind === 'camera' ? 'camera' : 'mediaLibrary';
@@ -426,6 +475,59 @@ export default function MealInputScreen() {
         '입력이 필요해요',
         '식단 내용을 입력하거나 사진을 첨부해주세요.',
       );
+      return;
+    }
+
+    // Story 2.5 — POST 모드 + 오프라인 분기. PATCH 모드는 진입 시 차단(useEffect)되므로 분기 X.
+    if (!isPatchMode && !isOnline) {
+      // 사진 첨부된 상태에서 오프라인 저장 시도는 차단 (사진 큐잉 OUT — epic AC line 576).
+      if (hasImage || (ocrConfirmed && parsedItems)) {
+        Alert.alert(
+          '오프라인 상태',
+          '오프라인에서는 사진 입력을 저장할 수 없어요. 텍스트만 입력하거나 온라인 시 다시 시도해주세요.',
+        );
+        return;
+      }
+      if (!user) {
+        // 정상 흐름에서는 도달 불가(인증 가드 통과 가정) — 방어 로깅 + 안내.
+        Alert.alert('오류', '사용자 정보를 불러오지 못했어요. 다시 로그인해주세요.');
+        return;
+      }
+      // 텍스트-only → 큐잉. ate_at은 큐잉 시점 KST(현재 시각) 자동 채움 — 사용자가 큐잉한
+      // 시점이 식단 시점이라는 직관 정합 (서버 fallback은 *flush 시점*이라 의미 differs).
+      void (async () => {
+        try {
+          await enqueueMealCreate(user.id, {
+            client_id: randomUUID(),
+            raw_text: trimmedRawText,
+            // CR P7 — D3 정합: KST `+09:00` offset 명시 (`toISOString()` 사용 시 `Z` UTC).
+            ate_at: nowKstIso(),
+            parsed_items: null,
+          });
+          Alert.alert(
+            '오프라인 — 동기화 대기',
+            '온라인 복귀 시 자동으로 동기화됩니다.',
+            [
+              {
+                text: '확인',
+                onPress: () => {
+                  const target = '/(tabs)/meals' as Parameters<typeof router.replace>[0];
+                  router.replace(target);
+                },
+              },
+            ],
+          );
+        } catch (err) {
+          if (err instanceof OfflineQueueFullError) {
+            Alert.alert(
+              '오프라인 대기 항목이 너무 많아요',
+              `대기 항목이 ${OFFLINE_QUEUE_MAX_SIZE}건을 초과했습니다. 온라인 복귀 후 동기화한 뒤 다시 시도해주세요.`,
+            );
+          } else {
+            Alert.alert('오프라인 큐잉 실패', '잠시 후 다시 시도해주세요.');
+          }
+        }
+      })();
       return;
     }
 
