@@ -1,4 +1,4 @@
-"""``/v1/meals`` — 식단 텍스트·사진 입력 + CRUD (Story 2.1 + Story 2.2).
+"""``/v1/meals`` — 식단 텍스트·사진·OCR 입력 + CRUD (Story 2.1 + 2.2 + 2.3).
 
 4 endpoint:
 - ``POST /v1/meals``                — 식단 생성 (require_basic_consents)
@@ -30,6 +30,18 @@ Story 2.2 추가:
 - `MealResponse.image_url` derive — `r2_public_base_url` 기반 public CDN URL.
 - PATCH는 `image_key=null` 명시 송신 시 *클리어*, 키 부재 시 *no-op*
   (Pydantic v2 `model_fields_set`로 absent vs explicit null 구분).
+
+Story 2.3 추가:
+- ``parsed_items`` (Vision OCR 결과 jsonb) 필드 추가 — `MealCreateRequest`/
+  `MealUpdateRequest`/`MealResponse` 모두 nullable. `ParsedMealItem` Pydantic
+  모델 재사용(`app.adapters.openai_adapter`). max_length 20.
+- ``parsed_items 단독 + image_key 부재 거부`` — *parsed_items는 image_key의 부속*
+  (Vision 호출 결과 영속화), image_key 없이 의미 없음.
+- ``_format_parsed_items_to_raw_text`` 서버 fallback — POST `raw_text=None and
+  parsed_items is not None` 시 적용. *클라이언트 표준 변환*과 동일 — DF2(`(사진
+  입력)` placeholder collision) 자연 해소.
+- PATCH는 `parsed_items=null` 명시 송신 시 *클리어*, 키 부재 시 *no-op*
+  (image_key 시맨틱 정합).
 """
 
 from __future__ import annotations
@@ -41,15 +53,17 @@ from typing import Annotated, Final
 
 import structlog
 from fastapi import APIRouter, Depends, Query, Response, status
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from sqlalchemy import func, insert, select, update
 
 from app.adapters import r2 as r2_adapter
+from app.adapters.openai_adapter import ParsedMealItem
 from app.api.deps import DbSession, current_user, require_basic_consents
 from app.core.exceptions import (
     MealImageNotUploadedError,
     MealImageOwnershipError,
     MealNotFoundError,
+    MealParsedItemsRequiresImageKeyError,
     MealQueryValidationError,
 )
 from app.db.models.meal import Meal
@@ -66,9 +80,32 @@ _IMAGE_KEY_PATTERN: Final[str] = (
 # UUID(36) + UUID(36) + ext(≤4) + slashes(7) + "meals"(5) ≈ 90. 128로 충분 + 여유.
 _IMAGE_KEY_MAX_LENGTH: Final[int] = 128
 
-# 사진-only 입력 시 ``raw_text`` 자동 fallback. Story 2.3 OCR이 추출 결과로 덮어씀.
+# 사진-only 입력 (parse 미호출) 시 ``raw_text`` 자동 fallback. Story 2.3에서 parse
+# 흐름 통과 시 ``_format_parsed_items_to_raw_text``가 우선 적용되어 placeholder 진입
+# 차단(DF2 자연 해소). 본 placeholder는 *parsed_items 없는 사진-only 입력 only*.
 # i18n은 OUT (NFR-L2 한국어 1차).
 PHOTO_ONLY_RAW_TEXT_PLACEHOLDER = "(사진 입력)"
+
+# Story 2.3 — POST `parsed_items` 최대 항목 수 (Pydantic Field max_length).
+# AbuseGuard: 영업 데모 한정 합리적 상한 + Story 8 tunable.
+_PARSED_ITEMS_MAX_LENGTH: Final[int] = 20
+
+
+def _format_parsed_items_to_raw_text(items: list[ParsedMealItem]) -> str:
+    """``parsed_items`` → 한국어 한 줄 raw_text 변환 (서버 fallback).
+
+    예: ``[{"name":"짜장면","quantity":"1인분"}, {"name":"군만두","quantity":"4개"}]``
+    → ``"짜장면 1인분, 군만두 4개"``.
+
+    빈 quantity는 양 표시 생략 (``"바나나"`` 처럼). 빈 items는 빈 문자열 — POST
+    라우터에서 None 분기로 처리 (호출 측 invariant).
+
+    클라이언트 ``formatParsedItemsToRawText``(mobile/features/meals/parsedItemsFormat.ts)와
+    *동일 변환* — 클라이언트가 raw_text를 안 보낸 케이스에서도 일관 동작 보장.
+    """
+    parts = [(f"{item.name} {item.quantity}".rstrip()) for item in items]
+    return ", ".join(parts)
+
 
 logger = structlog.get_logger(__name__)
 
@@ -112,6 +149,10 @@ class MealCreateRequest(BaseModel):
         max_length=_IMAGE_KEY_MAX_LENGTH,
         pattern=_IMAGE_KEY_PATTERN,
     )
+    parsed_items: list[ParsedMealItem] | None = Field(
+        default=None,
+        max_length=_PARSED_ITEMS_MAX_LENGTH,
+    )
 
     @field_validator("raw_text")
     @classmethod
@@ -131,9 +172,15 @@ class MealCreateRequest(BaseModel):
 
     @model_validator(mode="after")
     def _at_least_one_input(self) -> MealCreateRequest:
-        """`raw_text`/`image_key` 둘 다 None 거부 — 빈 식단 row 차단 (Story 2.2)."""
+        """`raw_text`/`image_key` 둘 다 None 거부 — 빈 식단 row 차단 (Story 2.2).
+
+        Story 2.3 — `parsed_items` 단독 + image_key 부재 거부. parsed_items는
+        Vision 호출 결과 영속화이므로 image_key 없이 의미 없음.
+        """
         if self.raw_text is None and self.image_key is None:
             raise ValueError("at least one of raw_text, image_key required")
+        if self.parsed_items is not None and self.image_key is None:
+            raise ValueError("parsed_items requires image_key")
         return self
 
 
@@ -158,6 +205,10 @@ class MealUpdateRequest(BaseModel):
         max_length=_IMAGE_KEY_MAX_LENGTH,
         pattern=_IMAGE_KEY_PATTERN,
     )
+    parsed_items: list[ParsedMealItem] | None = Field(
+        default=None,
+        max_length=_PARSED_ITEMS_MAX_LENGTH,
+    )
 
     @field_validator("raw_text")
     @classmethod
@@ -181,26 +232,31 @@ class MealUpdateRequest(BaseModel):
         # - `raw_text`/`ate_at`는 `null` 송신이 *no-op*(D4 정합) — 라우터가 무시해
         #   `update().values()` dict가 빈 채로 SQLAlchemy에 도달하는 footgun 차단.
         # Gemini Code Assist PR #12 medium 코멘트(discussion 3161733852) 수용.
+        # Story 2.3 갱신: `parsed_items`는 `null` 송신이 *clear* 의미 (image_key
+        # 시맨틱 정합) — 송신 여부만 확인.
         sent = self.model_fields_set
         has_effective_change = (
             "image_key" in sent
+            or "parsed_items" in sent
             or ("raw_text" in sent and self.raw_text is not None)
             or ("ate_at" in sent and self.ate_at is not None)
         )
         if not has_effective_change:
             raise ValueError(
                 "at least one effective field required "
-                "(raw_text/ate_at must be non-null, or image_key must be provided)"
+                "(raw_text/ate_at must be non-null, "
+                "or image_key/parsed_items must be provided)"
             )
         return self
 
 
 class MealResponse(BaseModel):
-    """식단 단건 응답 — 9 필드 (Story 2.1 7 + Story 2.2 image_key + image_url).
+    """식단 단건 응답 — 10 필드 (Story 2.1 7 + 2.2 image_key/image_url + 2.3 parsed_items).
 
-    ``deleted_at`` / ``image_key`` / ``image_url`` NULL 시에도 키 유지 (스키마 안정성).
-    ``image_url``은 derived — `image_key` 있으면 `_resolve_public_url(image_key)`,
-    없으면 None (`_meal_to_response` helper에서 계산).
+    ``deleted_at`` / ``image_key`` / ``image_url`` / ``parsed_items`` NULL 시에도
+    키 유지 (스키마 안정성). ``image_url``은 derived — `image_key` 있으면
+    `_resolve_public_url(image_key)`, 없으면 None (`_meal_to_response` helper에서
+    계산).
     """
 
     id: uuid.UUID
@@ -212,6 +268,7 @@ class MealResponse(BaseModel):
     deleted_at: datetime | None
     image_key: str | None
     image_url: str | None
+    parsed_items: list[ParsedMealItem] | None
 
 
 class MealListResponse(BaseModel):
@@ -227,8 +284,27 @@ def _meal_to_response(meal: Meal) -> MealResponse:
     Story 2.2: ``image_url``은 ``image_key``에서 derive (public CDN URL).
     P3 — ``r2_adapter.resolve_public_url``은 R2 미설정 시 ``None`` 반환(broken
     `https:///<key>` URL 차단). 호출 측은 None을 그대로 응답 ``image_url``로 forward.
+
+    Story 2.3: ``parsed_items``는 jsonb → ``list[ParsedMealItem]`` 자동 역직렬화
+    (Pydantic ``model_validate``). NULL은 ``None`` 그대로 forward. CR P2 fix
+    (2026-04-30): per-item validate를 try/except로 격리 — 단일 손상 row가 GET 전체
+    500 만들지 않도록 corrupt 항목 drop + warn 로그.
     """
     image_url = r2_adapter.resolve_public_url(meal.image_key) if meal.image_key else None
+    parsed_items: list[ParsedMealItem] | None
+    if meal.parsed_items is None:
+        parsed_items = None
+    else:
+        parsed_items = []
+        for raw_item in meal.parsed_items:
+            try:
+                parsed_items.append(ParsedMealItem.model_validate(raw_item))
+            except ValidationError as exc:
+                logger.warning(
+                    "meals.parsed_items.malformed",
+                    meal_id=str(meal.id),
+                    error=str(exc),
+                )
     return MealResponse(
         id=meal.id,
         user_id=meal.user_id,
@@ -239,6 +315,7 @@ def _meal_to_response(meal: Meal) -> MealResponse:
         deleted_at=meal.deleted_at,
         image_key=meal.image_key,
         image_url=image_url,
+        parsed_items=parsed_items,
     )
 
 
@@ -293,9 +370,13 @@ async def create_meal(
         _validate_image_key_ownership(body.image_key, user.id)
         await _verify_image_uploaded(body.image_key)
 
-    # 사진-only 입력 시 raw_text placeholder fallback. body.raw_text가 None이거나
-    # (실제 trim된) 빈 문자열일 가능성을 Pydantic이 차단하므로 None 체크만으로 충분.
+    # 우선순위: (1) 사용자가 raw_text 명시 → 그대로(편집 우선),
+    # (2) raw_text 미송신 + parsed_items 송신 → 서버 fallback 변환 (DF2 자연 해소),
+    # (3) raw_text 미송신 + parsed_items 미송신 + image_key 송신 → placeholder.
+    # Pydantic이 raw_text 빈 문자열 / whitespace-only 차단하므로 None 체크만으로 충분.
     effective_raw_text = body.raw_text
+    if effective_raw_text is None and body.parsed_items:
+        effective_raw_text = _format_parsed_items_to_raw_text(body.parsed_items)
     if effective_raw_text is None:
         effective_raw_text = PHOTO_ONLY_RAW_TEXT_PLACEHOLDER
 
@@ -308,6 +389,9 @@ async def create_meal(
         values["ate_at"] = body.ate_at
     if body.image_key is not None:
         values["image_key"] = body.image_key
+    # Story 2.3 — parsed_items가 None이 아니면 jsonb로 dump (Pydantic → list[dict]).
+    if body.parsed_items is not None:
+        values["parsed_items"] = [item.model_dump() for item in body.parsed_items]
 
     result = await db.execute(insert(Meal).values(**values).returning(Meal))
     created = result.scalar_one()
@@ -320,6 +404,8 @@ async def create_meal(
         raw_text_len=len(effective_raw_text),
         ate_at_iso=created.ate_at.isoformat(),
         has_image=body.image_key is not None,
+        has_parsed_items=body.parsed_items is not None,
+        parsed_items_count=len(body.parsed_items) if body.parsed_items else 0,
     )
     return response
 
@@ -393,6 +479,34 @@ async def update_meal(
     # P5 — `updated_at`는 모델 ``onupdate=text("now()")``가 자동 갱신 → 명시 set 불필요.
     # Story 2.2 — `model_fields_set`로 *송신 여부* 검사 (D4 시맨틱).
     sent = body.model_fields_set
+    # CR P5 fix(2026-04-30) — parsed_items invariant. POST의 _at_least_one_input과
+    # 대칭으로 PATCH도 parsed_items=non-null이 image_key 없는 meal에 부착되는 것을
+    # 차단(orphan parsed_items). 두 분기:
+    #   ① body가 image_key=null + parsed_items=non-null (request만으로 invariant 위반)
+    #   ② body가 parsed_items=non-null만 송신, stored image_key=NULL (DB 상태 검증 필요)
+    if "parsed_items" in sent and body.parsed_items is not None:
+        sets_image_key_non_null = "image_key" in sent and body.image_key is not None
+        if not sets_image_key_non_null:
+            if "image_key" in sent:
+                # body.image_key is None confirmed by sets_image_key_non_null=False
+                raise MealParsedItemsRequiresImageKeyError(
+                    "parsed_items cannot be set when image_key is being cleared"
+                )
+            stored_row = (
+                await db.execute(
+                    select(Meal.image_key, Meal.id).where(
+                        Meal.id == meal_id,
+                        Meal.user_id == user.id,
+                        Meal.deleted_at.is_(None),
+                    )
+                )
+            ).first()
+            # stored_row is None: meal not found — let UPDATE handle MealNotFoundError naturally
+            # (enumeration 차단 정합).
+            if stored_row is not None and stored_row.image_key is None:
+                raise MealParsedItemsRequiresImageKeyError(
+                    "parsed_items requires meal.image_key (orphan parsed_items rejected)"
+                )
     values: dict[str, object | None] = {}
     changed_fields: list[str] = []
     # raw_text: explicit null은 no-op (Story 2.1 D4 정합).
@@ -409,6 +523,14 @@ async def update_meal(
     if "image_key" in sent:
         values["image_key"] = body.image_key
         changed_fields.append("image_key")
+    # Story 2.3 — parsed_items: explicit null = 클리어 (image_key 시맨틱 정합).
+    if "parsed_items" in sent:
+        values["parsed_items"] = (
+            [item.model_dump() for item in body.parsed_items]
+            if body.parsed_items is not None
+            else None
+        )
+        changed_fields.append("parsed_items")
 
     result = await db.execute(
         update(Meal)
@@ -432,6 +554,8 @@ async def update_meal(
         meal_id=str(meal_id),
         changed_fields=changed_fields,
         has_image=updated.image_key is not None,
+        has_parsed_items=updated.parsed_items is not None,
+        parsed_items_count=(len(updated.parsed_items) if updated.parsed_items is not None else 0),
     )
     return response
 

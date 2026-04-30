@@ -253,6 +253,22 @@ Story 1.2부터 Google 로그인을 사용하려면 Google Cloud Console에서 O
   `image_key`는 `meals/{user_id}/{uuid}.{ext}` 형식 — cross-user 도용 차단(`startswith` ownership 검증).
 - Epic 2 두 번째 스토리(2.2) 완료. 후속: 2.3(OCR Vision 추출 — `image_key`를 입력으로 활용).
 
+### 식단 사진 OCR Vision SOP (Story 2.3)
+
+- `POST /v1/meals/images/parse` body `{image_key}` → GPT-4o Vision OCR → `parsed_items`
+  (name/quantity/confidence) + `low_confidence` 응답. 호출당 ~$0.005-0.01 (R6 cost alert 정합 —
+  영업 데모 일일 100건 ≤ $1/일).
+- `OPENAI_API_KEY` 환경변수 미설정 시 503 + `code=meals.image.ocr_unavailable` (dev fail-fast).
+  R2 public URL 미설정 시 `meals.image.ocr_image_url_missing` (운영 가시성 분리).
+- 신뢰도 임계값 0.6 — 모바일 `OCRConfirmCard` *forced confirmation* (CTA 비활성 +
+  *"이대로 진행"* 명시 클릭 또는 모든 항목 사용자 편집 후 활성화). NFR-I3 graceful degradation —
+  Vision 503 시 *"사진 인식 일시 장애 — 텍스트로 다시 입력"* alert + raw_text 직접 입력 fallback.
+- `OCRConfirmCard` 사용자 확인 후 form `raw_text` 자동 갱신 (`formatParsedItemsToRawText` 변환,
+  예: *"짜장면 1인분, 군만두 4개"*). DF2(`(사진 입력)` placeholder collision)는 *parsed_items 영속화 +
+  raw_text overwrite 흐름*으로 자연 해소 — 클라이언트 미송신 시 서버 fallback도 동일 변환 적용.
+- Epic 2 세 번째 스토리(2.3) 완료. 후속: 2.4(일별 기록 화면 polish — `parsed_items` 표시 통합) /
+  Story 3.3(LangGraph `parse_meal` 노드가 본 어댑터 재사용).
+
 ### 8시간 체크리스트
 
 - [ ] (1h) `docker compose up` 4개 컨테이너 healthy 확인

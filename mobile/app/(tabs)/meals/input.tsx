@@ -1,5 +1,5 @@
 /**
- * Story 2.1 + 2.2 — 식단 입력/수정 화면 (POST + PATCH 통합 + 사진 첨부 흐름).
+ * Story 2.1 + 2.2 + 2.3 — 식단 입력/수정 화면 (POST + PATCH + 사진 첨부 + OCR Vision 흐름).
  *
  * `?meal_id=` 쿼리 파라미터로 분기:
  * - 미존재 → POST 모드 (신규). 헤더 *식단 입력*.
@@ -21,6 +21,18 @@
  * - PATCH 모드 prefill: `editingMeal.image_url` 썸네일.
  * - *제거* 액션: `imageClearedExplicitly` state (PATCH 모드에서 `image_key=null` 명시 송신).
  * - 클라이언트 1차 가드: *raw_text 또는 image_key 최소 1* 미충족 시 Alert + early return.
+ *
+ * Story 2.3 OCR Vision orchestration:
+ * - `uploadImageToR2` 성공 직후 `parseMealImage(image_key)` 자동 호출 (effect chain).
+ * - 결과 `parsed_items` + `low_confidence` → `OCRConfirmCard` inline render (form 대체).
+ * - `onConfirm` → `confirmedRawText = formatParsedItemsToRawText(parsedItems)` 갱신 +
+ *   `ocrConfirmed=true` → `MealInputForm` 재마운트(key 변경) — `defaultValues.raw_text` 갱신.
+ * - `onRetake` → 사진 + parsedItems 전체 클리어 (form 초기 상태).
+ * - 503 (Vision 장애) → Alert "사진 인식 일시 장애 — 텍스트로 다시 입력해주세요" +
+ *   parsedItems=null + 사용자가 raw_text 직접 입력 가능 (NFR-I3 graceful degradation).
+ * - PATCH 모드 prefill: `editingMeal.parsed_items` 보유 시 `parsedItems` + `ocrConfirmed=true`
+ *   초기화 (이미 확인된 상태 — 사용자가 다시 분석 누르면 재 parse).
+ * - `onSubmit` body: `parsed_items = parsedItems` (POST/PATCH 둘 다, ocrConfirmed=true 시).
  */
 import { Stack, router, useLocalSearchParams } from 'expo-router';
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -29,10 +41,12 @@ import { useQueryClient, type QueryClient } from '@tanstack/react-query';
 import * as ImagePicker from 'expo-image-picker';
 
 import { MealInputForm, type ImagePickKind } from '@/features/meals/MealInputForm';
+import { OCRConfirmCard } from '@/features/meals/OCRConfirmCard';
 import { PermissionDeniedView, type PermissionKind } from '@/features/meals/PermissionDeniedView';
 import {
   MealImageUploadError,
   MealSubmitError,
+  parseMealImage,
   uploadImageToR2,
   useCreateMealMutation,
   useUpdateMealMutation,
@@ -44,7 +58,9 @@ import type {
   MealListResponse,
   MealResponse,
   MealUpdateRequest,
+  ParsedMealItem,
 } from '@/features/meals/mealSchema';
+import { formatParsedItemsToRawText } from '@/features/meals/parsedItemsFormat';
 import { useCameraPermission, useMediaLibraryPermission } from '@/lib/permissions';
 
 function findMealInCache(
@@ -123,6 +139,21 @@ export default function MealInputScreen() {
   const [isUploading, setIsUploading] = useState(false);
   const [deniedState, setDeniedState] = useState<DeniedState | null>(null);
 
+  // Story 2.3 — OCR Vision state.
+  const [parsedItems, setParsedItems] = useState<ParsedMealItem[] | null>(
+    editingMeal?.parsed_items ?? null,
+  );
+  const [lowConfidence, setLowConfidence] = useState<boolean>(false);
+  const [isParsing, setIsParsing] = useState<boolean>(false);
+  // PATCH 모드 prefill 시 이미 확인된 상태로 시작. POST 모드는 false (사용자 확인 필요).
+  const [ocrConfirmed, setOcrConfirmed] = useState<boolean>(
+    Boolean(editingMeal?.parsed_items),
+  );
+  // OCRConfirmCard `onConfirm` 시 form raw_text를 갱신할 때 form 재마운트 트리거 + 새 default.
+  const [confirmedRawText, setConfirmedRawText] = useState<string | null>(null);
+  // PATCH 모드에서만 — *parsed_items 명시 클리어* (재촬영 또는 사용자 명시 클리어).
+  const [parsedItemsClearedExplicitly, setParsedItemsClearedExplicitly] = useState(false);
+
   const cameraPermission = useCameraPermission();
   const mediaLibraryPermission = useMediaLibraryPermission();
 
@@ -155,9 +186,20 @@ export default function MealInputScreen() {
   const headerTitle = isPatchMode ? '식단 수정' : '식단 입력';
   const submitLabel = isPatchMode ? '수정 저장' : '저장';
 
-  const defaultValues: MealCreateFormData | undefined = editingMeal
-    ? { raw_text: editingMeal.raw_text }
-    : undefined;
+  // Story 2.3 — `confirmedRawText`는 OCR 확인 후 form 자동 prefill용. 사용자는 form에서
+  // 추가 편집 가능 (마지막 수정값 우선). MealInputForm은 `defaultValues`를 mount 시점에만
+  // 읽으므로 `key`로 재마운트 트리거 (`useForm` reset 회피 — props drilling 단순).
+  const defaultValues: MealCreateFormData | undefined =
+    confirmedRawText !== null
+      ? { raw_text: confirmedRawText }
+      : editingMeal
+        ? { raw_text: editingMeal.raw_text }
+        : undefined;
+  const formKey = confirmedRawText !== null ? `confirmed:${confirmedRawText}` : 'initial';
+
+  // Story 2.3 — OCRConfirmCard 노출 조건: parsedItems 있고, 사용자 확인 전, parse 진행 중 X.
+  const showOcrConfirmCard =
+    parsedItems !== null && !ocrConfirmed && !isParsing && imageKey !== null;
 
   const handleSubmitError = (err: unknown) => {
     if (err instanceof MealSubmitError) {
@@ -263,13 +305,21 @@ export default function MealInputScreen() {
     }
 
     setIsUploading(true);
+    let uploadedKey: string | null = null;
     try {
       const uploaded = await uploadImageToR2(asset.uri, mime, declaredSize);
       // P8 — unmount 후 도달 시 setState 호출 회피 (React stale-state 경고 + memory leak).
       if (!isMountedRef.current) return;
+      uploadedKey = uploaded.image_key;
       setImageKey(uploaded.image_key);
       setImageLocalUri(asset.uri);
       setImageClearedExplicitly(false);
+      // Story 2.3 — 이전 분석 결과 클리어 (새 사진은 새 분석).
+      setParsedItems(null);
+      setLowConfidence(false);
+      setOcrConfirmed(false);
+      setParsedItemsClearedExplicitly(false);
+      setConfirmedRawText(null);
     } catch (err) {
       if (!isMountedRef.current) return;
       if (err instanceof MealImageUploadError) {
@@ -291,14 +341,77 @@ export default function MealInputScreen() {
         setIsUploading(false);
       }
     }
+
+    // Story 2.3 — 업로드 성공 후 자동 parse 호출 (chain).
+    if (!uploadedKey || !isMountedRef.current) return;
+    setIsParsing(true);
+    try {
+      const result = await parseMealImage(uploadedKey);
+      if (!isMountedRef.current) return;
+      setParsedItems(result.parsed_items);
+      setLowConfidence(result.low_confidence);
+    } catch (err) {
+      if (!isMountedRef.current) return;
+      // NFR-I3 graceful degradation — 503/502 모두 동일 alert + raw_text 직접 입력 fallback.
+      const isOcrError =
+        err instanceof MealSubmitError && (err.status === 503 || err.status === 502);
+      if (isOcrError) {
+        Alert.alert(
+          '사진 인식 일시 장애',
+          '텍스트로 다시 입력해주세요. (사진은 그대로 유지)',
+        );
+      } else if (err instanceof MealSubmitError) {
+        // 401/403/400 등은 일반 핸들러로.
+        handleSubmitError(err);
+      } else {
+        Alert.alert('사진 인식 실패', '잠시 후 다시 시도해주세요.');
+      }
+      setParsedItems(null);
+      setLowConfidence(false);
+    } finally {
+      if (isMountedRef.current) {
+        setIsParsing(false);
+      }
+    }
   };
 
   const handleClearImage = () => {
     setImageKey(null);
     setImageLocalUri(null);
+    setParsedItems(null);
+    setLowConfidence(false);
+    setOcrConfirmed(false);
+    setConfirmedRawText(null);
     if (isPatchMode) {
       setImageClearedExplicitly(true);
+      setParsedItemsClearedExplicitly(true);
     }
+  };
+
+  // Story 2.3 — OCRConfirmCard 콜백 ----------------------------------------
+
+  const handleConfirmOCR = () => {
+    if (!parsedItems) return;
+    // form `raw_text` 자동 갱신 — 사용자는 이후 form에서 추가 편집 가능.
+    setConfirmedRawText(formatParsedItemsToRawText(parsedItems));
+    setOcrConfirmed(true);
+  };
+
+  const handleRetakePhoto = () => {
+    setImageKey(null);
+    setImageLocalUri(null);
+    setParsedItems(null);
+    setLowConfidence(false);
+    setOcrConfirmed(false);
+    setConfirmedRawText(null);
+    if (isPatchMode) {
+      setImageClearedExplicitly(true);
+      setParsedItemsClearedExplicitly(true);
+    }
+  };
+
+  const handleChangeParsedItems = (items: ParsedMealItem[]) => {
+    setParsedItems(items);
   };
 
   const onSubmit = (data: MealCreateFormData) => {
@@ -325,6 +438,12 @@ export default function MealInputScreen() {
       } else if (imageKey) {
         body.image_key = imageKey;
       }
+      // Story 2.3 — parsed_items 분기.
+      if (parsedItemsClearedExplicitly) {
+        body.parsed_items = null;
+      } else if (ocrConfirmed && parsedItems) {
+        body.parsed_items = parsedItems;
+      }
       updateMutation.mutate(
         { meal_id, body },
         {
@@ -339,6 +458,8 @@ export default function MealInputScreen() {
       const body: MealCreateRequest = {};
       if (hasRawText) body.raw_text = trimmedRawText;
       if (imageKey) body.image_key = imageKey;
+      // Story 2.3 — POST 시 parsed_items 첨부 (OCR 확인된 케이스만).
+      if (ocrConfirmed && parsedItems) body.parsed_items = parsedItems;
       createMutation.mutate(body, {
         onSuccess: () => {
           const target = '/(tabs)/meals' as Parameters<typeof router.replace>[0];
@@ -373,19 +494,31 @@ export default function MealInputScreen() {
           }
         />
       ) : null}
-      <MealInputForm
-        defaultValues={defaultValues}
-        isSubmitting={isSubmitting}
-        submitLabel={submitLabel}
-        onSubmit={onSubmit}
-        serverError={serverError}
-        onClearServerError={() => setServerError(null)}
-        imageKey={imageKey}
-        imageLocalUri={imageLocalUri}
-        onPickImage={(kind) => void handlePickImage(kind)}
-        onClearImage={handleClearImage}
-        isUploading={isUploading}
-      />
+      {showOcrConfirmCard && parsedItems ? (
+        <OCRConfirmCard
+          items={parsedItems}
+          lowConfidence={lowConfidence}
+          onChangeItems={handleChangeParsedItems}
+          onConfirm={handleConfirmOCR}
+          onRetake={handleRetakePhoto}
+          isSubmitting={isSubmitting}
+        />
+      ) : (
+        <MealInputForm
+          key={formKey}
+          defaultValues={defaultValues}
+          isSubmitting={isSubmitting || isParsing}
+          submitLabel={submitLabel}
+          onSubmit={onSubmit}
+          serverError={serverError}
+          onClearServerError={() => setServerError(null)}
+          imageKey={imageKey}
+          imageLocalUri={imageLocalUri}
+          onPickImage={(kind) => void handlePickImage(kind)}
+          onClearImage={handleClearImage}
+          isUploading={isUploading || isParsing}
+        />
+      )}
     </View>
   );
 }

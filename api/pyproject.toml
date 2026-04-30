@@ -32,6 +32,8 @@ dependencies = [
     "sse-starlette>=2.2",
     "google-auth>=2.36",
     "boto3>=1.36",
+    # --- LLM Vision (Story 2.3 — OpenAI Vision OCR / structured outputs) ---
+    "openai>=1.55",
 ]
 
 [dependency-groups]
