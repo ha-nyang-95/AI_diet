@@ -368,3 +368,59 @@ class MealIdempotencyKeyConflictDeletedError(MealError):
     status: ClassVar[int] = 409
     code: ClassVar[str] = "meals.idempotency_key.conflict_deleted"
     title: ClassVar[str] = "Idempotency key conflicts with deleted meal"
+
+
+# --- Food Seed 계층 (Story 3.1 — 음식 영양 RAG 시드 + pgvector HNSW) ---
+
+
+class FoodSeedError(BalanceNoteError):
+    """Epic 3 음식 영양 시드 도메인 예외 base.
+
+    ``MealError`` 카탈로그 패턴 정합 — 직접 raise 회피(서브클래스만 사용 권장 —
+    base 직접 raise는 status/code/title default를 leak). Story 3.1은 *시드 시점
+    예외*만 — FastAPI 라우터에 노출 X(시드 스크립트가 자체 catch + 비-zero exit +
+    Sentry capture). RFC 7807 변환은 정의만 — Story 3.3+ retrieve_nutrition 노드가
+    503 raise 시 main.py 핸들러가 자동 변환.
+    """
+
+    status: ClassVar[int] = 503
+    code: ClassVar[str] = "food_seed.error"
+    title: ClassVar[str] = "Food seed error"
+
+
+class FoodSeedSourceUnavailableError(FoodSeedError):
+    """식약처 OpenAPI key 미설정 / 정적 백업 ZIP 미존재 / 응답 0건 케이스.
+
+    fail-fast — API key 미설정은 retry 무효 + cost 0 정합. ``MFDS_OPENAPI_KEY``
+    truthy 검증에서 즉시 raise. 시드 스크립트가 catch 후 ZIP fallback 분기 시도.
+    """
+
+    status: ClassVar[int] = 503
+    code: ClassVar[str] = "food_seed.source_unavailable"
+    title: ClassVar[str] = "Food seed source unavailable"
+
+
+class FoodSeedAdapterError(FoodSeedError):
+    """httpx transient 후 retry 실패 / OpenAI embeddings transient 후 retry 실패 /
+    응답 차원 불일치 / 일반 어댑터 오류.
+
+    ``_TRANSIENT_RETRY_TYPES`` tenacity retry 후 최종 실패 또는 영구 오류
+    (``openai.AuthenticationError``/``openai.BadRequestError``)에서 즉시 변환. quota
+    초과는 ``FoodSeedQuotaExceededError`` 별 분기.
+    """
+
+    status: ClassVar[int] = 503
+    code: ClassVar[str] = "food_seed.adapter_error"
+    title: ClassVar[str] = "Food seed adapter failure"
+
+
+class FoodSeedQuotaExceededError(FoodSeedError):
+    """식약처 OpenAPI quota / OpenAI embeddings rate limit 후 retry 실패.
+
+    HTTP 429 또는 응답 본문 quota error code 명시 분기 — retry 무효(quota는 *시간
+    경과* 외 회복 X) + 시드 스크립트가 ZIP fallback 분기 트리거 신호.
+    """
+
+    status: ClassVar[int] = 503
+    code: ClassVar[str] = "food_seed.quota_exceeded"
+    title: ClassVar[str] = "Food seed API quota exceeded"
