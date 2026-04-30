@@ -762,7 +762,10 @@ export interface components {
          *
          *     - ``name``: 한국어 표준 음식명 (예: ``"짜장면"``). 빈 문자열 거부 (Vision 출력
          *       신뢰 + 사용자 확인 카드 후 편집 가능). max_length 50 — DB jsonb + UI 표시
-         *       합리적 상한.
+         *       합리적 상한. CR P7 fix(2026-04-30): 콤마 거부 — ``_format_parsed_items_to_raw_text``
+         *       가 ``", "``로 항목을 join하므로 name 콤마 포함 시 raw_text boundary 모호 (예:
+         *       ``"감자, 양파" + "500g"`` → ``"감자, 양파 500g"`` 잘못 분리). 사용자 편집 round-trip
+         *       안정성 보장.
          *     - ``quantity``: 추정 양 (예: ``"1인분"`` / ``"4개"`` / ``"300g"``). 빈 quantity
          *       허용 (*"바나나"* 처럼 양 없는 항목 대응) — ``min_length=0``.
          *     - ``confidence``: 0.0~1.0 신뢰도 — 임계값 0.6 미만은 모바일 forced confirmation.
