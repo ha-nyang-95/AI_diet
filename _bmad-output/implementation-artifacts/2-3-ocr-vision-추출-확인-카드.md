@@ -1,6 +1,6 @@
 # Story 2.3: OCR Vision 추출 + 사용자 확인·수정 카드
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -349,6 +349,66 @@ So that **잘못 인식된 항목을 미리 바로잡아 분석 정확도가 떨
 - [x] 9.6 `_bmad-output/implementation-artifacts/sprint-status.yaml` — `2-3-ocr-vision-추출-확인-카드` → `review` 갱신.
 - [x] 9.7 commit + push (메모리 `feedback_ds_complete_to_commit_push.md` 정합 — DS 종료점은 commit + push, PR은 CR 완료 후). 새 브랜치 `story-2-3-ocr-vision-추출-확인-카드`는 master에서 분기(메모리 `feedback_branch_from_master_only.md` 정합).
 
+### Review Findings
+
+> 2026-04-30 CR — Blind Hunter + Edge Case Hunter + Acceptance Auditor 3-layer 어드버서리얼 리뷰. 정규화/중복 제거 후 32 finding 분류: 3 decision-needed, 24 patch, 5 defer, 8+ dismissed.
+
+#### Decision-needed (3) — 스펙 deviation 사용자 판단 필요
+
+- [x] [Review][Decision] **D1 — AC2 timeout 메커니즘** → **② 현재 유지** (resolved 2026-04-30): functionally equivalent, 단순성 우선. Completion Notes AC2에 deviation 명시 추가.
+- [x] [Review][Decision] **D2 — AC6 `allItemsEdited` OR vs AND** → **① AND 강제** (resolved 2026-04-30): `OCRConfirmCard.tsx:78` `||` → `&&` 수정. 환각 방어 강화 — 한 필드만 편집해도 게이트 통과하던 약점 제거.
+- [x] [Review][Decision] **D3 — AC8 `setValue` vs key-based remount** → **② 현재 유지** (resolved 2026-04-30): `useForm`이 `MealInputForm`에 캡슐화되어 outside reset 어려움 — Completion Notes line 663 정당화 충분. 다른 필드 in-progress 편집 손실 risk는 ate_at native picker 시나리오에 한정 — UX polish 시점에 forwardRef 재설계 검토.
+
+#### Patch (25) — 명확한 수정
+
+- [x] [Review][Patch] **P1 [Critical] tenacity retry 필터가 `openai.APIError` 전체 catch** → **resolved 2026-04-30**: `_TRANSIENT_RETRY_TYPES` 상수 도입, 필터를 `(httpx.HTTPError, openai.APIConnectionError, openai.APITimeoutError, openai.RateLimitError, openai.InternalServerError)`로 좁힘. AuthenticationError/BadRequestError 등 영구 오류는 즉시 fail.
+- [x] [Review][Patch] **P2 [High] 저장된 `parsed_items` 단일 손상 row이 GET 전체 500** → **resolved 2026-04-30**: `_meal_to_response`에 per-item try/except + `meals.parsed_items.malformed` warn 로그 + 손상 항목 drop.
+- [x] [Review][Patch] **P3 [High] OpenAI 응답 `choices` 빈 list IndexError** → **resolved 2026-04-30**: `_call_vision`에 `if not response.choices: raise MealOCRPayloadInvalidError("no choices returned")` 가드 추가.
+- [x] [Review][Patch] **P4 [High] OpenAI `message.refusal` 분기 미처리** → **resolved 2026-04-30**: `getattr(message, "refusal", None)` 검사 후 distinct `MealOCRPayloadInvalidError(f"Vision response: model refusal ({refusal})")` raise. 테스트 mock helpers(`_build_parse_response`, `_build_mock_response`, payload-invalid case)에 `message.refusal=None` 명시.
+- [x] [Review][Patch] **P5 [High] PATCH `parsed_items=[...]`이 image_key NULL meal에 invariant 가드 부재** → **resolved 2026-04-30**: 신규 예외 `MealParsedItemsRequiresImageKeyError(400, meals.parsed_items.requires_image_key)` 추가. PATCH 라우터에 두 분기 가드: ① body image_key=null + parsed_items=non-null 즉시 거부 ② parsed_items=non-null만 송신 시 SELECT로 stored image_key 검증 후 NULL이면 거부.
+- [x] [Review][Patch] **P6 [High] OCRConfirmCard 강제 확인 게이트 deletion bypass** → **resolved 2026-04-30**: `if (initial.length !== items.length) return true;` 라인 제거. items.every 루프가 *남은 항목*을 initial[idx] 기준 검증하고 *추가된 항목*은 `if (!orig) return true`로 인정 — 삭제만으로 게이트 통과 차단. (re-parse 스테일 ref는 input.tsx가 parsedItems=null로 OCRConfirmCard unmount하는 흐름이라 실제 미발현, P14 stable id 후속 처리.)
+- [x] [Review][Patch] **P7 [High] `ParsedMealItem.name`에 콤마 포함 시 raw_text boundary 모호** → **resolved 2026-04-30**: 백엔드 `ParsedMealItem`에 `_reject_comma_in_name` field_validator 추가. 모바일 `OCRConfirmCard.handleEditName`이 `value.replace(/,/g, '')` strip — 사용자가 콤마 입력해도 silently 제거.
+- [x] [Review][Patch] **P8 [High] Alembic 0008 downgrade silent data loss** → **resolved 2026-04-30**: `downgrade()`에 preflight `SELECT count(*) FROM meals WHERE parsed_items IS NOT NULL` 추가, 결과>0 시 `RuntimeError` raise (강제 진행 가이드 메시지 포함).
+- [ ] [Review][Patch] **P9 [Medium] `_at_least_one_input` 빈 list `parsed_items=[]` + image_key=None 거부 메시지 misleading** [api/app/api/v1/meals.py:_at_least_one_input] — 빈 list는 의미적 무영향이나 "parsed_items requires image_key" 메시지로 거부. Fix: `if self.parsed_items` (truthy) 체크 — `parsed_items is not None and len>0` 시에만 거부.
+- [ ] [Review][Patch] **P10 [Medium] `_format_parsed_items_to_raw_text`: `parsed_items=[]` (빈 list 즉 falsy) + image_key 송신 시 placeholder fallback 진입 — DF2 partial regression** [api/app/api/v1/meals.py:create_meal:362-369] — `if effective_raw_text is None and body.parsed_items:` empty list는 falsy → placeholder. Fix: 빈 list 시 명시적 동작(placeholder 의도면 docstring 갱신, 아니면 None과 동일 처리).
+- [ ] [Review][Patch] **P11 [Medium] POST `parsed_items=[]` 명시 송신 시 DB에 빈 array `[]` 저장 — NULL과 의미 충돌** [api/app/api/v1/meals.py:380-382] — `null`=미파싱, `[]`=파싱했으나 0건 — UX 구분 불가. Fix: 빈 list는 None 정규화 또는 명시적 의도 docstring.
+- [ ] [Review][Patch] **P12 [Medium] R2 객체가 head_object 검증 후 Vision 호출 전 삭제되는 race** [api/app/api/v1/meals_images.py parse endpoint] — Vision은 fetch 실패 → generic 503 OCR alert로 사용자에게 표시. 실제 원인은 *image missing*. Fix: BadRequest/4xx 발생 시 별도 reason `meals.image.lost_after_check` 매핑 또는 최소 로그에 cause + image_key 명시.
+- [ ] [Review][Patch] **P13 [Medium] `handlePickImage` 연타 시 두 upload + parse chain 병렬 race** [mobile/app/(tabs)/meals/input.tsx:285-376] — last-write-wins로 setState stomp 가능. Fix: `uploadCounterRef.current++` 토큰 캡처 + completion 시 일치 확인 후 setState.
+- [ ] [Review][Patch] **P14 [Medium] OCRConfirmCard `key={idx}` — 항목 삭제 시 React가 index 재사용** [mobile/features/meals/OCRConfirmCard.tsx:138] — TextInput 잔상/포커스 carry-over 가능. Fix: stable id(uuid on add) + `key={item.id}`.
+- [ ] [Review][Patch] **P15 [Medium] OCRConfirmCard 사용자-추가 항목 name 빈 문자열로 confirm 가능 → 서버 400 generic alert** [mobile/features/meals/OCRConfirmCard.tsx:85-95] — Fix: `confirmDisabled = ... || items.some(i => i.name.trim() === '')` + 빈 name 항목 표시 안내.
+- [ ] [Review][Patch] **P16 [Medium] `parsed_items_count` 로그 None과 `[]` 구분 불가** [api/app/api/v1/meals.py:1314,1339] — `len(items) if items else 0` — empty list와 None 모두 0. Fix: `len(items) if items is not None else 0` + `has_parsed_items` 별도 명시.
+- [ ] [Review][Patch] **P17 [Medium] `parseMealImage` docstring 자가 모순** [mobile/features/meals/api.ts:401 주석] — "401 — authFetch 자동 처리" + "401 → MealSubmitError throw" 동시 명시. Fix: refresh 실패 시에만 throw로 docstring 명료화.
+- [ ] [Review][Patch] **P18 [Medium] `latency_ms` 측정 시작점이 Task 3.1 spec과 deviation** [api/app/api/v1/meals_images.py:1501] — Task 3.1 line 284 "라우터 진입~응답 build 종단" 명시, 구현은 ownership/head_object 후. Fix: `start = time.monotonic()`을 endpoint entry로 이동.
+- [ ] [Review][Patch] **P19 [Low] 어댑터 예외 path latency_ms 로그 누락 — 실패 trace 빈약** [api/app/adapters/openai_adapter.py:191-203] — Fix: `except` 블록에 `outcome=failure` + `latency_ms` 추가.
+- [ ] [Review][Patch] **P20 [Low] frontend `trimEnd()` vs backend `rstrip()` — 사용자 입력 trailing whitespace 시 double space** [mobile/features/meals/parsedItemsFormat.ts vs api/app/api/v1/meals.py:_format_parsed_items_to_raw_text] — `"짜장면 " + " 1인분"` → `"짜장면  1인분"`. Fix: 양쪽 모두 `name.trim()` + `quantity.trim()` 후 join.
+- [ ] [Review][Patch] **P21 [Low] tenacity wait_exponential 실 sleep — 테스트 ≥1s 추가** [api/tests/test_openai_adapter.py:retry 케이스] — Fix: pytest fixture가 `parse_meal_image.retry.wait`을 `tenacity.wait_none()`으로 monkey patch.
+- [ ] [Review][Patch] **P22 [Low] AuthenticationError fail-fast 테스트 부재 (P1 회귀 방지)** [api/tests/test_openai_adapter.py] — Fix: `test_parse_meal_image_authentication_error_not_retried` 추가 + `await_count==1` 단언.
+- [ ] [Review][Patch] **P23 [Low] `MealOCRImageUrlMissingError(503)` HTTP 통합 테스트 부재** [api/tests/test_meals_images_router.py] — `r2_public_base_url` unset 시나리오 미검증. Fix: r2 미설정 통합 테스트 + reason `meals.image.r2_unconfigured` 단언.
+- [ ] [Review][Patch] **P24 [Low] `VISION_MAX_TOKENS=512` — 20 items × 한국어 token cost 시 truncation risk** [api/app/adapters/openai_adapter.py:68] — Fix: 1500~2000으로 상향 + 응답 truncation 시 explicit handling.
+- [ ] [Review][Patch] **P25 [Low] parsed_items 경계 20 / 0 정확 테스트 부재** [api/tests/test_meals_router.py] — Fix: `test_post_meal_parsed_items_exactly_20_accepted` + `test_post_meal_parsed_items_zero_with_image_key_uses_placeholder`.
+
+#### Defer (5) — 폴리시 / 본 스토리 외
+
+- [x] [Review][Defer] **W1 — Vision 호출 client-side timeout/cancel 부재** [mobile/app/(tabs)/meals/input.tsx:347-375] — deferred, UX polish (60s까지 무한 spinner risk; AbortController + retry UI).
+- [x] [Review][Defer] **W2 — OpenAI SDK `client.beta.chat.completions.parse` GA 이동 시 fragile** [api/app/adapters/openai_adapter.py:155] — deferred, Story 8 polish (Completion Notes에 GA 마이그레이션 명시).
+- [x] [Review][Defer] **W3 — 같은 image_key parse 반복 호출 dedup/rate-limit 부재** [api/app/api/v1/meals_images.py] — deferred, 이미 DF6(Vision 응답 캐시)와 통합 처리.
+- [x] [Review][Defer] **W4 — `_get_client()` singleton API key 변경 무시** [api/app/adapters/openai_adapter.py:_get_client] — deferred, runtime key rotation은 rare + `_reset_client_for_tests` 우회 가능.
+- [x] [Review][Defer] **W5 — `MealImageParseResponse` `extra="forbid"` 부재** [api/app/api/v1/meals_images.py:MealImageParseResponse] — deferred, 응답 모델 일관성 polish.
+
+#### Dismissed (8+) — 노이즈 / false positive
+
+- 두 source latency_ms (router=user-facing / adapter=debug — 의도된 분리)
+- `parsed_items` 응답 필드 순서 의존 (Pydantic v2 deterministic)
+- system prompt 끝 마침표 (trivial)
+- `_install_vision_mock` `side_effect=None` (Mock 정상 동작 — false positive)
+- `_image_key_for` UUID format 가정 (테스트 fixture)
+- story spec committed bloat (의도된 artifact 위치)
+- `_install_vision_mock` returns None (스타일)
+- `_parsed_items_payload` typed `dict[str, object]` (스타일)
+- `from typing import Any` import nit
+- Korean prompt 강제 미강제 (이미 DF12 다국가 대응)
+- `forceProceed` reset semantics edge (의도된 sticky)
+
 ## Dev Notes
 
 ### Architecture decisions (반드시 따를 것)
@@ -644,7 +704,7 @@ claude-opus-4-7[1m] (Amelia / Senior Software Engineer)
 ### Completion Notes List
 
 - ✅ **AC1 (parsed_items jsonb + 0008 migration)** — `meals.parsed_items JSONB NULL` 1 컬럼 추가, `raw_text NOT NULL invariant` 유지. ORM `app/db/models/meal.py` `Mapped[list[dict[str, Any]] | None]` 1줄 + JSONB import. autogenerate diff 0건 (parsed_items 기준).
-- ✅ **AC2 (Vision adapter)** — `app/adapters/openai_adapter.py` 신규. `gpt-4o` + `temperature=0.0` + `max_tokens=512` + 30초 timeout + tenacity retry 1회. `beta.chat.completions.parse(response_format=ParsedMeal)` structured outputs. AC10 deviation — 모듈명 `openai_adapter.py` 채택(PyPI `openai` 패키지 import 사이클 회피). lazy singleton + threading.Lock double-checked locking (Story 2.2 r2.py 패턴 정합).
+- ✅ **AC2 (Vision adapter)** — `app/adapters/openai_adapter.py` 신규. `gpt-4o` + `temperature=0.0` + `max_tokens=512` + 30초 timeout + tenacity retry 1회. `beta.chat.completions.parse(response_format=ParsedMeal)` structured outputs. AC10 deviation — 모듈명 `openai_adapter.py` 채택(PyPI `openai` 패키지 import 사이클 회피). lazy singleton + threading.Lock double-checked locking (Story 2.2 r2.py 패턴 정합). **AC2 minor deviation** — spec literal `client.with_options(timeout=...)` per-call wrapper 대신 `AsyncOpenAI(timeout=VISION_TIMEOUT_SECONDS)` 생성자 1회 적용 — 본 어댑터는 Vision 호출 단일 용도라 functionally equivalent, 단순성 우선.
 - ✅ **AC3 (POST /v1/meals/images/parse)** — `app/api/v1/meals_images.py`에 endpoint 추가. `require_basic_consents` + ownership + R2 head_object 검증 + `low_confidence` 임계값 0.6 + 5 필드 응답. 라우터 latency_ms 측정 + `meals.image.parse_completed` 로그.
 - ✅ **AC4 (parsed_items 필드 + raw_text overwrite 흐름)** — `MealCreateRequest`/`MealUpdateRequest`/`MealResponse` 모두 `parsed_items` 필드 추가. `_at_least_one_input` validator에 `parsed_items 단독 + image_key 부재 거부` 추가. `_format_parsed_items_to_raw_text` 서버 fallback (DF2 자연 해소). PATCH는 explicit null = 클리어 (image_key 시맨틱 정합).
 - ✅ **AC5 (도메인 예외 3종)** — `MealOCRUnavailableError(503)` / `MealOCRImageUrlMissingError(503)` / `MealOCRPayloadInvalidError(502)` 3 클래스 추가 (`MealImageError` base 정합). 글로벌 핸들러는 `BalanceNoteError` 흐름 자동 변환.
@@ -701,3 +761,4 @@ claude-opus-4-7[1m] (Amelia / Senior Software Engineer)
 |------|--------|------|
 | 2026-04-30 | Amelia (claude-opus-4-7[1m]) | Story 2.3 ready-for-dev — OCR Vision 추출 + 확인 카드 + parsed_items 영속화 baseline 컨텍스트 작성 (DF2 자연 해소 + Story 3.3 LangGraph 통합 forward-compat). Status: backlog → ready-for-dev. |
 | 2026-04-30 | Amelia (claude-opus-4-7[1m]) | Story 2.3 DS 완료 — Task 1-9 구현. 백엔드 219 tests passed (coverage 83.67%) + 모바일 tsc/lint clean + 웹 tsc clean + OpenAPI 자동 재생성. DF2 자연 해소 contract test 통과 (`test_post_meal_with_image_key_and_parsed_items_no_raw_text_uses_server_format`). Status: in-progress → review. |
+| 2026-04-30 | Amelia (claude-opus-4-7[1m]) | Story 2.3 CR 완료 — 3-layer adversarial review (Blind Hunter / Edge Case Hunter / Acceptance Auditor) → 32 findings triage(3 decision-needed + 25 patch + 5 defer + 11 dismissed). Decision-needed 3건 처리(D1·D3 현재 유지, D2 OR→AND 강제). Critical+High patch 8건 즉시 적용(P1 retry 필터 좁힘 + P2 per-item validate guard + P3 empty choices 가드 + P4 refusal 분기 + P5 PATCH parsed_items invariant + P6 deletion bypass 제거 + P7 콤마 거부 + P8 downgrade safety). 219 tests passed (coverage 83.26%) + ruff/mypy clean + 모바일 tsc/lint clean + 웹 tsc clean. Medium/Low patch 17건은 action item 유지(Story 8 hardening / 다음 sprint 처리). 신규 예외 `MealParsedItemsRequiresImageKeyError(400, meals.parsed_items.requires_image_key)` 추가. defer 5건(W1-W5)은 deferred-work.md에 기록. Status: review → done. |

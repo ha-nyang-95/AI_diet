@@ -237,13 +237,18 @@ def _image_key_for(user: User, ext: str = "jpg") -> str:
 
 
 def _build_parse_response(items: list[dict[str, object]]) -> MagicMock:
-    """`AsyncOpenAI.beta.chat.completions.parse` 응답 mock — `ParsedMeal` 직접 주입."""
+    """`AsyncOpenAI.beta.chat.completions.parse` 응답 mock — `ParsedMeal` 직접 주입.
+
+    CR P4 정합(2026-04-30) — `message.refusal=None` 명시 (MagicMock auto-attribute가
+    truthy로 평가되어 refusal 분기 오발 방지).
+    """
     parsed_meal = openai_adapter.ParsedMeal(
         items=[openai_adapter.ParsedMealItem.model_validate(item) for item in items]
     )
     response = MagicMock()
     response.choices = [MagicMock()]
     response.choices[0].message.parsed = parsed_meal
+    response.choices[0].message.refusal = None
     return response
 
 

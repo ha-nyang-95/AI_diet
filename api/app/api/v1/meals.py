@@ -53,7 +53,7 @@ from typing import Annotated, Final
 
 import structlog
 from fastapi import APIRouter, Depends, Query, Response, status
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from sqlalchemy import func, insert, select, update
 
 from app.adapters import r2 as r2_adapter
@@ -63,6 +63,7 @@ from app.core.exceptions import (
     MealImageNotUploadedError,
     MealImageOwnershipError,
     MealNotFoundError,
+    MealParsedItemsRequiresImageKeyError,
     MealQueryValidationError,
 )
 from app.db.models.meal import Meal
@@ -285,14 +286,25 @@ def _meal_to_response(meal: Meal) -> MealResponse:
     `https:///<key>` URL 차단). 호출 측은 None을 그대로 응답 ``image_url``로 forward.
 
     Story 2.3: ``parsed_items``는 jsonb → ``list[ParsedMealItem]`` 자동 역직렬화
-    (Pydantic ``model_validate``). NULL은 ``None`` 그대로 forward.
+    (Pydantic ``model_validate``). NULL은 ``None`` 그대로 forward. CR P2 fix
+    (2026-04-30): per-item validate를 try/except로 격리 — 단일 손상 row가 GET 전체
+    500 만들지 않도록 corrupt 항목 drop + warn 로그.
     """
     image_url = r2_adapter.resolve_public_url(meal.image_key) if meal.image_key else None
-    parsed_items = (
-        [ParsedMealItem.model_validate(item) for item in meal.parsed_items]
-        if meal.parsed_items is not None
-        else None
-    )
+    parsed_items: list[ParsedMealItem] | None
+    if meal.parsed_items is None:
+        parsed_items = None
+    else:
+        parsed_items = []
+        for raw_item in meal.parsed_items:
+            try:
+                parsed_items.append(ParsedMealItem.model_validate(raw_item))
+            except ValidationError as exc:
+                logger.warning(
+                    "meals.parsed_items.malformed",
+                    meal_id=str(meal.id),
+                    error=str(exc),
+                )
     return MealResponse(
         id=meal.id,
         user_id=meal.user_id,
@@ -467,6 +479,34 @@ async def update_meal(
     # P5 — `updated_at`는 모델 ``onupdate=text("now()")``가 자동 갱신 → 명시 set 불필요.
     # Story 2.2 — `model_fields_set`로 *송신 여부* 검사 (D4 시맨틱).
     sent = body.model_fields_set
+    # CR P5 fix(2026-04-30) — parsed_items invariant. POST의 _at_least_one_input과
+    # 대칭으로 PATCH도 parsed_items=non-null이 image_key 없는 meal에 부착되는 것을
+    # 차단(orphan parsed_items). 두 분기:
+    #   ① body가 image_key=null + parsed_items=non-null (request만으로 invariant 위반)
+    #   ② body가 parsed_items=non-null만 송신, stored image_key=NULL (DB 상태 검증 필요)
+    if "parsed_items" in sent and body.parsed_items is not None:
+        sets_image_key_non_null = "image_key" in sent and body.image_key is not None
+        if not sets_image_key_non_null:
+            if "image_key" in sent:
+                # body.image_key is None confirmed by sets_image_key_non_null=False
+                raise MealParsedItemsRequiresImageKeyError(
+                    "parsed_items cannot be set when image_key is being cleared"
+                )
+            stored_row = (
+                await db.execute(
+                    select(Meal.image_key, Meal.id).where(
+                        Meal.id == meal_id,
+                        Meal.user_id == user.id,
+                        Meal.deleted_at.is_(None),
+                    )
+                )
+            ).first()
+            # stored_row is None: meal not found — let UPDATE handle MealNotFoundError naturally
+            # (enumeration 차단 정합).
+            if stored_row is not None and stored_row.image_key is None:
+                raise MealParsedItemsRequiresImageKeyError(
+                    "parsed_items requires meal.image_key (orphan parsed_items rejected)"
+                )
     values: dict[str, object | None] = {}
     changed_fields: list[str] = []
     # raw_text: explicit null은 no-op (Story 2.1 D4 정합).

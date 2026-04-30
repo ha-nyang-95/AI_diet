@@ -44,4 +44,17 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # CR P8 fix(2026-04-30) — populated 테이블에서 silent data loss 차단. parsed_items
+    # 가 채워진 row가 1건이라도 있으면 abort. 실수 rollback 방어 + 명시적 force flag
+    # 부재 시 거부 (Story 8 perf hardening 시 force-flag 도입 검토).
+    bind = op.get_bind()
+    populated = bind.execute(
+        sa.text("SELECT count(*) FROM meals WHERE parsed_items IS NOT NULL")
+    ).scalar()
+    if populated and int(populated) > 0:
+        raise RuntimeError(
+            f"refusing downgrade: meals.parsed_items contains {populated} populated row(s). "
+            "Manually NULL the column (or set ALEMBIC_ALLOW_DESTRUCTIVE_DOWNGRADE=1 + "
+            "extend this script) to confirm data loss is intended."
+        )
     op.drop_column("meals", "parsed_items")

@@ -40,7 +40,7 @@ import httpx
 import openai
 import structlog
 from openai import AsyncOpenAI
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from tenacity import (
     retry,
     retry_if_exception_type,
@@ -89,7 +89,10 @@ class ParsedMealItem(BaseModel):
 
     - ``name``: 한국어 표준 음식명 (예: ``"짜장면"``). 빈 문자열 거부 (Vision 출력
       신뢰 + 사용자 확인 카드 후 편집 가능). max_length 50 — DB jsonb + UI 표시
-      합리적 상한.
+      합리적 상한. CR P7 fix(2026-04-30): 콤마 거부 — ``_format_parsed_items_to_raw_text``
+      가 ``", "``로 항목을 join하므로 name 콤마 포함 시 raw_text boundary 모호 (예:
+      ``"감자, 양파" + "500g"`` → ``"감자, 양파 500g"`` 잘못 분리). 사용자 편집 round-trip
+      안정성 보장.
     - ``quantity``: 추정 양 (예: ``"1인분"`` / ``"4개"`` / ``"300g"``). 빈 quantity
       허용 (*"바나나"* 처럼 양 없는 항목 대응) — ``min_length=0``.
     - ``confidence``: 0.0~1.0 신뢰도 — 임계값 0.6 미만은 모바일 forced confirmation.
@@ -98,6 +101,13 @@ class ParsedMealItem(BaseModel):
     name: str = Field(min_length=1, max_length=50)
     quantity: str = Field(min_length=0, max_length=30)
     confidence: float = Field(ge=0.0, le=1.0)
+
+    @field_validator("name")
+    @classmethod
+    def _reject_comma_in_name(cls, value: str) -> str:
+        if "," in value:
+            raise ValueError("name must not contain comma (raw_text boundary 모호 방지)")
+        return value
 
 
 class ParsedMeal(BaseModel):
@@ -138,18 +148,29 @@ def _reset_client_for_tests() -> None:
     _client = None
 
 
+_TRANSIENT_RETRY_TYPES: Final[tuple[type[BaseException], ...]] = (
+    httpx.HTTPError,
+    openai.APIConnectionError,
+    openai.APITimeoutError,
+    openai.RateLimitError,
+    openai.InternalServerError,
+)
+"""Transient 오류만 retry — ``openai.APIError`` 전체를 catch하면 ``AuthenticationError``
+/ ``BadRequestError`` 같은 *영구 오류 서브클래스*도 retry 대상이 되어 cost 낭비 + 영구
+오류 mask. CR P1 fix(2026-04-30) — 명시적 transient subset만 열거."""
+
+
 @retry(
     stop=stop_after_attempt(2),
     wait=wait_exponential(multiplier=1, min=1, max=4),
-    retry=retry_if_exception_type(
-        (httpx.HTTPError, openai.APIError, openai.RateLimitError),
-    ),
+    retry=retry_if_exception_type(_TRANSIENT_RETRY_TYPES),
     reraise=True,
 )
 async def _call_vision(image_url: str) -> ParsedMeal:
     """Vision API 호출 + tenacity retry 1회 — *transient 5xx + RateLimitError +
     네트워크*만 retry. ``openai.AuthenticationError`` / ``openai.BadRequestError`` 등
-    *영구 오류*는 즉시 fail (retry 무효 + cost 낭비 차단).
+    *영구 오류*는 ``_TRANSIENT_RETRY_TYPES``에 미포함 → 즉시 fail
+    (retry 무효 + cost 낭비 차단).
     """
     client = _get_client()
     response = await client.beta.chat.completions.parse(
@@ -168,9 +189,19 @@ async def _call_vision(image_url: str) -> ParsedMeal:
         temperature=0.0,
         max_tokens=VISION_MAX_TOKENS,
     )
-    parsed = response.choices[0].message.parsed
+    # CR P3 fix(2026-04-30) — empty choices 가드 (rare API edge에서 IndexError → 500
+    # 회피, 502로 정합).
+    if not response.choices:
+        raise MealOCRPayloadInvalidError("Vision response: no choices returned")
+    message = response.choices[0].message
+    # CR P4 fix(2026-04-30) — refusal 분기 distinct 처리. moderation block과 schema
+    # fail이 동일 reason으로 surface되던 구조 → ops 진단 가능하도록 분리.
+    refusal = getattr(message, "refusal", None)
+    if refusal:
+        raise MealOCRPayloadInvalidError(f"Vision response: model refusal ({refusal})")
+    parsed = message.parsed
     if parsed is None:
-        # OpenAI SDK가 schema 강제하나 *방어로* — refusal / null content 대응.
+        # OpenAI SDK가 schema 강제하나 *방어로* — null content 대응.
         raise MealOCRPayloadInvalidError("Vision response: parsed payload missing")
     return parsed
 

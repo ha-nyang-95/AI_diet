@@ -70,12 +70,13 @@ export function OCRConfirmCard({
     if (items.length === 0) return false;
     const initial = JSON.parse(initialItemsRef.current) as ParsedMealItem[];
     if (initial.length === 0) return true; // 모두 사용자 추가
-    if (initial.length !== items.length) return true; // 항목 추가/삭제 발생
-    // 모든 항목의 name 또는 quantity가 변경됐는지.
+    // CR P6 fix(2026-04-30) — 길이 mismatch 단독 bypass 제거. 항목 삭제만으로 게이트
+    // 통과되던 약점 제거: items.every loop가 *남은 항목*을 initial[idx] 기준 검증하고,
+    // *추가된 항목*은 `if (!orig) return true`(고유 사용자 입력)로 인정.
     return items.every((item, idx) => {
       const orig = initial[idx];
       if (!orig) return true;
-      return item.name !== orig.name || item.quantity !== orig.quantity;
+      return item.name !== orig.name && item.quantity !== orig.quantity;
     });
   }, [items]);
 
@@ -99,10 +100,11 @@ export function OCRConfirmCard({
   };
 
   const handleEditName = (idx: number, value: string) => {
+    // CR P7 fix(2026-04-30) — 콤마 strip. raw_text는 ", "로 항목을 join하므로 name
+    // 콤마 포함 시 round-trip boundary 모호. 백엔드 Pydantic도 콤마 거부.
+    const sanitized = value.replace(/,/g, '').slice(0, NAME_MAX_LENGTH);
     onChangeItems(
-      items.map((item, i) =>
-        i === idx ? { ...item, name: value.slice(0, NAME_MAX_LENGTH) } : item,
-      ),
+      items.map((item, i) => (i === idx ? { ...item, name: sanitized } : item)),
     );
   };
 

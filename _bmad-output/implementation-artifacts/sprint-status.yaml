@@ -1,5 +1,5 @@
 # generated: 2026-04-27
-# last_updated: 2026-04-30 (Story 2.3 review — OCR Vision adapter + parsed_items jsonb + 확인 카드 baseline 구현 완료. DS 종료, CR 대기.)
+# last_updated: 2026-04-30 (Story 2.3 done — CR 8 critical/high patch 적용 + Decision D2(allItemsEdited AND) + 신규 예외 + 219 tests passed. Medium/Low 17건은 action item.)
 # project: AI_diet
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-27
-last_updated: 2026-04-30  # Story 2.3 review — Amelia DS 완료 (OCR Vision adapter + parsed_items jsonb + 확인 카드 + DF2 자연 해소 + 219 tests passed, coverage 83.67%). epic-2 in-progress 유지. CR 진입 대기.
+last_updated: 2026-04-30  # Story 2.3 done — Amelia CR 완료 (3-layer adversarial review → 32 findings, Critical/High 8 patch 즉시 적용 + Decision D2 AND 강제, 219 tests passed coverage 83.26%, Medium/Low 17건 action item). epic-2 in-progress 유지. PR 생성 대기.
 project: AI_diet
 project_key: NOKEY
 tracking_system: file-system
@@ -56,7 +56,7 @@ development_status:
   epic-2: in-progress
   2-1-식단-텍스트-입력-crud: done
   2-2-식단-사진-입력-권한-흐름: done
-  2-3-ocr-vision-추출-확인-카드: review
+  2-3-ocr-vision-추출-확인-카드: done
   2-4-일별-식단-기록-화면: backlog
   2-5-오프라인-텍스트-큐잉-sync: backlog
   epic-2-retrospective: optional

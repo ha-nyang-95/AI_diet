@@ -136,3 +136,11 @@
 - **DF13 — `parsed_items` jsonb GIN 인덱스 부재** [meals.parsed_items 컬럼] — Story 2.4 일별 기록 검색 시 `parsed_items.name` LIKE 검색 도입 가능성 — 현재는 인덱스 부재로 sequential scan. **재검토 시점**: 검색 기능 도입 시 Story 8 perf hardening.
 - **DF14 — `OCRConfirmCard` `confidence` 사용자 편집 시 1.0 강제 vs 명시 변경 UX** [mobile/features/meals/OCRConfirmCard.tsx] — *"+ 항목 추가"*는 confidence 1.0 강제이나 *기존 항목 name/quantity 편집* 시 confidence 그대로 — 사용자가 환각 항목을 정확하게 고친 경우에도 낮은 confidence 잔존. behavior tradeoff(편집된 항목은 사용자 확신 vs 원본 confidence 보존)는 baseline에서는 *원본 보존* 선택. **재검토 시점**: Story 3.5 fit_score 도입 시 confidence 활용 패턴 결정 후 일괄.
 - **DF15 — `MealCard.tsx` `parsed_items` 표시 forward 미적용** [mobile/features/meals/MealCard.tsx] — Story 2.3 baseline은 *MealCard 변경 X* (Story 2.4가 일별 기록 화면 polish 시 *"인식: 짜장면 1인분, 군만두 4개"* 부제 추가). 본 스토리는 `MealResponse.parsed_items` 인터페이스 노출까지만. **재검토 시점**: Story 2.4 일별 기록 화면 polish.
+
+## Deferred from: code review of story-2.3 (2026-04-30)
+
+- **W1 — Vision 호출 client-side timeout/cancel 부재** [mobile/app/(tabs)/meals/input.tsx parseMealImage chain] — 백엔드 30s + tenacity 1회 retry로 60s까지 spinner 지속 — 사용자 escape 부재. AbortController + 35s 클라이언트 timeout + retry UI는 UX polish 영역. **재검토 시점**: Story 8 UX polish 또는 사용자 피드백 정량.
+- **W2 — OpenAI SDK `client.beta.chat.completions.parse` GA 이동 시 fragile** [api/app/adapters/openai_adapter.py:155] — 현재 `beta.` 경로 채택 (spec 정합 + 2.32.0 alias 동작). 향후 SDK 버전이 `beta.` 제거 시 break — Completion Notes에 GA(`chat.completions.parse`) 마이그레이션 명시. **재검토 시점**: Story 8 dependency hardening 또는 SDK 신버전 도입 시점.
+- **W3 — 같은 image_key parse 반복 호출 dedup/rate-limit 부재** [api/app/api/v1/meals_images.py POST /parse] — 호출당 새 Vision 호출 + cost 누적. 이미 DF6(Vision 응답 캐시 `cache:llm:{sha256(image_key)}` 24h TTL)와 통합 처리. **재검토 시점**: DF6과 동일 — Story 8 perf hardening.
+- **W4 — `_get_client()` singleton API key 변경 무시** [api/app/adapters/openai_adapter.py:_get_client] — 첫 호출 시 캐시된 client는 settings 변경 후 재사용. runtime key rotation rare + `_reset_client_for_tests()` 우회 가능 → polish 영역. **재검토 시점**: 운영 시 key 회전 자동화 도입 시점.
+- **W5 — `MealImageParseResponse` `extra="forbid"` 부재** [api/app/api/v1/meals_images.py:MealImageParseResponse] — request 모델은 `extra="forbid"`, response는 미설정. 응답 모델 일관성 polish. **재검토 시점**: Story 8 schema hardening.

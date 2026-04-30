@@ -44,13 +44,18 @@ def _openai_configured(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _build_mock_response(items: list[dict[str, Any]]) -> MagicMock:
     """`AsyncOpenAI.beta.chat.completions.parse` 응답 mock — `choices[0].message.parsed`에
-    ``ParsedMeal`` 인스턴스 직접 주입(SDK 자동 Pydantic 역직렬화 시뮬레이션)."""
+    ``ParsedMeal`` 인스턴스 직접 주입(SDK 자동 Pydantic 역직렬화 시뮬레이션).
+
+    CR P4 정합(2026-04-30) — `message.refusal=None` 명시 (MagicMock auto-attribute가
+    truthy 평가되어 refusal 분기 오발 방지).
+    """
     parsed_meal = openai_adapter.ParsedMeal(
         items=[openai_adapter.ParsedMealItem.model_validate(item) for item in items]
     )
     response = MagicMock()
     response.choices = [MagicMock()]
     response.choices[0].message.parsed = parsed_meal
+    response.choices[0].message.refusal = None
     return response
 
 
@@ -162,10 +167,11 @@ async def test_parse_meal_image_payload_invalid_when_parsed_none(
     monkeypatch: pytest.MonkeyPatch,
     _openai_configured: None,
 ) -> None:
-    """`message.parsed=None` (refusal / null content) — `MealOCRPayloadInvalidError(502)`."""
+    """`message.parsed=None` (null content) — `MealOCRPayloadInvalidError(502)`."""
     response = MagicMock()
     response.choices = [MagicMock()]
     response.choices[0].message.parsed = None
+    response.choices[0].message.refusal = None
     _install_mock_client(monkeypatch, parse_return=response)
 
     with pytest.raises(MealOCRPayloadInvalidError):

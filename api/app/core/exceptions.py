@@ -330,3 +330,13 @@ class MealOCRPayloadInvalidError(MealImageError):
     status: ClassVar[int] = 502
     code: ClassVar[str] = "meals.image.ocr_payload_invalid"
     title: ClassVar[str] = "Image OCR returned invalid payload"
+
+
+class MealParsedItemsRequiresImageKeyError(MealImageError):
+    """PATCH가 ``parsed_items`` non-null을 부착하면서 stored/sent ``image_key``가 부재
+    — orphan parsed_items 방어. POST의 ``_at_least_one_input`` ("parsed_items
+    requires image_key")과 대칭. CR P5 fix(2026-04-30, Story 2.3)."""
+
+    status: ClassVar[int] = 400
+    code: ClassVar[str] = "meals.parsed_items.requires_image_key"
+    title: ClassVar[str] = "parsed_items requires image_key"
