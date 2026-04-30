@@ -48,8 +48,9 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import date, datetime, timedelta
-from typing import Annotated, Final
+from datetime import date, datetime, time, timedelta
+from typing import Annotated, Final, Literal
+from zoneinfo import ZoneInfo
 
 import structlog
 from fastapi import APIRouter, Depends, Query, Response, status
@@ -68,6 +69,12 @@ from app.core.exceptions import (
 )
 from app.db.models.meal import Meal
 from app.db.models.user import User
+
+# Story 2.4 — `GET /v1/meals` 날짜 필터 KST 강제 (W50 해소, D1 결정 — option B). KST
+# 자정 boundary는 Python `datetime.combine(date, time.min, tzinfo=_KST)`로 명시 변환,
+# Postgres `AT TIME ZONE` 회피 (asyncpg driver 호환성 + Python 단일 책임). 다중 TZ
+# 지원은 Growth NFR-L4.
+_KST: Final[ZoneInfo] = ZoneInfo("Asia/Seoul")
 
 # P2 — `image_key`는 `meals/<user_uuid>/<image_uuid>.<ext>` 형식으로 고정. 5종 ext
 # whitelist + UUID v4 형식 검증 + path traversal/duplicate slash/empty 차단을 단일
@@ -250,13 +257,57 @@ class MealUpdateRequest(BaseModel):
         return self
 
 
-class MealResponse(BaseModel):
-    """식단 단건 응답 — 10 필드 (Story 2.1 7 + 2.2 image_key/image_url + 2.3 parsed_items).
+class MealMacros(BaseModel):
+    """식단 매크로 영양 정보 — 식약처 OpenAPI 표준 키 정합 (architecture line 289).
 
-    ``deleted_at`` / ``image_key`` / ``image_url`` / ``parsed_items`` NULL 시에도
-    키 유지 (스키마 안정성). ``image_url``은 derived — `image_key` 있으면
-    `_resolve_public_url(image_key)`, 없으면 None (`_meal_to_response` helper에서
-    계산).
+    Story 2.4 — Epic 3 forward-compat. 모든 필드 ``ge=0`` non-negative 단언. 본 스토리
+    baseline은 *항상 None*(서버 join X) — 실제 채움은 Story 3.3 (`meal_analyses` 테이블
+    + LangGraph 노드 + ``app/domain/fit_score.py`` 알고리즘) / Story 3.5 (fit_score 룰).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    carbohydrate_g: float = Field(ge=0)
+    protein_g: float = Field(ge=0)
+    fat_g: float = Field(ge=0)
+    energy_kcal: float = Field(ge=0)
+
+
+class MealAnalysisSummary(BaseModel):
+    """식단 AI 분석 요약 — Epic 3 ``meal_analyses`` 테이블 1:1 매핑 forward-compat 슬롯.
+
+    Story 2.4 — Pydantic 인터페이스만 정의. 본 스토리 baseline은 ``MealResponse.analysis_summary``
+    *항상 None*(서버 join X) — 실제 채움은 Story 3.3 / 3.5. 별도 endpoint 분리는
+    yagni — list 응답에 슬롯 통합(Story 3.x perf hardening 시점에 분리 검토).
+
+    fields:
+
+    - ``fit_score``: 0-100 (FR21 정합).
+    - ``fit_score_label``: 5단계 텍스트 라벨 — NFR-A4 색약 대응. ``allergen_violation``
+      (FR22 알레르기 0점 단락) / ``low`` / ``moderate`` / ``good`` / ``excellent``.
+    - ``macros``: 식약처 OpenAPI 표준 키.
+    - ``feedback_summary``: 1줄 피드백 (max 120) — FR23 인용형 풀 텍스트는 ``[meal_id].tsx``
+      채팅(Story 3.7 SSE).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    fit_score: int = Field(ge=0, le=100)
+    fit_score_label: Literal["allergen_violation", "low", "moderate", "good", "excellent"]
+    macros: MealMacros
+    feedback_summary: str = Field(min_length=1, max_length=120)
+
+
+class MealResponse(BaseModel):
+    """식단 단건 응답 — 11 필드 (Story 2.1+2.2+2.3 10 + Story 2.4 analysis_summary).
+
+    ``deleted_at`` / ``image_key`` / ``image_url`` / ``parsed_items`` /
+    ``analysis_summary`` NULL 시에도 키 유지 (스키마 안정성, architecture line 481).
+    ``image_url``은 derived — `image_key` 있으면 `_resolve_public_url(image_key)`,
+    없으면 None (`_meal_to_response` helper에서 계산).
+
+    Story 2.4 — ``analysis_summary``는 본 스토리 baseline *항상 None*(서버 join X).
+    Story 3.x가 ``meal_analyses`` JOIN으로 채움.
     """
 
     id: uuid.UUID
@@ -269,6 +320,7 @@ class MealResponse(BaseModel):
     image_key: str | None
     image_url: str | None
     parsed_items: list[ParsedMealItem] | None
+    analysis_summary: MealAnalysisSummary | None
 
 
 class MealListResponse(BaseModel):
@@ -316,6 +368,8 @@ def _meal_to_response(meal: Meal) -> MealResponse:
         image_key=meal.image_key,
         image_url=image_url,
         parsed_items=parsed_items,
+        # Story 2.4 — Epic 3 forward-compat 슬롯. ``meal_analyses`` JOIN은 Story 3.3 책임.
+        analysis_summary=None,
     )
 
 
@@ -422,11 +476,22 @@ async def list_meals(
     """자기 식단 목록 조회 — 인증만 (PIPA Art.35).
 
     ``WHERE user_id = current_user.id AND deleted_at IS NULL`` 강제 — 다른 사용자
-    노출 / soft-deleted 노출 회귀 차단. ``ORDER BY ate_at DESC`` (partial index hit).
+    노출 / soft-deleted 노출 회귀 차단.
 
-    날짜 wire 시맨틱(KST/UTC drift)은 Story 2.4 deferred (W50). ``cursor`` 비-null
-    송신은 거부 (P18 / D2 결정 — silent 무시 → 무한 루프 footgun 차단). ``next_cursor``
-    는 항상 ``null``.
+    Story 2.4 — 날짜 필터는 ``Asia/Seoul`` TZ 자정 boundary로 해석합니다 (W50 해소,
+    D1 결정). ``from_date=2026-04-30`` → ``2026-04-30T00:00:00+09:00`` 이상,
+    ``to_date=2026-04-30`` → ``2026-05-01T00:00:00+09:00`` 미만. KST 0-9시 식단 누락
+    차단(``ate_at='2026-04-30T03:00:00+09:00'`` UTC ``2026-04-29T18:00:00Z``이
+    ``from_date=2026-04-30``에 포함). 다중 TZ 지원은 Growth NFR-L4.
+
+    Story 2.4 — ORDER BY 분기 (D2 결정). 날짜 필터 활성 시 ``ate_at ASC``(시간순 —
+    아침→저녁, epic AC line 558), 미적용 시 ``ate_at DESC``(최근 식단 우선, Story 8
+    cursor pagination forward-compat). partial index ``idx_meals_user_id_ate_at_active``
+    는 양방향 hit.
+
+    ``cursor`` 비-null 송신은 거부 (P18 / D2 결정 — silent 무시 → 무한 루프 footgun
+    차단). ``next_cursor``는 항상 ``null``. ``analysis_summary``는 항상 ``null``
+    (Story 3.x ``meal_analyses`` JOIN 책임 — Story 2.4 baseline은 forward-compat 슬롯만).
     """
     # P18 — `cursor` 비-null 거부 (D2 결정).
     if cursor is not None:
@@ -436,12 +501,21 @@ async def list_meals(
         raise MealQueryValidationError("from_date must not be after to_date")
 
     stmt = select(Meal).where(Meal.user_id == user.id, Meal.deleted_at.is_(None))
+    # Story 2.4 (W50 해소, D1) — KST 자정 boundary로 명시 변환. asyncpg는 tz-aware
+    # datetime을 그대로 timestamptz로 전달, 비교는 UTC로 정규화 (Postgres 표준).
     if from_date is not None:
-        stmt = stmt.where(Meal.ate_at >= from_date)
+        from_dt = datetime.combine(from_date, time.min, tzinfo=_KST)
+        stmt = stmt.where(Meal.ate_at >= from_dt)
     if to_date is not None:
-        # ``ate_at < to_date + 1 day`` (inclusive) — 같은 날짜 입력 시 자기 자신 포함.
-        stmt = stmt.where(Meal.ate_at < to_date + timedelta(days=1))
-    stmt = stmt.order_by(Meal.ate_at.desc()).limit(limit)
+        # ``to_date`` inclusive — 다음날 KST 자정 미만 (같은 일자 포함).
+        to_dt = datetime.combine(to_date + timedelta(days=1), time.min, tzinfo=_KST)
+        stmt = stmt.where(Meal.ate_at < to_dt)
+    # Story 2.4 (D2) — 날짜 필터 활성 시 ASC, 미적용 시 DESC.
+    if from_date is not None or to_date is not None:
+        stmt = stmt.order_by(Meal.ate_at.asc())
+    else:
+        stmt = stmt.order_by(Meal.ate_at.desc())
+    stmt = stmt.limit(limit)
     result = await db.execute(stmt)
     rows = list(result.scalars().all())
     return MealListResponse(

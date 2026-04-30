@@ -17,3 +17,24 @@ export function formatParsedItemsToRawText(items: ParsedMealItem[]): string {
     .map((item) => `${item.name} ${item.quantity}`.trimEnd())
     .join(', ');
 }
+
+/**
+ * Story 2.4 — `MealCard.tsx` parsed_items 부제 표시 헬퍼 (DF15 해소, AC7).
+ *
+ * `formatParsedItemsToRawText` 결과에 `"인식: "` prefix를 붙여 카드 부제로 노출.
+ * - null/빈 items: null 반환 → 부모(MealCard)가 부제 영역 미렌더(layout shift 회피).
+ * - 60자 초과: ellipsis(`...`) 포함 60자 cap.
+ *
+ * 예: `[{"name":"짜장면","quantity":"1인분"}, {"name":"군만두","quantity":"4개"}]`
+ * → `"인식: 짜장면 1인분, 군만두 4개"`.
+ */
+const INLINE_LABEL_MAX_LEN = 60;
+
+export function formatParsedItemsToInlineLabel(
+  items: ParsedMealItem[] | null,
+): string | null {
+  if (items === null || items.length === 0) return null;
+  const result = `인식: ${formatParsedItemsToRawText(items)}`;
+  if (result.length <= INLINE_LABEL_MAX_LEN) return result;
+  return `${result.slice(0, INLINE_LABEL_MAX_LEN - 3)}...`;
+}

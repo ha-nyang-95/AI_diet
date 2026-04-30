@@ -46,6 +46,36 @@ export interface ParsedMealItem {
   confidence: number;
 }
 
+// --- Story 2.4 — `MealAnalysisSummary` Epic 3 forward-compat 슬롯 ---
+
+/**
+ * 식단 매크로 영양 정보 — 식약처 OpenAPI 표준 키 정합.
+ * Story 3.3에서 `meal_analyses` 테이블 wire 시점에 채움. baseline은 항상 null.
+ */
+export interface MealMacros {
+  carbohydrate_g: number;
+  protein_g: number;
+  fat_g: number;
+  energy_kcal: number;
+}
+
+/**
+ * Story 2.4 — Epic 3 forward-compat. `MealResponse.analysis_summary`는 baseline에서 항상 null.
+ *
+ * - `fit_score`: 0-100 (FR21).
+ * - `fit_score_label`: 5단계 라벨 (NFR-A4 색약 대응 — 색상 + 숫자 + 텍스트).
+ * - `macros`: 식약처 OpenAPI 표준 키.
+ * - `feedback_summary`: 1줄 피드백 (max 120). 풀 텍스트는 [meal_id] 채팅 (Story 3.7).
+ */
+export type FitScoreLabel = 'allergen_violation' | 'low' | 'moderate' | 'good' | 'excellent';
+
+export interface MealAnalysisSummary {
+  fit_score: number;
+  fit_score_label: FitScoreLabel;
+  macros: MealMacros;
+  feedback_summary: string;
+}
+
 export interface MealResponse {
   id: string;
   user_id: string;
@@ -59,6 +89,8 @@ export interface MealResponse {
   image_url: string | null;
   // Story 2.3 — Vision OCR 결과 (jsonb). null = parse 미호출 / 텍스트-only / 사용자가 클리어.
   parsed_items: ParsedMealItem[] | null;
+  // Story 2.4 — Epic 3 forward-compat 슬롯. baseline은 항상 null (Story 3.x JOIN 책임).
+  analysis_summary: MealAnalysisSummary | null;
 }
 
 export interface MealListResponse {

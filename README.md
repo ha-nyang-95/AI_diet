@@ -269,6 +269,25 @@ Story 1.2부터 Google 로그인을 사용하려면 Google Cloud Console에서 O
 - Epic 2 세 번째 스토리(2.3) 완료. 후속: 2.4(일별 기록 화면 polish — `parsed_items` 표시 통합) /
   Story 3.3(LangGraph `parse_meal` 노드가 본 어댑터 재사용).
 
+### 일별 식단 기록 화면 + 7일 로컬 캐시 SOP (Story 2.4)
+
+- `(tabs)/meals/index` 일별 picker(prev/today/next 헤더 버튼 + "오늘로 이동") + 시간순 ASC 정렬.
+  헤더 title은 *"오늘 식단"* 또는 *"4월 30일 식단"* 동적 변경(KST `Intl.DateTimeFormat`).
+- 백엔드 `GET /v1/meals?from_date=&to_date=`은 `Asia/Seoul` TZ 자정 boundary로 해석(W50 해소, D1
+  결정 — option B). KST 0-9시 식단 누락 차단. `from_date`/`to_date` 활성 시 `ate_at ASC`(시간순),
+  미적용 시 `ate_at DESC`(D2). 다중 TZ는 Growth NFR-L4.
+- `analysis_summary` 슬롯(매크로/피드백/fit_score/label) 정의 — Story 2.4 baseline은 항상 null.
+  Story 3.3+에서 `meal_analyses` 테이블 JOIN으로 채움. *persist 캐시 schema 변경 시 buster bump
+  필수* (DF21 — `mobile/lib/query-persistence.ts: buster: 'v1' → 'v2'`).
+- 7일 로컬 캐시 — TanStack Query `@tanstack/react-query-persist-client` + AsyncStorage persister
+  (`bn-rq-cache` 키). `dehydrateOptions.shouldDehydrateQuery`로 *meals queryKey만 persist*(보안: 토큰
+  persist X). NFR-R4 정합 — 오프라인 시 *"오프라인 — 마지막 7일 기록 표시 중"* 배너 + 읽기 전용 모드.
+- `(tabs)/meals/[meal_id].tsx` 상세 placeholder — Story 3.7 SSE 채팅 통합 진입점. 7일 캐시
+  client-side filter 채택(단건 endpoint는 DF18 deferred). *"AI에게 질문하기"* CTA는 disabled —
+  Story 3.7 시점에 활성화. 수정/삭제 액션 버튼 + DF15 해소된 parsed_items 부제 + W49 해소된 KST 시간.
+- Epic 2 네 번째 스토리(2.4) 완료. 후속: 2.5(오프라인 텍스트 큐잉 — *쓰기 캐시*) / Story 3.x가
+  `analysis_summary` 슬롯 wire / Story 3.7가 `[meal_id].tsx` SSE 통합.
+
 ### 8시간 체크리스트
 
 - [ ] (1h) `docker compose up` 4개 컨테이너 healthy 확인

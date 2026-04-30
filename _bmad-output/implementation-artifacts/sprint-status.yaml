@@ -1,5 +1,5 @@
 # generated: 2026-04-27
-# last_updated: 2026-04-30 (Story 2.3 done — CR 8 critical/high patch 적용 + Decision D2(allItemsEdited AND) + 신규 예외 + 219 tests passed. Medium/Low 17건은 action item.)
+# last_updated: 2026-04-30 (Story 2.4 review — Amelia DS 완료. 일별 식단 기록 화면 + 7일 로컬 캐시 + KST 필터(W50 해소, D1) + MealCard polish(DF15 해소) + [meal_id] placeholder. 230 백엔드 테스트 통과 + 모바일/웹 tsc/lint clean.)
 # project: AI_diet
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-27
-last_updated: 2026-04-30  # Story 2.3 done — Amelia CR 완료 (3-layer adversarial review → 32 findings, Critical/High 8 patch 즉시 적용 + Decision D2 AND 강제, 219 tests passed coverage 83.26%, Medium/Low 17건 action item). epic-2 in-progress 유지. PR 생성 대기.
+last_updated: 2026-04-30  # Story 2.4 review — Amelia DS 완료. 일별 식단 기록 화면(시간순 + 날짜 picker) + 7일 로컬 캐시(NFR-R4 — TanStack Query AsyncStorage persister + meals queryKey만 persist) + KST 필터(W50 해소, D1 결정 option B) + ORDER BY 분기(D2) + analysis_summary 슬롯(Epic 3 forward-compat — MealAnalysisSummary/MealMacros Pydantic) + MealCard polish(DF15/W49 해소: parsed_items 부제 + KST formatHHmm + 사진 썸네일) + [meal_id].tsx placeholder(Story 3.7 SSE 진입점 prep) 구현 완료. 백엔드 230 테스트 통과(coverage 83.47%) + 모바일/웹 tsc/lint clean. epic-2 in-progress 유지.
 project: AI_diet
 project_key: NOKEY
 tracking_system: file-system
@@ -57,7 +57,7 @@ development_status:
   2-1-식단-텍스트-입력-crud: done
   2-2-식단-사진-입력-권한-흐름: done
   2-3-ocr-vision-추출-확인-카드: done
-  2-4-일별-식단-기록-화면: backlog
+  2-4-일별-식단-기록-화면: review
   2-5-오프라인-텍스트-큐잉-sync: backlog
   epic-2-retrospective: optional
 

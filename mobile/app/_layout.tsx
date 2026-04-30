@@ -1,11 +1,12 @@
-import { QueryClientProvider } from '@tanstack/react-query';
+import { PersistQueryClientProvider } from '@tanstack/react-query-persist-client';
 import { Stack } from 'expo-router';
 
 import { AuthProvider, queryClient } from '@/lib/auth';
+import { persistOptions } from '@/lib/query-persistence';
 
 export default function RootLayout() {
   return (
-    <QueryClientProvider client={queryClient}>
+    <PersistQueryClientProvider client={queryClient} persistOptions={persistOptions}>
       <AuthProvider>
         <Stack screenOptions={{ headerShown: false }}>
           <Stack.Screen name="index" />
@@ -13,6 +14,6 @@ export default function RootLayout() {
           <Stack.Screen name="(tabs)" />
         </Stack>
       </AuthProvider>
-    </QueryClientProvider>
+    </PersistQueryClientProvider>
   );
 }

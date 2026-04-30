@@ -1,15 +1,16 @@
 /**
- * Story 2.1 — 식단 *오늘 식단* baseline 화면.
+ * Story 2.1 (baseline) → Story 2.4 polish — 일별 식단 기록 화면.
  *
- * `useMealsQuery({ from_date: today, to_date: today })`로 오늘 식단만 fetch — 7일
- * history / 날짜 picker는 Story 2.4 책임.
- *
- * 카드 long-press → ActionSheet (`Platform.OS === 'ios'`이면 `ActionSheetIOS`,
- * 아니면 `Alert.alert` fallback) — 외부 라이브러리 회피 (Story 1.6 react-native-
- * swiper 회피 패턴 정합). 수정 / 삭제 / 취소 3 액션.
+ * Story 2.4 추가:
+ * - `selectedDate` state — 날짜 picker(prev/next/today). KST 강제 (W49 정합).
+ * - 헤더 prev/next/today 버튼 + 동적 title("오늘 식단" / "4월 30일 식단").
+ * - 카드 onPress → `[meal_id]` 상세 (탭 = 상세, long-press = 액션 — RN 표준 패턴).
+ * - 네트워크 상태 배너 — `useOnlineStatus()` (NFR-R4 7일 캐시 정합).
+ * - 빈 화면 분기 — 오늘 시 CTA 노출, 다른 일자 시 CTA 미노출.
+ * - 시간순 ASC 정렬은 백엔드 ORDER BY 분기(D2) — 클라이언트 정렬 0.
  */
 import { Stack, router } from 'expo-router';
-import { useCallback } from 'react';
+import { useCallback, useState } from 'react';
 import {
   ActionSheetIOS,
   ActivityIndicator,
@@ -29,29 +30,41 @@ import {
   useDeleteMealMutation,
   useMealsQuery,
 } from '@/features/meals/api';
+import { addDays, formatDateKo, isToday, todayKst } from '@/features/meals/dateUtils';
 import type { MealResponse } from '@/features/meals/mealSchema';
-
-function todayDateString(): string {
-  // YYYY-MM-DD — 한국 시간(UTC+9) 기준 오늘. 클라이언트 로컬 타임존이 KST라면 toISO
-  // 직접 사용 가능; 사용자 디바이스 타임존을 신뢰 (architecture line 478 정합).
-  const now = new Date();
-  const yyyy = String(now.getFullYear()).padStart(4, '0');
-  const mm = String(now.getMonth() + 1).padStart(2, '0');
-  const dd = String(now.getDate()).padStart(2, '0');
-  return `${yyyy}-${mm}-${dd}`;
-}
+import { useOnlineStatus } from '@/lib/use-online-status';
 
 export default function MealsListScreen() {
-  const today = todayDateString();
+  const [selectedDate, setSelectedDate] = useState<string>(() => todayKst());
   const { data, isPending, isError, refetch, isRefetching } = useMealsQuery({
-    from_date: today,
-    to_date: today,
+    from_date: selectedDate,
+    to_date: selectedDate,
   });
   const deleteMutation = useDeleteMealMutation();
   const queryClient = useQueryClient();
+  const { isOnline, isInternetReachable } = useOnlineStatus();
+  const isOffline = !isOnline || isInternetReachable === false;
+  const today = isToday(selectedDate);
 
   const handleAddPress = useCallback(() => {
     const target = '/(tabs)/meals/input' as Parameters<typeof router.push>[0];
+    router.push(target);
+  }, []);
+
+  const handlePrevDay = useCallback(() => {
+    setSelectedDate((prev) => addDays(prev, -1));
+  }, []);
+
+  const handleNextDay = useCallback(() => {
+    setSelectedDate((prev) => addDays(prev, 1));
+  }, []);
+
+  const handleGoToday = useCallback(() => {
+    setSelectedDate(todayKst());
+  }, []);
+
+  const handleCardPress = useCallback((meal: MealResponse) => {
+    const target = `/(tabs)/meals/${meal.id}` as Parameters<typeof router.push>[0];
     router.push(target);
   }, []);
 
@@ -111,6 +124,11 @@ export default function MealsListScreen() {
 
   const handleActionPress = useCallback(
     (meal: MealResponse) => {
+      // 오프라인 상태에서는 수정/삭제 미제공 — Story 8 polish에서 disabled visual.
+      if (isOffline) {
+        Alert.alert('오프라인', '온라인 시 가능합니다.');
+        return;
+      }
       if (Platform.OS === 'ios') {
         ActionSheetIOS.showActionSheetWithOptions(
           {
@@ -136,27 +154,74 @@ export default function MealsListScreen() {
         );
       }
     },
-    [handleEdit, handleDelete],
+    [handleEdit, handleDelete, isOffline],
   );
+
+  const headerTitle = today ? '오늘 식단' : `${formatDateKo(selectedDate)} 식단`;
 
   return (
     <View style={styles.container}>
       <Stack.Screen
         options={{
-          title: '오늘 식단',
-          headerRight: () => (
+          title: headerTitle,
+          headerLeft: () => (
             <Pressable
-              onPress={handleAddPress}
+              onPress={handlePrevDay}
               accessibilityRole="button"
-              accessibilityLabel="식단 입력"
+              accessibilityLabel="전 일자"
               hitSlop={12}
               style={styles.headerButton}
             >
-              <Text style={styles.headerButtonText}>＋</Text>
+              <Text style={styles.headerArrowText}>{'<'}</Text>
             </Pressable>
+          ),
+          headerRight: () => (
+            <View style={styles.headerRightRow}>
+              <Pressable
+                onPress={handleNextDay}
+                accessibilityRole="button"
+                accessibilityLabel="다음 일자"
+                hitSlop={12}
+                style={styles.headerButton}
+              >
+                <Text style={styles.headerArrowText}>{'>'}</Text>
+              </Pressable>
+              {!today ? (
+                <Pressable
+                  onPress={handleGoToday}
+                  accessibilityRole="button"
+                  accessibilityLabel="오늘로 이동"
+                  hitSlop={12}
+                  style={styles.todayButton}
+                >
+                  <Text style={styles.todayButtonText}>오늘로</Text>
+                </Pressable>
+              ) : null}
+              <Pressable
+                onPress={handleAddPress}
+                accessibilityRole="button"
+                accessibilityLabel="식단 입력"
+                hitSlop={12}
+                style={styles.headerButton}
+              >
+                <Text style={styles.headerButtonText}>＋</Text>
+              </Pressable>
+            </View>
           ),
         }}
       />
+
+      {isOffline ? (
+        <View
+          style={styles.offlineBanner}
+          accessibilityLiveRegion="polite"
+          accessibilityLabel="오프라인 — 마지막 7일 기록 표시 중"
+        >
+          <Text style={styles.offlineBannerText}>
+            오프라인 — 마지막 7일 기록 표시 중
+          </Text>
+        </View>
+      ) : null}
 
       {isPending ? (
         <View style={styles.centered}>
@@ -176,22 +241,34 @@ export default function MealsListScreen() {
         </View>
       ) : data && data.meals.length === 0 ? (
         <View style={styles.centered}>
-          <Text style={styles.emptyText}>오늘 기록 없음 — 첫 식단을 입력하세요</Text>
-          <Pressable
-            style={styles.ctaButton}
-            onPress={handleAddPress}
-            accessibilityRole="button"
-            accessibilityLabel="식단 입력"
-          >
-            <Text style={styles.ctaButtonText}>식단 입력</Text>
-          </Pressable>
+          {today ? (
+            <>
+              <Text style={styles.emptyText}>
+                오늘 기록 없음 — 첫 식단을 입력하세요
+              </Text>
+              <Pressable
+                style={styles.ctaButton}
+                onPress={handleAddPress}
+                accessibilityRole="button"
+                accessibilityLabel="식단 입력"
+              >
+                <Text style={styles.ctaButtonText}>식단 입력</Text>
+              </Pressable>
+            </>
+          ) : (
+            <Text style={styles.emptyText}>{`${formatDateKo(selectedDate)} 기록 없음`}</Text>
+          )}
         </View>
       ) : (
         <FlatList
           data={data?.meals ?? []}
           keyExtractor={(item) => item.id}
           renderItem={({ item }) => (
-            <MealCard meal={item} onActionPress={handleActionPress} />
+            <MealCard
+              meal={item}
+              onCardPress={handleCardPress}
+              onActionPress={handleActionPress}
+            />
           )}
           contentContainerStyle={styles.listContent}
           refreshing={isRefetching}
@@ -220,6 +297,7 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     flexShrink: 1,
     flexWrap: 'wrap',
+    lineHeight: 22,
   },
   errorTitle: {
     fontSize: 16,
@@ -227,6 +305,7 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     flexShrink: 1,
     flexWrap: 'wrap',
+    lineHeight: 22,
   },
   retryButton: {
     paddingHorizontal: 20,
@@ -256,9 +335,48 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 4,
   },
+  headerArrowText: {
+    fontSize: 22,
+    color: '#1a73e8',
+    fontWeight: '600',
+    lineHeight: 26,
+  },
   headerButtonText: {
     fontSize: 28,
     color: '#1a73e8',
     fontWeight: '600',
+    lineHeight: 32,
+  },
+  headerRightRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  todayButton: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+    backgroundColor: '#e8f0fe',
+  },
+  todayButtonText: {
+    color: '#1a73e8',
+    fontWeight: '600',
+    fontSize: 13,
+    lineHeight: 16,
+  },
+  offlineBanner: {
+    backgroundColor: '#fff3cd',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#ffe69c',
+  },
+  offlineBannerText: {
+    color: '#664d03',
+    fontSize: 13,
+    fontWeight: '500',
+    flexShrink: 1,
+    flexWrap: 'wrap',
+    lineHeight: 18,
   },
 });
