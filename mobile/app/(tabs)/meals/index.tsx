@@ -45,6 +45,7 @@ import { useAuth, authFetch } from '@/lib/auth';
 import {
   flushQueue,
   removeQueueItem,
+  resetAttempts,
   useOfflineQueue,
   type OfflineQueueItem,
 } from '@/lib/offline-queue';
@@ -103,9 +104,23 @@ export default function MealsListScreen() {
         void queryClient.invalidateQueries({ queryKey: ['meals'] });
       }
       if (result.failed_permanent_count > 0) {
+        // CR P11 — AC7 literal: 거부된 항목의 raw_text 발췌(20자) 포함 — 사용자가 어떤
+        // 항목이 거부됐는지 식별 가능. 항목이 여러 건이면 첫 발췌 + *외 N건* 표기.
+        const [firstExcerpt, ...rest] = result.failed_permanent_excerpts;
+        const moreCount = rest.length;
+        const previewLine = firstExcerpt
+          ? `· "${firstExcerpt}${moreCount > 0 ? `" 외 ${moreCount}건` : '"'}\n`
+          : '';
         Alert.alert(
           '식단을 동기화할 수 없어요',
-          '입력 오류로 일부 식단이 거부되어 폐기되었습니다. 다시 입력해주세요.',
+          `${previewLine}입력 오류로 일부 식단이 거부되어 폐기되었습니다. 다시 입력해주세요.`,
+        );
+      }
+      // CR P15 — stuck(`attempts >= MAX`) 항목은 silent jam 회피 — manual retry 안내 Alert.
+      if (result.stuck_count > 0) {
+        Alert.alert(
+          '동기화 재시도 한도 도달',
+          `${result.stuck_count}건이 3회 재시도에 실패했어요. 큐 항목의 *다시 시도*를 눌러 재시도할 수 있습니다.`,
         );
       }
     } catch {
@@ -125,7 +140,7 @@ export default function MealsListScreen() {
   }, [isOnline, queueSize, triggerFlush]);
 
   const handleQueueRetry = useCallback(
-    (_clientId: string) => {
+    (clientId: string) => {
       if (!isOnline) {
         Alert.alert(
           '오프라인 상태',
@@ -133,9 +148,14 @@ export default function MealsListScreen() {
         );
         return;
       }
-      void triggerFlush();
+      // CR P16 — D4 literal: manual retry 시 attempts=0 reset (DF46 closed). stuck
+      // (`attempts >= MAX`) 항목도 다시 송신 가능. 단일 항목 retry는 해당 client_id만 reset.
+      void (async () => {
+        if (userId) await resetAttempts(userId, clientId);
+        void triggerFlush();
+      })();
     },
-    [isOnline, triggerFlush],
+    [isOnline, triggerFlush, userId],
   );
 
   const handleQueueDiscard = useCallback(

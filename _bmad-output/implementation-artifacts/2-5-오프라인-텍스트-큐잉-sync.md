@@ -1,6 +1,6 @@
 # Story 2.5: 오프라인 텍스트 큐잉 + 온라인 자동 sync
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -633,3 +633,53 @@ claude-opus-4-7[1m] (Amelia / Senior Software Engineer)
 |------|--------|------|
 | 2026-04-30 | Amelia (claude-opus-4-7[1m]) | Story 2.5 ready-for-dev — 오프라인 텍스트 큐잉(AsyncStorage FIFO + per-user namespace + mutex + 지수 backoff 1s/2s/4s 3회) + 백엔드 Idempotency-Key 헤더 처리(`meals.idempotency_key` 컬럼 + partial UNIQUE index + 200 idempotent replay + race-free SELECT-INSERT-CATCH 패턴 — W46 흡수) + `useCreateMealMutation` Idempotency-Key 자동 첨부(expo-crypto randomUUID) + `(tabs)/meals/input.tsx` 텍스트 큐잉 분기 + 사진/PATCH 오프라인 차단 + `(tabs)/meals/index.tsx` 동기화 대기 배지 + optimistic 큐 카드 + `useOnlineStatus` 자동 flush 트리거 + 4xx 영구 실패 + 100건 hard cap baseline 컨텍스트 작성. Status: backlog → ready-for-dev. |
 | 2026-04-30 | Amelia (claude-opus-4-7[1m]) | Story 2.5 DS 완료 — 백엔드(alembic 0009 + Meal ORM + MealError 2종 + race-free helper + 라우터 Idempotency 흐름 + pytest 244 통과 83% coverage) + 모바일(offline-queue.ts 신규 + useCreateMealMutation 헤더 자동 첨부 + input.tsx 오프라인 분기 + 사진/PATCH 차단 + index.tsx 배지 + 큐 카드 + 자동 flush) + OpenAPI 재생성(200/400/409 노출) + README/deferred-work 갱신. W46 closed (Story 2.1 deferred 흡수). 신규 deferred 11건(DF43-DF53). Status: in-progress → review. |
+| 2026-04-30 | Amelia (claude-opus-4-7[1m]) | Story 2.5 CR 완료 — 3 layer adversarial review(Blind/Edge/Auditor) + 66 raw → 43 unique. 3 decision-needed 해결(DN1 카드 액션 단일 노출 + DN2 P16 승격 DF46 closed + DN3 `summary` 유지 스펙 정정) + 16 patches 적용(P1~P16): 백엔드(P3 IntegrityError 인덱스명 한정 + P4 race [200,201] 단일 + P12 Idempotency-Key trim/empty None) / offline-queue.ts(P1 per-userId mutex + P2 R-M-W 직렬화 + P6 401abort/429transient/400-422 영구 + P8 3회 send cap + P9 UUID v4 검증 + P10 빈 userId 가드 + P13 last_error 마스킹 + P14 item shape 검증 + P15 stuck_count + P16 resetAttempts 헬퍼) / input.tsx(P5 PATCH offline ref guard + P7 ate_at +09:00 KST) / index.tsx(P11 4xx Alert raw_text 발췌 + P15 stuck Alert + P16 manual retry reset). 15 deferred 등재(DF54-DF68 + DF69 ActionSheet). 백엔드 pytest 244 + ruff/format/mypy clean + 모바일 tsc/lint clean. Status: review → done. |
+
+### Review Findings
+
+> **CR (2026-04-30, claude-opus-4-7[1m])** — 3 layer adversarial review (Blind Hunter / Edge Case Hunter / Acceptance Auditor). 66 raw findings → 43 unique post-dedupe. **3 decision-needed (resolved) / 16 patch / 15 defer / 10 dismissed**.
+
+**Decision-needed (3) — resolved:**
+
+- [x] [Review][Decision] **DN1 — AC6 ActionSheet on badge tap missing → 카드 액션 단일 노출로 스펙 정정** — AC6 line 108 mandates tap-badge → 작은 popover/ActionSheet. 현 구현은 동일 액션을 카드별 버튼(`OfflineMealCard.tsx:1804-1820`)으로 노출. **결정**: ActionSheet 신규 구현은 카드 버튼과 redundant pattern (memory `feedback_out_criteria_must_be_redundant_or_antipattern.md` 정합) — UIUX 가시 기본기능(retry/폐기/raw_text/시간)이 카드에 모두 노출되므로 영업 demo 충실도 충족. AC6 line 108은 *"카드 액션으로 대체"*로 스펙 정정 — Story 8 polish에서 ActionSheet 도입 재평가(DF69).
+- [x] [Review][Decision] **DN2 — D4 manual retry attempts reset → 즉시 수정 (P16 승격)** — D4 baseline은 "manual retry 시 attempts reset 채택" 그러나 현 구현 reset 미적용 → attempts ≥ cap 항목은 manual retry no-op. **결정**: user-visible UIUX 가시 기본기능 실패(*"다시 시도"* 눌렀는데 무동작은 demo killer). P16으로 승격 — DF46는 closed 표기 후 strikethrough.
+- [x] [Review][Decision] **DN3 — `OfflineMealCard accessibilityRole="summary"` vs AC6 "button" → `"summary"` 유지 (스펙 정정)** — 카드 root는 onPress 부재(non-interactive container). `"summary"`가 VoiceOver에 정확(inner Pressable만 `"button"`). AC6 line 153 *"button"* 명시는 스펙 작성 시 root vs inner 혼동으로 판단 — *"카드 root `summary`, inner 버튼 `button`"* 으로 스펙 정정.
+
+**Patch (15):**
+
+- [x] [Review][Patch] **P1 — `flushing` mutex per-userId Map화** [`mobile/lib/offline-queue.ts:flushQueue`] — 현 module-level `let flushing` 단일 promise. 사용자 A flush 중 B로 전환 시 B가 A의 promise/result를 받아 cross-user storage write 위험.
+- [x] [Review][Patch] **P2 — AsyncStorage R-M-W 직렬화** [`mobile/lib/offline-queue.ts: _readQueue/_writeQueue 호출자`] — `enqueueMealCreate`/`_persistItemUpdate`/`_removeItemSilent`/`removeQueueItem` 동시 호출 시 last-write-wins로 enqueue 항목 유실. 단일 mutex로 직렬화 또는 atomic merge.
+- [x] [Review][Patch] **P3 — `IntegrityError` catch를 partial UNIQUE index 위반에만 한정** [`api/app/api/v1/meals.py:_create_meal_idempotent_or_replay`] — FK/CHECK 위반도 잡혀 잘못된 replay SELECT 진입. `e.orig` 메시지에 `idx_meals_user_id_idempotency_key_unique` 포함 여부 확인 후 분기.
+- [x] [Review][Patch] **P4 — race 테스트 assertion 강화** [`api/tests/test_meals_router.py:1394`] — 현 `[200, 201] or [200, 200]` 허용. `[200, 200]`은 INSERT 미발생 의미라 잘못된 구현(둘 다 SELECT만)도 통과. `statuses == [200, 201]` 단일 outcome + 201 row 확인.
+- [x] [Review][Patch] **P5 — PATCH-mode 오프라인 useEffect ref guard** [`mobile/app/(tabs)/meals/input.tsx:1698-1713`] — `isPatchMode && !isOnline` 매 render마다 Alert + `router.back()` 호출 — Alert 스택 + back 과다 pop. `useRef<boolean>` 1회 fire guard.
+- [x] [Review][Patch] **P6 — 영구 실패 4xx를 400/422로 한정** [`mobile/lib/offline-queue.ts:_flushOnce`] — 현 `400 ≤ status < 500` 전체가 영구 drop. 401(`authFetch` redirect 도달 X 가정 위반 시), 429(rate limit) 항목 영구 손실. 401: flush abort, 429: transient(잔존 + backoff), 400/422만 영구 drop.
+- [x] [Review][Patch] **P7 — `ate_at` `+09:00` KST format** [`mobile/app/(tabs)/meals/input.tsx:1761`] — 현 `new Date().toISOString()`은 `Z`(UTC). AC3 line 56 + D3 line 328은 `+09:00` TZ-aware 명시. Story 2.4 D1 KST pin 패턴 정합.
+- [x] [Review][Patch] **P8 — backoff 재시도 횟수 3회로 확정** [`mobile/lib/offline-queue.ts:2378`] — 현 `BACKOFF_BASE_MS.length === 4` → 4 sends. AC3 line 71 "attempts >= 3 retry 미수행" + AC11 smoke #4 "0→1→2→3 + 3회 재시도 실패". 가드를 `>= 3`으로 또는 BASE_MS 3개로 정렬.
+- [x] [Review][Patch] **P9 — `client_id` UUID v4 클라이언트 검증** [`mobile/lib/offline-queue.ts:enqueueMealCreate` or `input.tsx`] — 일부 RN/expo-crypto 빌드가 비-v4 반환 시 모든 flush가 400 → 영구 drop(silent 데이터 손실). 백엔드와 동일 regex로 enqueue 전 검증.
+- [x] [Review][Patch] **P10 — 빈/누락 `userId` 가드** [`mobile/lib/offline-queue.ts` enqueue/flush 진입점] — `userId === ''` 시 storage key가 `bn:offline-queue:meal:`로 rogue namespace 생성. 토큰 갱신 중 transient null 케이스. 진입점에서 throw/no-op.
+- [x] [Review][Patch] **P11 — 4xx Alert에 raw_text 발췌(20자) 포함** [`mobile/app/(tabs)/meals/index.tsx:1502-1505`] — AC7 line 126 *"... 짜장면 ..."* 처음 20자 명시. 현 Alert 텍스트만, 어떤 항목이 거부됐는지 미식별. `FlushResult.failed_permanent_excerpts: string[]` 필드 추가 → Alert에 첫 항목 발췌 노출.
+- [x] [Review][Patch] **P12 — 빈/공백 `Idempotency-Key` 헤더 처리** [`api/app/api/v1/meals.py:_validate_idempotency_key`] — 현 `None` 체크만 — 빈 문자열/공백 패딩은 regex 위반으로 400. `key = key.strip(); if not key: return None`로 *"미송신과 동등"* 처리.
+- [x] [Review][Patch] **P13 — `last_error` 영속 시 raw_text 마스킹** [`mobile/lib/offline-queue.ts:_extractErrorMessage` + `_persistItemUpdate`] — Pydantic ValidationError detail에 raw_text 조각 echo 가능. NFR-S5 raw_text 마스킹 위반 — 영속/UI 노출 전 길이 cap + 위험 substring 마스킹.
+- [x] [Review][Patch] **P14 — JSON parse 후 item shape 검증** [`mobile/lib/offline-queue.ts:_readQueue`] — 현 `JSON.parse` 실패만 silent reset. parse 성공이지만 item에 `client_id`/`raw_text` 누락 시 POST가 `undefined` 송신 → 400 → 영구 drop. parse 후 schema 가드 추가.
+- [x] [Review][Patch] **P15 — stuck 항목(attempts ≥ cap) UI 신호** [`mobile/lib/offline-queue.ts:FlushResult` + `index.tsx`] — 현 4xx만 사용자 안내, attempts cap 도달은 silent jam. `stuck_count` 필드 + manual retry 안내 Alert.
+- [x] [Review][Patch] **P16 — manual retry 시 `attempts` reset (D4 literal, DN2 결정)** [`mobile/lib/offline-queue.ts:resetAttempts(userId, client_id)` 신규 + `index.tsx:triggerFlush`] — D4 baseline mandate. attempts ≥ cap 항목이 manual retry로 재시도 가능하도록 reset 헬퍼 신규 + `triggerFlush`에서 모든 큐 항목 attempts=0으로 reset 후 `flushQueue` 호출. DF46 closed.
+
+**Defer (15) — `deferred-work.md`에 DF54-DF68로 등재:**
+
+- [x] [Review][Defer] DF54 — `_flushOnce` iteration cap (defensive)
+- [x] [Review][Defer] DF55 — race-fallback `MealIdempotencyKeyRaceResolutionError` 신규 (현 `BalanceNoteError` 일반 500)
+- [x] [Review][Defer] DF56 — `triggerFlush` UI 상태를 module mutex와 동기화
+- [x] [Review][Defer] DF57 — 큐 배지 `accessibilityLiveRegion="polite"` 재공지 노이즈
+- [x] [Review][Defer] DF58 — `expo-crypto.randomUUID()` 예외 fallback
+- [x] [Review][Defer] DF59 — 컴포넌트 unmount 시 in-flight flush AbortController
+- [x] [Review][Defer] DF60 — `isInternetReachable` vs `isOnline` 분기 강화
+- [x] [Review][Defer] DF61 — `subscribeQueue` 알림 → `getQueueSnapshot` async 폭주 coalesce
+- [x] [Review][Defer] DF62 — `enqueued_at` 미래 timestamp 음수 diff 가드
+- [x] [Review][Defer] DF63 — flush 도중 unmount → `setIsFlushing` mounted ref guard
+- [x] [Review][Defer] DF64 — `_create_meal_idempotent_or_replay` `values: dict` 타입 강화
+- [x] [Review][Defer] DF65 — `AsyncStorage.setItem` quota 에러 명시 사용자 안내
+- [x] [Review][Defer] DF66 — 다중 `Idempotency-Key` 헤더 처리(프록시 coalescing 가드)
+- [x] [Review][Defer] DF67 — `db.rollback()` 후 `db.commit()` 향후 pre-INSERT write 추가 시 의도 단언
+- [x] [Review][Defer] DF68 — `OfflineQueueItem.attempts` JSDoc 의미(0-based vs post-send count) 정렬
+
+**Dismissed (10):** sprint-status 중간 상태 skip(현 review 정합 — 전이 ephemeral) / queueSize 0→N 자동 flush gap(enqueue는 오프라인만 — 발생 X) / `randomUUID` dual import(같은 라이브러리·소스) / 1xx·3xx 응답(REST contract 외) / response body 재소비(`_extractErrorMessage` 1회 호출) / `flushQueue` 동기 throw(코드 경로 부재) / `values` dict 로깅 leak(logger가 dict 미참조) / alembic downgrade populated row 손실(AC1 명시 결정) / `ocrConfirmed=true` + `parsedItems=[]` 빈 array 차단(`ocrConfirmed` 게이트가 length-independent) / `attempts` 0-based code/doc 중복(P15+DF68 흡수).

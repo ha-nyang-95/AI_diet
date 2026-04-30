@@ -120,17 +120,27 @@ _IDEMPOTENCY_KEY_PATTERN: Final[str] = (
 _IDEMPOTENCY_KEY_REGEX: Final[re.Pattern[str]] = re.compile(_IDEMPOTENCY_KEY_PATTERN)
 _IDEMPOTENCY_KEY_LENGTH: Final[int] = 36
 
+# CR P3 — partial UNIQUE 위반 catch를 인덱스 이름으로 한정 (FK/CHECK 위반 등 비-멱등
+# IntegrityError를 잘못된 replay path로 진입시키지 않기 위함). DB-side index 이름은
+# 마이그레이션 0009와 동기 — 인덱스 rename 시 이 상수도 갱신 필요.
+_IDEMPOTENCY_INDEX_NAME: Final[str] = "idx_meals_user_id_idempotency_key_unique"
 
-def _validate_idempotency_key(key: str | None) -> None:
-    """``Idempotency-Key`` 헤더 형식 검증 (Story 2.5).
 
-    None은 통과(헤더 미송신 케이스 — 기존 baseline 정합). 형식 위반은 즉시
+def _validate_idempotency_key(key: str | None) -> str | None:
+    """``Idempotency-Key`` 헤더 형식 검증 + 정규화 (Story 2.5, CR P12).
+
+    None / 빈 문자열 / 공백 패딩은 *"미송신과 동등"*으로 처리(``None`` 반환 — 기존
+    baseline 정합 + 정상 흐름). 비공백 패딩 후 형식 위반만 즉시
     ``MealIdempotencyKeyInvalidError(400)`` raise. UUID v4 regex + 길이 36 강제.
     """
     if key is None:
-        return
-    if len(key) != _IDEMPOTENCY_KEY_LENGTH or not _IDEMPOTENCY_KEY_REGEX.match(key):
+        return None
+    stripped = key.strip()
+    if not stripped:
+        return None
+    if len(stripped) != _IDEMPOTENCY_KEY_LENGTH or not _IDEMPOTENCY_KEY_REGEX.match(stripped):
         raise MealIdempotencyKeyInvalidError("Idempotency-Key must be a valid UUID v4 (RFC 4122)")
+    return stripped
 
 
 def _format_parsed_items_to_raw_text(items: list[ParsedMealItem]) -> str:
@@ -509,7 +519,12 @@ async def _create_meal_idempotent_or_replay(
     try:
         result = await db.execute(insert(Meal).values(**insert_values).returning(Meal))
         return result.scalar_one(), False
-    except IntegrityError:
+    except IntegrityError as exc:
+        # CR P3 — partial UNIQUE 제약 위반만 replay path로 진입. FK/CHECK 등 비-멱등
+        # IntegrityError는 그대로 raise(라우터/글로벌 핸들러가 처리). 인덱스 이름 매칭은
+        # asyncpg/SQLAlchemy 모두 ``str(e.orig)``에 노출 — 이름 변경 시 상수 동기 필수.
+        if _IDEMPOTENCY_INDEX_NAME not in str(exc.orig):
+            raise
         await db.rollback()
         # 재 SELECT — deleted_at 무관 (soft-deleted row 충돌 분기 위해 필터 X).
         replay = (
@@ -565,8 +580,9 @@ async def create_meal(
     그대로 ``201 Created``. ``Idempotency-Key``는 *키 == 한 번* 시맨틱 — 같은 키 +
     다른 ``raw_text``는 첫 응답을 그대로 replay (body diff 무시 — Stripe/Toss 표준 정합).
     """
-    # Story 2.5 — Idempotency-Key 형식 검증 (UUID v4 + 길이 36).
-    _validate_idempotency_key(idempotency_key)
+    # Story 2.5 — Idempotency-Key 형식 검증 + 정규화 (UUID v4 + 길이 36).
+    # CR P12 — 빈/공백 헤더는 *"미송신과 동등"*으로 처리(None 반환). 비공백 패딩은 trim 후 검증.
+    idempotency_key = _validate_idempotency_key(idempotency_key)
 
     # Story 2.2 — image_key ownership 검증 (Pydantic 통과 후 router-inline) +
     # P21 R2 head_object HEAD-check (D1 결정 — orphan/미PUT 키 attach 차단).

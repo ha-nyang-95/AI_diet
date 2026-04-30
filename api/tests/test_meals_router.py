@@ -1491,9 +1491,12 @@ async def test_post_meal_with_idempotency_key_race_simulated_two_inserts_same_ke
         client.post("/v1/meals", json=_valid_meal_payload(), headers=headers),
     )
     statuses = sorted([first.status_code, second.status_code])
-    # 두 응답 status는 {201, 200} 또는 {200, 200}(둘 다 1차 SELECT hit) 또는 {201, 201}
-    # (둘 다 race winner — 이론 불가, partial UNIQUE가 차단). 정상 분기는 {201, 200}.
-    assert statuses == [200, 201] or statuses == [200, 200]
+    # CR P4 — race-loser는 IntegrityError → replay SELECT 200, race-winner는 INSERT 201.
+    # 두 응답 모두 200(둘 다 SELECT-only)이면 INSERT 미발생 — 잘못된 구현이라 거부.
+    # 단일 정상 outcome: 정확히 1건 201 + 1건 200.
+    assert statuses == [200, 201], (
+        f"race must produce exactly one INSERT (201) + one replay (200), got {statuses}"
+    )
     assert first.json()["id"] == second.json()["id"]
 
     session_maker: async_sessionmaker[AsyncSession] = app.state.session_maker

@@ -61,6 +61,7 @@ import type {
   MealUpdateRequest,
   ParsedMealItem,
 } from '@/features/meals/mealSchema';
+import { nowKstIso } from '@/features/meals/dateUtils';
 import { formatParsedItemsToRawText } from '@/features/meals/parsedItemsFormat';
 import { useAuth } from '@/lib/auth';
 import {
@@ -141,22 +142,30 @@ export default function MealInputScreen() {
   const isPatchCacheMiss = isPatchMode && !editingMeal;
 
   // Story 2.5 — PATCH 모드 진입 시 오프라인이면 즉시 차단(편집 자체는 *온라인 필수*).
-  // 본 스토리 baseline은 *진입 차단*만 — PATCH 큐잉은 Story 8 polish (DF27).
+  // 본 스토리 baseline은 *진입 차단*만 — PATCH 큐잉은 Story 8 polish (DF43).
+  // CR P5 — ref guard로 *진입당 1회*만 fire (이전 구현은 매 render 시 Alert 스택 + back 과다 pop).
+  const patchOfflineGuardFiredRef = useRef(false);
   useEffect(() => {
-    if (isPatchMode && !isPatchCacheMiss && !isOnline) {
-      Alert.alert(
-        '오프라인 상태',
-        '오프라인에서는 식단 수정/삭제가 불가합니다. 온라인 시 다시 시도해주세요.',
-        [
-          {
-            text: '확인',
-            onPress: () => {
-              router.back();
-            },
-          },
-        ],
-      );
+    if (!isPatchMode || isPatchCacheMiss) return;
+    if (isOnline) {
+      // 온라인 복귀 시 다시 가드 reset(같은 화면에서 토글 케이스).
+      patchOfflineGuardFiredRef.current = false;
+      return;
     }
+    if (patchOfflineGuardFiredRef.current) return;
+    patchOfflineGuardFiredRef.current = true;
+    Alert.alert(
+      '오프라인 상태',
+      '오프라인에서는 식단 수정/삭제가 불가합니다. 온라인 시 다시 시도해주세요.',
+      [
+        {
+          text: '확인',
+          onPress: () => {
+            router.back();
+          },
+        },
+      ],
+    );
   }, [isPatchMode, isPatchCacheMiss, isOnline]);
 
   // Story 2.2 — 사진 첨부 state.
@@ -491,7 +500,8 @@ export default function MealInputScreen() {
           await enqueueMealCreate(user.id, {
             client_id: randomUUID(),
             raw_text: trimmedRawText,
-            ate_at: new Date().toISOString(),
+            // CR P7 — D3 정합: KST `+09:00` offset 명시 (`toISOString()` 사용 시 `Z` UTC).
+            ate_at: nowKstIso(),
             parsed_items: null,
           });
           Alert.alert(
