@@ -6,13 +6,26 @@
  *
  * ``isInternetReachable``은 일부 플랫폼에서 ``null``일 수 있음(미초기화 상태) — 호출 측이
  * ``false`` 명시적 체크로 사용.
+ *
+ * CR P6 — 콜드 부팅 시점 false positive online 차단 — `NetInfo.fetch()` 1회 동기화 후
+ * `addEventListener`로 후속 변경 구독. 첫 이벤트 전(수백 ms ~ 수 초) "비행기 모드"가
+ * "온라인"으로 표시되는 회귀 차단.
  */
-import NetInfo from '@react-native-community/netinfo';
+import NetInfo, { type NetInfoState } from '@react-native-community/netinfo';
 import { useEffect, useState } from 'react';
 
 export interface OnlineStatus {
   isOnline: boolean;
   isInternetReachable: boolean | null;
+}
+
+function _stateToStatus(state: NetInfoState): OnlineStatus {
+  // `isConnected`/`isInternetReachable` 초기 `null`은 *unknown* — 첫 fetch 결과 도착 전
+  // 깜빡임 차단을 위해 unknown은 online으로 가정 (`!== false`). 명시적 false만 offline.
+  return {
+    isOnline: state.isConnected !== false,
+    isInternetReachable: state.isInternetReachable,
+  };
 }
 
 export function useOnlineStatus(): OnlineStatus {
@@ -22,13 +35,18 @@ export function useOnlineStatus(): OnlineStatus {
   });
 
   useEffect(() => {
-    const unsubscribe = NetInfo.addEventListener((state) => {
-      setStatus({
-        isOnline: state.isConnected === true,
-        isInternetReachable: state.isInternetReachable,
-      });
+    let isCancelled = false;
+    // CR P6 — 콜드 부팅 시점 동기 fetch로 초기 상태 sync (이벤트 emit 전 false positive 차단).
+    void NetInfo.fetch().then((state) => {
+      if (!isCancelled) setStatus(_stateToStatus(state));
     });
-    return unsubscribe;
+    const unsubscribe = NetInfo.addEventListener((state) => {
+      setStatus(_stateToStatus(state));
+    });
+    return () => {
+      isCancelled = true;
+      unsubscribe();
+    };
   }, []);
 
   return status;

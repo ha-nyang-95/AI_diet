@@ -10,7 +10,7 @@
  * - 시간순 ASC 정렬은 백엔드 ORDER BY 분기(D2) — 클라이언트 정렬 0.
  */
 import { Stack, router } from 'expo-router';
-import { useCallback, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import {
   ActionSheetIOS,
   ActivityIndicator,
@@ -30,16 +30,38 @@ import {
   useDeleteMealMutation,
   useMealsQuery,
 } from '@/features/meals/api';
-import { addDays, formatDateKo, isToday, todayKst } from '@/features/meals/dateUtils';
+import {
+  addDays,
+  formatDateKo,
+  isToday,
+  isoToKstDate,
+  todayKst,
+} from '@/features/meals/dateUtils';
 import type { MealResponse } from '@/features/meals/mealSchema';
 import { useOnlineStatus } from '@/lib/use-online-status';
 
 export default function MealsListScreen() {
   const [selectedDate, setSelectedDate] = useState<string>(() => todayKst());
+  // CR P11 — 7일 윈도우 fetch + client-side filter (D1 옵션 b 채택). queryKey 통일
+  // (`[meal_id].tsx`와 캐시 공유) → 오프라인 prev/next 시 7일 모두 cache hit (NFR-R4
+  // 일자 무관 보장). 백엔드 ASC 정렬 + selectedDate별 filter는 시간순 ASC 그대로 유지
+  // (AC4 정합). 한 번 fetch로 여러 일자 navigation 무비용.
+  const sevenDaysAgo = useMemo(() => addDays(todayKst(), -7), []);
+  const todayDate = useMemo(() => todayKst(), []);
   const { data, isPending, isError, refetch, isRefetching } = useMealsQuery({
-    from_date: selectedDate,
-    to_date: selectedDate,
+    from_date: sevenDaysAgo,
+    to_date: todayDate,
   });
+  const filteredMeals = useMemo(
+    () =>
+      (data?.meals ?? []).filter(
+        (m) => isoToKstDate(m.ate_at) === selectedDate,
+      ),
+    [data?.meals, selectedDate],
+  );
+  // P4 — 다음 일자 버튼 disable 분기 (selectedDate >= 내일).
+  const tomorrowDate = useMemo(() => addDays(todayDate, 1), [todayDate]);
+  const isNextDisabled = selectedDate >= tomorrowDate;
   const deleteMutation = useDeleteMealMutation();
   const queryClient = useQueryClient();
   const { isOnline, isInternetReachable } = useOnlineStatus();
@@ -179,12 +201,24 @@ export default function MealsListScreen() {
             <View style={styles.headerRightRow}>
               <Pressable
                 onPress={handleNextDay}
+                disabled={isNextDisabled}
                 accessibilityRole="button"
                 accessibilityLabel="다음 일자"
+                accessibilityState={{ disabled: isNextDisabled }}
                 hitSlop={12}
-                style={styles.headerButton}
+                style={[
+                  styles.headerButton,
+                  isNextDisabled ? styles.headerButtonDisabled : null,
+                ]}
               >
-                <Text style={styles.headerArrowText}>{'>'}</Text>
+                <Text
+                  style={[
+                    styles.headerArrowText,
+                    isNextDisabled ? styles.headerArrowTextDisabled : null,
+                  ]}
+                >
+                  {'>'}
+                </Text>
               </Pressable>
               {!today ? (
                 <Pressable
@@ -239,7 +273,7 @@ export default function MealsListScreen() {
             <Text style={styles.retryButtonText}>다시 시도</Text>
           </Pressable>
         </View>
-      ) : data && data.meals.length === 0 ? (
+      ) : filteredMeals.length === 0 ? (
         <View style={styles.centered}>
           {today ? (
             <>
@@ -261,7 +295,7 @@ export default function MealsListScreen() {
         </View>
       ) : (
         <FlatList
-          data={data?.meals ?? []}
+          data={filteredMeals}
           keyExtractor={(item) => item.id}
           renderItem={({ item }) => (
             <MealCard
@@ -335,11 +369,17 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 4,
   },
+  headerButtonDisabled: {
+    opacity: 0.4,
+  },
   headerArrowText: {
     fontSize: 22,
     color: '#1a73e8',
     fontWeight: '600',
     lineHeight: 26,
+  },
+  headerArrowTextDisabled: {
+    color: '#999',
   },
   headerButtonText: {
     fontSize: 28,

@@ -78,9 +78,68 @@ def test_meal_analysis_summary_validates_label_literal() -> None:
     with pytest.raises(ValidationError):
         MealAnalysisSummary.model_validate(payload)
 
-    # 5단계 라벨은 모두 통과 — 정상 케이스 회귀 차단.
-    for valid_label in ("allergen_violation", "low", "moderate", "good", "excellent"):
+    # 5단계 라벨은 모두 통과 — 정상 케이스 회귀 차단. CR P3 — band-appropriate score
+    # 매핑(allergen_violation=0, low 0-39, moderate 40-59, good 60-79, excellent 80-100).
+    for valid_label, valid_score in (
+        ("allergen_violation", 0),
+        ("low", 30),
+        ("moderate", 50),
+        ("good", 72),
+        ("excellent", 95),
+    ):
         payload = _valid_summary_payload()
+        payload["fit_score"] = valid_score
         payload["fit_score_label"] = valid_label
         instance = MealAnalysisSummary.model_validate(payload)
         assert instance.fit_score_label == valid_label
+        assert instance.fit_score == valid_score
+
+
+def test_meal_analysis_summary_validates_feedback_summary_length() -> None:
+    """CR P10 — ``feedback_summary`` 1-120자 범위 회귀 차단 (Pydantic invariant)."""
+    payload = _valid_summary_payload()
+    payload["feedback_summary"] = ""
+    with pytest.raises(ValidationError):
+        MealAnalysisSummary.model_validate(payload)
+
+    payload = _valid_summary_payload()
+    payload["feedback_summary"] = "x" * 121
+    with pytest.raises(ValidationError):
+        MealAnalysisSummary.model_validate(payload)
+
+    # 정확히 120자 경계는 통과.
+    payload = _valid_summary_payload()
+    payload["feedback_summary"] = "x" * 120
+    instance = MealAnalysisSummary.model_validate(payload)
+    assert len(instance.feedback_summary) == 120
+
+
+def test_meal_analysis_summary_rejects_score_label_mismatch() -> None:
+    """CR P3 — fit_score와 fit_score_label 정합성 cross-field validator 회귀 차단."""
+    # allergen_violation은 fit_score == 0 강제 (FR22).
+    payload = _valid_summary_payload()
+    payload["fit_score"] = 30
+    payload["fit_score_label"] = "allergen_violation"
+    with pytest.raises(ValidationError):
+        MealAnalysisSummary.model_validate(payload)
+
+    # low band(0-39) 외 score 거부.
+    payload = _valid_summary_payload()
+    payload["fit_score"] = 50
+    payload["fit_score_label"] = "low"
+    with pytest.raises(ValidationError):
+        MealAnalysisSummary.model_validate(payload)
+
+    # excellent band(80-100) 외 score 거부.
+    payload = _valid_summary_payload()
+    payload["fit_score"] = 50
+    payload["fit_score_label"] = "excellent"
+    with pytest.raises(ValidationError):
+        MealAnalysisSummary.model_validate(payload)
+
+    # 정상 매핑은 통과.
+    payload = _valid_summary_payload()
+    payload["fit_score"] = 0
+    payload["fit_score_label"] = "allergen_violation"
+    instance = MealAnalysisSummary.model_validate(payload)
+    assert instance.fit_score == 0

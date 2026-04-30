@@ -1,5 +1,5 @@
 # generated: 2026-04-27
-# last_updated: 2026-04-30 (Story 2.4 review — Amelia DS 완료. 일별 식단 기록 화면 + 7일 로컬 캐시 + KST 필터(W50 해소, D1) + MealCard polish(DF15 해소) + [meal_id] placeholder. 230 백엔드 테스트 통과 + 모바일/웹 tsc/lint clean.)
+# last_updated: 2026-04-30 (Story 2.4 done — CR 11 patches 적용 완료: KST overflow 가드(P22) + gcTime 7d + MealAnalysisSummary score-label 정합 validator + 다음 일자 disable(AC4) + actionButton race 가드 + useOnlineStatus 초기 fetch + [meal_id] 삭제 disabled UI + confidence guard + 7일 윈도우 client filter(D1 옵션 b) + 회귀 테스트 2종. 백엔드 232 passed(coverage 83.54%) + 모바일 tsc/lint clean.)
 # project: AI_diet
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-27
-last_updated: 2026-04-30  # Story 2.4 review — Amelia DS 완료. 일별 식단 기록 화면(시간순 + 날짜 picker) + 7일 로컬 캐시(NFR-R4 — TanStack Query AsyncStorage persister + meals queryKey만 persist) + KST 필터(W50 해소, D1 결정 option B) + ORDER BY 분기(D2) + analysis_summary 슬롯(Epic 3 forward-compat — MealAnalysisSummary/MealMacros Pydantic) + MealCard polish(DF15/W49 해소: parsed_items 부제 + KST formatHHmm + 사진 썸네일) + [meal_id].tsx placeholder(Story 3.7 SSE 진입점 prep) 구현 완료. 백엔드 230 테스트 통과(coverage 83.47%) + 모바일/웹 tsc/lint clean. epic-2 in-progress 유지.
+last_updated: 2026-04-30  # Story 2.4 done — DS 완료 후 CR 11 patches 적용. KST overflow 가드(P22 — to_date=9999-12-31 차단) + queryClient gcTime 7d(NFR-R4 persist 정합) + MealAnalysisSummary cross-field validator(score-label 정합) + 다음 일자 disable(AC4 "내일까지 허용") + MealCard actionButton race 가드 + useOnlineStatus 초기 NetInfo.fetch sync + [meal_id] 수정/삭제 disabled UI + parsed_items.confidence nullish guard + index.tsx 7일 윈도우 fetch + client filter(D1 옵션 b — queryKey detail과 통일, NFR-R4 일자 무관 보장) + DF42 closed + 회귀 테스트 2종 신규. 백엔드 232 테스트 통과(coverage 83.54%) + 모바일 tsc/lint clean. epic-2 in-progress 유지.
 project: AI_diet
 project_key: NOKEY
 tracking_system: file-system
@@ -57,7 +57,7 @@ development_status:
   2-1-식단-텍스트-입력-crud: done
   2-2-식단-사진-입력-권한-흐름: done
   2-3-ocr-vision-추출-확인-카드: done
-  2-4-일별-식단-기록-화면: review
+  2-4-일별-식단-기록-화면: done
   2-5-오프라인-텍스트-큐잉-sync: backlog
   epic-2-retrospective: optional
 

@@ -297,6 +297,31 @@ class MealAnalysisSummary(BaseModel):
     macros: MealMacros
     feedback_summary: str = Field(min_length=1, max_length=120)
 
+    @model_validator(mode="after")
+    def _validate_score_label_consistency(self) -> MealAnalysisSummary:
+        # CR P3 — fit_score와 fit_score_label 정합성 검증. 클라이언트 카드 색상은 label,
+        # 숫자는 score 기준이라 NFR-A4 색약 대응(녹색 95에 *"부족"* 표시 등) 의도가
+        # 깨지지 않도록 cross-field invariant 강제. allergen_violation은 FR22 0점 단락.
+        if self.fit_score_label == "allergen_violation":
+            if self.fit_score != 0:
+                raise ValueError(
+                    "fit_score_label='allergen_violation' requires fit_score == 0 (FR22)"
+                )
+            return self
+        bands: dict[str, tuple[int, int]] = {
+            "low": (0, 39),
+            "moderate": (40, 59),
+            "good": (60, 79),
+            "excellent": (80, 100),
+        }
+        lo, hi = bands[self.fit_score_label]
+        if not (lo <= self.fit_score <= hi):
+            raise ValueError(
+                f"fit_score={self.fit_score} does not match label='{self.fit_score_label}'"
+                f" (band {lo}-{hi})"
+            )
+        return self
+
 
 class MealResponse(BaseModel):
     """식단 단건 응답 — 11 필드 (Story 2.1+2.2+2.3 10 + Story 2.4 analysis_summary).
@@ -499,6 +524,10 @@ async def list_meals(
     # P15 — `from_date > to_date` 거부 (typo / swap → silent empty list 회피).
     if from_date is not None and to_date is not None and from_date > to_date:
         raise MealQueryValidationError("from_date must not be after to_date")
+    # P22 — `to_date == date.max` (9999-12-31) 거부. `to_date + timedelta(days=1)` 산술
+    # OverflowError → 500 회귀 차단. Pydantic `date` Query는 9999-12-31까지 허용.
+    if to_date is not None and to_date >= date.max:
+        raise MealQueryValidationError("to_date out of range")
 
     stmt = select(Meal).where(Meal.user_id == user.id, Meal.deleted_at.is_(None))
     # Story 2.4 (W50 해소, D1) — KST 자정 boundary로 명시 변환. asyncpg는 tz-aware

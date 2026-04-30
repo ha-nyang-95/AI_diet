@@ -251,11 +251,16 @@ export default function MealDetailScreen() {
       {meal.parsed_items && meal.parsed_items.length > 0 ? (
         <View style={styles.detailBlock}>
           <Text style={styles.sectionTitle}>인식 결과</Text>
-          {meal.parsed_items.map((item, idx) => (
-            <Text style={styles.bodyText} key={`${item.name}-${idx}`}>
-              {`${item.name} · ${item.quantity || '-'} · ${(item.confidence * 100).toFixed(0)}%`}
-            </Text>
-          ))}
+          {meal.parsed_items.map((item, idx) => {
+            // CR P8 — confidence가 null/undefined 시 NaN% 회귀 차단. 백엔드 contract는
+            // float이지만 OpenAPI 클라이언트 타입 / 캐시 corruption에 대한 방어 layer.
+            const confidencePct = (((item.confidence ?? 0) * 100) | 0).toString();
+            return (
+              <Text style={styles.bodyText} key={`${item.name}-${idx}`}>
+                {`${item.name} · ${item.quantity || '-'} · ${confidencePct}%`}
+              </Text>
+            );
+          })}
         </View>
       ) : null}
 
@@ -304,19 +309,35 @@ export default function MealDetailScreen() {
       <View style={styles.actionRow}>
         <Pressable
           onPress={handleEdit}
+          disabled={deleteMutation.isPending}
           accessibilityRole="button"
           accessibilityLabel="수정"
-          style={[styles.actionButton, styles.actionButtonSecondary]}
+          accessibilityState={{ disabled: deleteMutation.isPending }}
+          style={[
+            styles.actionButton,
+            styles.actionButtonSecondary,
+            deleteMutation.isPending ? styles.actionButtonDisabled : null,
+          ]}
         >
           <Text style={styles.actionButtonText}>수정</Text>
         </Pressable>
+        {/* CR P7 — 삭제 in-flight 시 UI disable로 연타 차단(`handleDeleteConfirmed`의
+            isPending 가드는 이미 있으나 Alert 재표시는 별도 — 버튼 자체 disabled로 UX 정합). */}
         <Pressable
           onPress={handleDelete}
+          disabled={deleteMutation.isPending}
           accessibilityRole="button"
           accessibilityLabel="삭제"
-          style={[styles.actionButton, styles.actionButtonDestructive]}
+          accessibilityState={{ disabled: deleteMutation.isPending }}
+          style={[
+            styles.actionButton,
+            styles.actionButtonDestructive,
+            deleteMutation.isPending ? styles.actionButtonDisabled : null,
+          ]}
         >
-          <Text style={styles.actionButtonDestructiveText}>삭제</Text>
+          <Text style={styles.actionButtonDestructiveText}>
+            {deleteMutation.isPending ? '삭제 중…' : '삭제'}
+          </Text>
         </Pressable>
       </View>
     </ScrollView>
@@ -480,6 +501,9 @@ const styles = StyleSheet.create({
   },
   actionButtonDestructive: {
     backgroundColor: '#d93025',
+  },
+  actionButtonDisabled: {
+    opacity: 0.5,
   },
   actionButtonDestructiveText: {
     color: '#fff',

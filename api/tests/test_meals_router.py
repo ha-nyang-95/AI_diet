@@ -410,8 +410,12 @@ async def test_list_meals_kst_boundary_excludes_next_day_pre_dawn(
         headers=auth_headers(user),
     )
     assert response.status_code == 200
-    raw_texts = [m["raw_text"] for m in response.json()["meals"]]
+    body = response.json()
+    raw_texts = [m["raw_text"] for m in body["meals"]]
     assert "다음날 새벽" not in raw_texts
+    # CR P9 — 필터가 끊겨 0건이어도 `not in` 단언이 통과하는 false positive 차단.
+    # 본 테스트는 *해당 일자 식단을 1건 생성*하지 않았으므로 결과 0건이 정확.
+    assert len(body["meals"]) == 0
 
 
 async def test_list_meals_from_date_only_kst_lower_bound(

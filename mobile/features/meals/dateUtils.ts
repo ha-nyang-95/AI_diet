@@ -57,3 +57,13 @@ export function formatDateKo(date: string): string {
 export function isToday(date: string): boolean {
   return date === todayKst();
 }
+
+/**
+ * CR P11 — `meal.ate_at`(ISO 8601 with offset) → KST 자정 boundary 기준 `YYYY-MM-DD`.
+ *
+ * 7일 윈도우 fetch + selectedDate별 client-side filter에 사용. 백엔드 wire는 항상
+ * `+09:00`/`Z` suffix 가정 — naive 입력은 디바이스 로컬 TZ로 해석되니 contract 신뢰.
+ */
+export function isoToKstDate(isoString: string): string {
+  return _enCAFormatter.format(new Date(isoString));
+}

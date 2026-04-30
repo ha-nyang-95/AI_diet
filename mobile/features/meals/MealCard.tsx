@@ -16,6 +16,7 @@
  * NFR-A4 색약 대응 — 색상 + 숫자 + 텍스트 라벨 3중 표시.
  */
 import { Image } from 'expo-image';
+import { useRef } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { formatParsedItemsToInlineLabel } from './parsedItemsFormat';
@@ -79,10 +80,20 @@ export function MealCard({ meal, onCardPress, onActionPress }: MealCardProps) {
     ? `, 적합도 ${summary.fit_score} ${FIT_SCORE_LABELS_KO[summary.fit_score_label]}`
     : ', 적합도 분석 대기';
 
+  // CR P5 — actionButton 탭 시 카드 onPress race 차단(Android 일부 디바이스에서 nested
+  // Pressable의 press 이벤트 둘 다 fire 가능 → ActionSheet + `[meal_id]` push 동시
+  // 트리거). actionButton onPressIn에서 flag set → 카드 onPress가 같은 제스처에 fire
+  // 시 abort. flag는 onPressOut에서 reset (cross-platform 호환 — 일부 케이스에서
+  // onPress가 발사 안 되는 long-press 분기 cover).
+  const suppressCardPressRef = useRef(false);
+
   return (
     <Pressable
       style={styles.card}
-      onPress={() => onCardPress(meal)}
+      onPress={() => {
+        if (suppressCardPressRef.current) return;
+        onCardPress(meal);
+      }}
       onLongPress={() => onActionPress(meal)}
       accessibilityRole="button"
       accessibilityLabel={`식단 카드: ${a11yPreview} ${time}${a11yScorePart}`}
@@ -111,6 +122,16 @@ export function MealCard({ meal, onCardPress, onActionPress }: MealCardProps) {
             </View>
           )}
           <Pressable
+            onPressIn={() => {
+              suppressCardPressRef.current = true;
+            }}
+            onPressOut={() => {
+              // Reset on next tick — 같은 제스처의 카드 onPress가 race로 발사된 후 reset
+              // 보장 (Android nested Pressable race window).
+              setTimeout(() => {
+                suppressCardPressRef.current = false;
+              }, 0);
+            }}
             onPress={() => onActionPress(meal)}
             hitSlop={12}
             accessibilityRole="button"
