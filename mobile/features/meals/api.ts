@@ -1,18 +1,24 @@
 /**
- * Story 2.1 + 2.2 — `/v1/meals` + `/v1/meals/images` TanStack Query hooks.
+ * Story 2.1 + 2.2 + 2.3 — `/v1/meals` + `/v1/meals/images` TanStack Query hooks.
  *
- * - `useMealsQuery`            — `GET /v1/meals?from_date=&to_date=&limit=`
- * - `useCreateMealMutation`    — `POST /v1/meals`
- * - `useUpdateMealMutation`    — `PATCH /v1/meals/{meal_id}`
- * - `useDeleteMealMutation`    — `DELETE /v1/meals/{meal_id}`
- * - `useImagePresignMutation`  — `POST /v1/meals/images/presign` (Story 2.2)
- * - `uploadImageToR2`          — `presign + R2 PUT 2-step` async helper (Story 2.2)
+ * - `useMealsQuery`              — `GET /v1/meals?from_date=&to_date=&limit=`
+ * - `useCreateMealMutation`      — `POST /v1/meals`
+ * - `useUpdateMealMutation`      — `PATCH /v1/meals/{meal_id}`
+ * - `useDeleteMealMutation`      — `DELETE /v1/meals/{meal_id}`
+ * - `useImagePresignMutation`    — `POST /v1/meals/images/presign` (Story 2.2)
+ * - `uploadImageToR2`            — `presign + R2 PUT 2-step` async helper (Story 2.2)
+ * - `useParseMealImageMutation`  — `POST /v1/meals/images/parse` (Story 2.3)
+ * - `parseMealImage`             — async helper (Story 2.3)
  *
  * 모든 mutation은 성공 시 `['meals']` 무효화 — list 자동 refetch. optimistic update
  * 회피 (yagni — 실패 시 rollback 복잡, baseline은 단순; Story 8 polish 시점 도입).
  *
  * `MealSubmitError` 패턴은 Story 1.5 `ProfileSubmitError`와 1:1 정합 — typed status +
  * code + detail. `MealImageUploadError`는 R2 PUT 실패(network / timeout) 분기.
+ *
+ * Story 2.3 parse mutation은 read-only 분석 호출(meal 상태 변경 X) — `invalidateQueries`
+ * 미적용. timeout은 백엔드 30초 hard cap에 위임 (모바일 별도 AbortController 도입은
+ * Story 2.2 업로드 timeout과 *역할 분리* — 업로드는 사용자 stuck 차단, parse는 백엔드 신뢰).
  */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
@@ -20,6 +26,8 @@ import { authFetch } from '@/lib/auth';
 
 import type {
   MealCreateRequest,
+  MealImageParseRequest,
+  MealImageParseResponse,
   MealImagePresignRequest,
   MealImagePresignResponse,
   MealListResponse,
@@ -278,5 +286,51 @@ export function useDeleteMealMutation() {
 export function useImagePresignMutation() {
   return useMutation({
     mutationFn: requestPresignedUpload,
+  });
+}
+
+// --- Story 2.3 — Vision OCR parse ---
+
+/**
+ * Story 2.3 — `POST /v1/meals/images/parse` 단일 호출 helper.
+ *
+ * 부모 컴포넌트가 R2 업로드 성공 후 `image_key`로 호출 → `parsed_items` + `low_confidence`
+ * 수신. 결과는 `OCRConfirmCard`로 forward + 사용자 확인 후 `MealCreateRequest.parsed_items`
+ * 첨부.
+ *
+ * 에러 분기:
+ * - 401 — `authFetch`가 자동 처리.
+ * - 401/403/400 → `MealSubmitError` throw — 부모가 처리(`consent.basic.missing` 등).
+ * - 503 (`meals.image.ocr_unavailable` / `meals.image.r2_unconfigured` /
+ *   `meals.image.ocr_image_url_missing`) → `MealSubmitError(503)` throw — 부모가
+ *   "사진 인식 일시 장애 — 텍스트로 다시 입력해주세요" Alert (NFR-I3 graceful degradation).
+ * - 502 (`meals.image.ocr_payload_invalid`) → 동일 alert + Sentry 자동 capture (Story 8).
+ *
+ * timeout: 백엔드 30초 hard cap에 위임 — 모바일은 별도 AbortController 미도입.
+ */
+export async function parseMealImage(image_key: string): Promise<MealImageParseResponse> {
+  const body: MealImageParseRequest = { image_key };
+  const response = await authFetch('/v1/meals/images/parse', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    const problem = await _parseProblem(response);
+    throw new MealSubmitError(response.status, problem.code, problem.detail);
+  }
+  return (await response.json()) as MealImageParseResponse;
+}
+
+/**
+ * Story 2.3 — `POST /v1/meals/images/parse` mutation hook.
+ *
+ * `useMutation`을 활용한 ergonomic wrapper — `isPending` 표시(`isParsing`)를 부모가
+ * spinner UI로 활용. parse는 *read-only 분석*이라 `invalidateQueries` 미적용 (meal
+ * 상태 변경 X).
+ */
+export function useParseMealImageMutation() {
+  return useMutation({
+    mutationFn: parseMealImage,
   });
 }

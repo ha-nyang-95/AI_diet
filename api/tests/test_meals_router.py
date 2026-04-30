@@ -62,8 +62,13 @@ async def _create_meal_for(
     ate_at: datetime | None = None,
     deleted_at: datetime | None = None,
     image_key: str | None = None,
+    parsed_items: list[dict[str, object]] | None = None,
 ) -> Meal:
-    """test DB에 meals row 직접 INSERT — API 통과 없이 fixture-style 생성."""
+    """test DB에 meals row 직접 INSERT — API 통과 없이 fixture-style 생성.
+
+    Story 2.3: ``parsed_items`` 옵션 인자 추가 (default None) — 회귀 차단 + Story 2.3
+    parsed_items 흐름 fixture 지원.
+    """
     session_maker: async_sessionmaker[AsyncSession] = app.state.session_maker
     async with session_maker() as session:
         meal = Meal(
@@ -72,6 +77,7 @@ async def _create_meal_for(
             **({"ate_at": ate_at} if ate_at is not None else {}),
             deleted_at=deleted_at,
             image_key=image_key,
+            parsed_items=parsed_items,
         )
         session.add(meal)
         await session.commit()
@@ -106,7 +112,7 @@ async def test_post_meal_creates_returns_201(
     )
     assert response.status_code == 201, response.text
     body = response.json()
-    # Story 2.2 — 9 필드 (Story 2.1 7 + image_key + image_url).
+    # Story 2.3 — 10 필드 (Story 2.2 9 + parsed_items).
     assert set(body.keys()) == {
         "id",
         "user_id",
@@ -117,14 +123,16 @@ async def test_post_meal_creates_returns_201(
         "deleted_at",
         "image_key",
         "image_url",
+        "parsed_items",
     }
     assert body["raw_text"] == "삼겹살 1인분, 김치찌개, 소주 2잔"
     assert body["user_id"] == str(user.id)
     assert body["deleted_at"] is None
     assert body["ate_at"] is not None  # server_default(now()) fallback
-    # 텍스트-only 입력 — image_key/image_url는 None.
+    # 텍스트-only 입력 — image_key/image_url/parsed_items는 None.
     assert body["image_key"] is None
     assert body["image_url"] is None
+    assert body["parsed_items"] is None
 
     # DB row 직접 검증.
     session_maker: async_sessionmaker[AsyncSession] = app.state.session_maker
@@ -954,3 +962,161 @@ async def test_post_meal_unuploaded_image_key_returns_400(
     )
     assert response.status_code == 400, response.text
     assert response.json()["code"] == "meals.image.not_uploaded"
+
+
+# --- Story 2.3 parsed_items 흐름 (AC4 / AC11) -----------------------------------
+
+
+def _parsed_items_payload() -> list[dict[str, object]]:
+    """전형적인 OCR 결과 — 두 항목, 모두 high confidence."""
+    return [
+        {"name": "짜장면", "quantity": "1인분", "confidence": 0.92},
+        {"name": "군만두", "quantity": "4개", "confidence": 0.88},
+    ]
+
+
+async def test_post_meal_with_parsed_items_creates_with_text_overwrite(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+    _r2_configured: None,
+) -> None:
+    """클라이언트가 raw_text + image_key + parsed_items 동시 송신 — raw_text 우선."""
+    user = await user_factory()
+    await consent_factory(user)
+    image_key = _image_key_for(user)
+    parsed_items = _parsed_items_payload()
+
+    response = await client.post(
+        "/v1/meals",
+        json={
+            "raw_text": "짜장면 1인분, 군만두 4개",
+            "image_key": image_key,
+            "parsed_items": parsed_items,
+        },
+        headers=auth_headers(user),
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["raw_text"] == "짜장면 1인분, 군만두 4개"
+    assert body["parsed_items"] == parsed_items
+    assert body["image_key"] == image_key
+
+
+async def test_post_meal_with_image_key_and_parsed_items_no_raw_text_uses_server_format(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+    _r2_configured: None,
+) -> None:
+    """DF2 자연 해소 — raw_text 미송신 + parsed_items 송신 시 서버 fallback 변환.
+
+    ``(사진 입력)`` placeholder 진입 차단 + 클라이언트-서버 변환 룰 단일화.
+    """
+    user = await user_factory()
+    await consent_factory(user)
+    image_key = _image_key_for(user)
+    parsed_items = _parsed_items_payload()
+
+    response = await client.post(
+        "/v1/meals",
+        json={
+            "image_key": image_key,
+            "parsed_items": parsed_items,
+        },
+        headers=auth_headers(user),
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    # 서버 fallback 변환 — `name quantity` 형식, ", " join.
+    assert body["raw_text"] == "짜장면 1인분, 군만두 4개"
+    # placeholder `(사진 입력)`은 진입하지 않아야 함 (DF2 자연 해소 검증).
+    assert body["raw_text"] != "(사진 입력)"
+    assert body["parsed_items"] == parsed_items
+
+
+async def test_post_meal_parsed_items_only_no_image_key_returns_400(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """parsed_items 단독 + image_key 부재 — 의미 없음 (Pydantic _at_least_one_input)."""
+    user = await user_factory()
+    await consent_factory(user)
+
+    response = await client.post(
+        "/v1/meals",
+        json={"parsed_items": _parsed_items_payload()},
+        headers=auth_headers(user),
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "validation.error"
+
+
+async def test_post_meal_parsed_items_max_length_20_enforced(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+    _r2_configured: None,
+) -> None:
+    """parsed_items 21개 — Pydantic max_length 1차 게이트."""
+    user = await user_factory()
+    await consent_factory(user)
+    image_key = _image_key_for(user)
+    items_21 = [{"name": f"항목{i}", "quantity": "1개", "confidence": 0.9} for i in range(21)]
+
+    response = await client.post(
+        "/v1/meals",
+        json={"image_key": image_key, "parsed_items": items_21},
+        headers=auth_headers(user),
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "validation.error"
+
+
+async def test_patch_meal_can_clear_parsed_items_with_explicit_null(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """PATCH ``parsed_items=null`` — DB ``parsed_items=NULL`` + 응답 ``parsed_items=null``.
+
+    image_key 시맨틱 정합 (D4와 다른 시맨틱 — explicit null = 클리어).
+    """
+    user = await user_factory()
+    await consent_factory(user)
+    parsed_items = _parsed_items_payload()
+    meal = await _create_meal_for(user, parsed_items=parsed_items)
+
+    response = await client.patch(
+        f"/v1/meals/{meal.id}",
+        json={"parsed_items": None},
+        headers=auth_headers(user),
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["parsed_items"] is None
+
+    # DB 직접 검증.
+    session_maker: async_sessionmaker[AsyncSession] = app.state.session_maker
+    async with session_maker() as session:
+        result = await session.execute(select(Meal).where(Meal.id == meal.id))
+        refreshed = result.scalar_one()
+    assert refreshed.parsed_items is None
+
+
+async def test_meal_response_includes_parsed_items_when_set(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """기존 row의 parsed_items가 응답에 list[dict] 그대로 forward (fixture 직접 INSERT)."""
+    user = await user_factory()
+    await consent_factory(user)
+    parsed_items = _parsed_items_payload()
+    await _create_meal_for(user, parsed_items=parsed_items)
+
+    response = await client.get("/v1/meals", headers=auth_headers(user))
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert len(body["meals"]) == 1
+    assert body["meals"][0]["parsed_items"] == parsed_items

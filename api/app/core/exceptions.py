@@ -296,3 +296,37 @@ class MealImageNotUploadedError(MealImageError):
     status: ClassVar[int] = 400
     code: ClassVar[str] = "meals.image.not_uploaded"
     title: ClassVar[str] = "Image key not uploaded to R2"
+
+
+# --- Meal Image OCR 계층 (Story 2.3 — OpenAI Vision 추출 + 사용자 확인 카드) ---
+
+
+class MealOCRUnavailableError(MealImageError):
+    """OCR Vision API 일시 장애 — tenacity retry 후 최종 실패(`openai.APIError` /
+    `openai.RateLimitError` / `httpx.TimeoutException` / `httpx.HTTPError` /
+    `OPENAI_API_KEY` 미설정). 모바일은 graceful degradation Alert로 *"사진 인식
+    일시 장애 — 텍스트로 다시 입력해주세요"* 분기 (NFR-I3 정합)."""
+
+    status: ClassVar[int] = 503
+    code: ClassVar[str] = "meals.image.ocr_unavailable"
+    title: ClassVar[str] = "Image OCR service unavailable"
+
+
+class MealOCRImageUrlMissingError(MealImageError):
+    """`r2_adapter.resolve_public_url(image_key)`가 None — R2 public URL 미설정.
+    `R2NotConfiguredError`(boto3 client 생성)와 *분리* — 본 예외는 *public URL 노출*
+    경로. 모바일 동일 alert, 운영 로그·Sentry에서는 분리(원인 파악 용이)."""
+
+    status: ClassVar[int] = 503
+    code: ClassVar[str] = "meals.image.ocr_image_url_missing"
+    title: ClassVar[str] = "Image public URL not configured (R2)"
+
+
+class MealOCRPayloadInvalidError(MealImageError):
+    """Vision이 structured output 위반(JSON Schema 검증 실패 / Pydantic
+    ValidationError). OpenAI SDK `parse` API는 schema 강제하나 *방어로* — 502 Bad
+    Gateway는 RFC 9110 정합(*upstream invalid response*)."""
+
+    status: ClassVar[int] = 502
+    code: ClassVar[str] = "meals.image.ocr_payload_invalid"
+    title: ClassVar[str] = "Image OCR returned invalid payload"

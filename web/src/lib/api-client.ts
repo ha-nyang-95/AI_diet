@@ -323,6 +323,43 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/meals/images/parse": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Parse Meal Image Endpoint
+         * @description 식단 사진(R2 업로드 완료) → GPT-4o Vision OCR → ``parsed_items`` 응답.
+         *
+         *     HTTP 200 채택 — parse는 *리소스 생성*이 아닌 *idempotent 분석 호출*(stateless —
+         *     DB row 0). 매 호출 새 Vision 호출 + 새 응답(temperature=0.0 강제로 변동성 최소화).
+         *     캐시(`cache:llm:{sha256(image_key)}`)는 Story 8 polish.
+         *
+         *     에러 흐름:
+         *     - 401 — `auth.access_token.invalid` (`current_user`)
+         *     - 403 — `consent.basic.missing` (`require_basic_consents`)
+         *     - 400 — `validation.error` (Pydantic regex) /
+         *       `meals.image.foreign_key_rejected` / `meals.image.not_uploaded`
+         *     - 503 — `meals.image.r2_unconfigured` (R2 환경변수) /
+         *       `meals.image.ocr_image_url_missing` (R2 public URL 없음) /
+         *       `meals.image.ocr_unavailable` (Vision API 장애)
+         *     - 502 — `meals.image.ocr_payload_invalid` (Vision schema 위반)
+         *
+         *     검증 순서: (1) ownership(prefix), (2) R2 head_object HEAD-check (P21), (3)
+         *     Vision 호출. ownership 실패 시 R2 round-trip 회피 (cost + latency).
+         */
+        post: operations["parse_meal_image_endpoint_v1_meals_images_parse_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/healthz": {
         parameters: {
             query?: never;
@@ -571,6 +608,39 @@ export interface components {
             ate_at?: string | null;
             /** Image Key */
             image_key?: string | null;
+            /** Parsed Items */
+            parsed_items?: components["schemas"]["ParsedMealItem"][] | null;
+        };
+        /**
+         * MealImageParseRequest
+         * @description ``POST /v1/meals/images/parse`` body — image_key만 (forward-compat: 향후
+         *     `model` / `language_hint` 등 옵션 추가 시 body schema 확장).
+         *
+         *     `image_key` regex는 Story 2.2 `meals.py:_IMAGE_KEY_PATTERN` 재사용 — wire 단일화.
+         */
+        MealImageParseRequest: {
+            /** Image Key */
+            image_key: string;
+        };
+        /**
+         * MealImageParseResponse
+         * @description 5 필드 — Vision OCR 결과 + 계산된 low_confidence 플래그 + 운영 지표.
+         *
+         *     `low_confidence`는 모바일 forced confirmation UI 분기 입력 (items 빈 배열 또는
+         *     min(confidence) < 0.6). `model`은 운영 가시성(향후 `gpt-4o-mini` 다운그레이드
+         *     검토 시 필드 비교).
+         */
+        MealImageParseResponse: {
+            /** Image Key */
+            image_key: string;
+            /** Parsed Items */
+            parsed_items: components["schemas"]["ParsedMealItem"][];
+            /** Low Confidence */
+            low_confidence: boolean;
+            /** Model */
+            model: string;
+            /** Latency Ms */
+            latency_ms: number;
         };
         /**
          * MealImagePresignRequest
@@ -620,11 +690,12 @@ export interface components {
         };
         /**
          * MealResponse
-         * @description 식단 단건 응답 — 9 필드 (Story 2.1 7 + Story 2.2 image_key + image_url).
+         * @description 식단 단건 응답 — 10 필드 (Story 2.1 7 + 2.2 image_key/image_url + 2.3 parsed_items).
          *
-         *     ``deleted_at`` / ``image_key`` / ``image_url`` NULL 시에도 키 유지 (스키마 안정성).
-         *     ``image_url``은 derived — `image_key` 있으면 `_resolve_public_url(image_key)`,
-         *     없으면 None (`_meal_to_response` helper에서 계산).
+         *     ``deleted_at`` / ``image_key`` / ``image_url`` / ``parsed_items`` NULL 시에도
+         *     키 유지 (스키마 안정성). ``image_url``은 derived — `image_key` 있으면
+         *     `_resolve_public_url(image_key)`, 없으면 None (`_meal_to_response` helper에서
+         *     계산).
          */
         MealResponse: {
             /**
@@ -660,6 +731,8 @@ export interface components {
             image_key: string | null;
             /** Image Url */
             image_url: string | null;
+            /** Parsed Items */
+            parsed_items: components["schemas"]["ParsedMealItem"][] | null;
         };
         /**
          * MealUpdateRequest
@@ -680,6 +753,27 @@ export interface components {
             ate_at?: string | null;
             /** Image Key */
             image_key?: string | null;
+            /** Parsed Items */
+            parsed_items?: components["schemas"]["ParsedMealItem"][] | null;
+        };
+        /**
+         * ParsedMealItem
+         * @description OCR Vision 추출 단일 항목.
+         *
+         *     - ``name``: 한국어 표준 음식명 (예: ``"짜장면"``). 빈 문자열 거부 (Vision 출력
+         *       신뢰 + 사용자 확인 카드 후 편집 가능). max_length 50 — DB jsonb + UI 표시
+         *       합리적 상한.
+         *     - ``quantity``: 추정 양 (예: ``"1인분"`` / ``"4개"`` / ``"300g"``). 빈 quantity
+         *       허용 (*"바나나"* 처럼 양 없는 항목 대응) — ``min_length=0``.
+         *     - ``confidence``: 0.0~1.0 신뢰도 — 임계값 0.6 미만은 모바일 forced confirmation.
+         */
+        ParsedMealItem: {
+            /** Name */
+            name: string;
+            /** Quantity */
+            quantity: string;
+            /** Confidence */
+            confidence: number;
         };
         /** RefreshRequest */
         RefreshRequest: {
@@ -1381,6 +1475,78 @@ export interface operations {
                 };
             };
             /** @description Image upload service unavailable (R2 unconfigured) */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    parse_meal_image_endpoint_v1_meals_images_parse_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                Authorization?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                bn_access?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MealImageParseRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MealImageParseResponse"];
+                };
+            };
+            /** @description Validation error or image not uploaded / foreign key */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Basic consents required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description Image OCR returned invalid payload */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Image OCR or R2 service unavailable */
             503: {
                 headers: {
                     [name: string]: unknown;

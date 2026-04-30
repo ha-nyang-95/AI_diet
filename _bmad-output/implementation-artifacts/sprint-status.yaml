@@ -1,5 +1,5 @@
 # generated: 2026-04-27
-# last_updated: 2026-04-29 (Story 2.2 done — PR #12 머지(squash 9119710). CR 22 patches + 3 deferred + Gemini 1건 수용. 197 백엔드 테스트(82.80% cov), 7/7 CI clean. 다음: Story 2.3 OCR Vision.)
+# last_updated: 2026-04-30 (Story 2.3 review — OCR Vision adapter + parsed_items jsonb + 확인 카드 baseline 구현 완료. DS 종료, CR 대기.)
 # project: AI_diet
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-27
-last_updated: 2026-04-29  # Story 2.2 done — PR #12 머지 후 review → done 갱신 (PR #12 commit에 누락된 status 정정). epic-2 in-progress 유지 (2.3-2.5 backlog).
+last_updated: 2026-04-30  # Story 2.3 review — Amelia DS 완료 (OCR Vision adapter + parsed_items jsonb + 확인 카드 + DF2 자연 해소 + 219 tests passed, coverage 83.67%). epic-2 in-progress 유지. CR 진입 대기.
 project: AI_diet
 project_key: NOKEY
 tracking_system: file-system
@@ -56,7 +56,7 @@ development_status:
   epic-2: in-progress
   2-1-식단-텍스트-입력-crud: done
   2-2-식단-사진-입력-권한-흐름: done
-  2-3-ocr-vision-추출-확인-카드: backlog
+  2-3-ocr-vision-추출-확인-카드: review
   2-4-일별-식단-기록-화면: backlog
   2-5-오프라인-텍스트-큐잉-sync: backlog
   epic-2-retrospective: optional
