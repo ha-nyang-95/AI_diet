@@ -171,8 +171,15 @@ def _read_zip_fallback() -> list[FoodNutritionRaw]:
                         }
                     )
                 )
-            except (ValueError, TypeError):
-                # 부분 실패 graceful — 1행 skip + 진행.
+            except (ValueError, TypeError) as exc:
+                # 부분 실패 graceful — 1행 skip + 진행. 가시화 로그(다른 visibility
+                # 패치 — _extract_items 비-dict skip / _embed_batch 길이 mismatch /
+                # _format_vector_literal non-finite — 정합).
+                logger.warning(
+                    "food_seed.zip_fallback_row_skipped",
+                    row_number=reader.line_num,
+                    error=str(exc),
+                )
                 continue
 
     return items
