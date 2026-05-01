@@ -27,9 +27,12 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
-# YAML frontmatter — 문서 시작 ``---\\n``으로 열고 단독 ``---\\n``으로 닫음. DOTALL flag로
-# 줄바꿈 포함. 첫 매치만 — 본문 안의 ``---`` 분리선과 분리.
-_FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
+# YAML frontmatter — 문서 시작 ``---``으로 열고 단독 ``---``으로 닫음. DOTALL flag로
+# 줄바꿈 포함. 첫 매치만 — 본문 안의 ``---`` 분리선과 분리. CRLF + EOF(no-trailing-newline)
+# 도 허용해 ``app.rag.guidelines.seed._parse_markdown_with_frontmatter``의 line-based
+# 파서와 동일한 케이스를 수용(외부 호출자가 raw 파일을 chunker에 직접 넘길 때 frontmatter
+# 가 chunk text로 leak되지 않도록).
+_FRONTMATTER_RE = re.compile(r"\A---\s*\r?\n(.*?)\r?\n---\s*\r?\n?", re.DOTALL)
 
 # heading split — ## (H2), ### (H3) 단위. H1은 문서 전체 제목으로 별도 처리(``doc_title``
 # frontmatter로 흡수). 깊은 H4-H6은 H3 하위 단락 내 chunking (``_split_text`` 재분할).
@@ -110,6 +113,11 @@ def chunk_markdown(content: str, *, max_chars: int = 1000, overlap: int = 100) -
             )
             chunk_idx += 1
     else:
+        # heading-aware 분기 — 같은 sub_doc 내 multi-chunk가 *서로 다른* char_start를
+        # 갖도록 inner splitter의 sc.char_start를 보존(이전 구현은 모든 sub_chunk가
+        # sub_doc 시작점만 기록 → dataclass docstring `char_end = char_start + len(text)`
+        # 위반 + 인용 위치 추적 불가).
+        scan_offset = 0
         for text_part, header_meta in sub_docs:
             # heading prepend — h2/h3 메타가 있으면 chunk text 앞에 붙여 standalone 인용 가능.
             heading_lines: list[str] = []
@@ -119,21 +127,31 @@ def chunk_markdown(content: str, *, max_chars: int = 1000, overlap: int = 100) -
                     prefix = "## " if level_key == "h2" else "### "
                     heading_lines.append(f"{prefix}{value}")
             heading_prepend = "\n".join(heading_lines)
-            full_text = f"{heading_prepend}\n\n{text_part}" if heading_prepend else text_part
+            if heading_prepend:
+                full_text = f"{heading_prepend}\n\n{text_part}"
+                # heading_prepend + 구분자 "\n\n" 만큼 inner splitter 좌표가 앞으로 밀린다.
+                heading_offset = len(heading_prepend) + 2
+            else:
+                full_text = text_part
+                heading_offset = 0
 
             sub_chunks = _split_text(full_text, max_chars=max_chars, overlap=overlap)
-            # body 내 sub_chunk가 시작하는 위치 (heading-split이 metadata로 일부 분리해
-            # 정확한 offset은 best-effort — body.find(text_part)로 sub_doc 시작점 결정 후
-            # 추가 split offset 합산).
-            sub_doc_start_in_body = body.find(text_part)
+            # 같은 텍스트가 여러 섹션에 등장할 가능성을 대비해 scan_offset 이후부터 검색.
+            sub_doc_start_in_body = body.find(text_part, scan_offset)
             if sub_doc_start_in_body < 0:
-                sub_doc_start_in_body = 0  # heading prepend 변형으로 미일치 가능 — 0으로 fallback.
+                sub_doc_start_in_body = body.find(text_part)
+            if sub_doc_start_in_body < 0:
+                sub_doc_start_in_body = 0  # heading prepend 변형으로 미일치 — fallback.
+            else:
+                scan_offset = sub_doc_start_in_body + len(text_part)
+
             for sc in sub_chunks:
-                # heading prepend 길이만큼 sub_chunk char_start가 앞으로 밀려있음 →
-                # body 좌표로 환산은 best-effort. heading_prepend가 chunk 앞에 prepended
-                # 되어 있으면 sub_doc_start_in_body 그대로, 그렇지 않으면 + sc.char_start.
-                # 실용적으로 chunk가 *원본의 어디쯤*만 알면 충분(인용 위치 추적용 X).
-                char_start = sub_doc_start_in_body + body_shift
+                # sc.char_start는 full_text 좌표(= heading_prepend 포함). body 좌표로
+                # 환산하려면 heading_offset을 빼고, body 내 sub_doc 시작점을 더한 후
+                # frontmatter shift를 가산. heading prepend 영역에 떨어지는 chunk는 음수
+                # 보정 회피를 위해 0으로 클램프.
+                body_relative = max(sc.char_start - heading_offset, 0)
+                char_start = sub_doc_start_in_body + body_relative + body_shift
                 chunks.append(
                     Chunk(
                         text=sc.text,

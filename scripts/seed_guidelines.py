@@ -18,14 +18,11 @@ import sys
 import traceback
 
 import sentry_sdk
-import structlog
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.core.config import settings
 from app.core.exceptions import GuidelineSeedError
 from app.rag.guidelines.seed import GuidelineSeedResult, run_guideline_seed
-
-logger = structlog.get_logger(__name__)
 
 
 async def _run_seeds() -> GuidelineSeedResult:

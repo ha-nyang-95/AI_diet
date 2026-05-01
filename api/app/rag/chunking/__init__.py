@@ -24,10 +24,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Final
 
-import structlog
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-
-logger = structlog.get_logger(__name__)
 
 # 본 모듈 외부에 export되는 chunker 함수들은 markdown.py / pdf.py / html.py 모듈에서
 # re-export. 외주 인수 클라이언트는 ``from app.rag.chunking import chunk_markdown,

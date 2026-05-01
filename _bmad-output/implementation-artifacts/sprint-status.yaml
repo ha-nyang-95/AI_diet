@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-27
-last_updated: 2026-05-01  # Story 3.2 DS 완료 → review. Amelia 구현: alembic 0011 + KnowledgeChunk ORM + chunking 3-format(markdown/pdf/html) + 6 가이드라인 md(KDRIs/KSSO/KDA/MFDS/KDCA) + run_guideline_seed + scripts/seed_guidelines + bootstrap_seed food→guidelines + verify_allergy_22 SOP. pytest 317 passed / 2 skipped / coverage 84.89% / ruff clean / mypy 신규 모듈 clean (Story 1.3 baseline test_consents_deps 11 에러는 회귀 0). 다음: CR.
+last_updated: 2026-05-01  # Story 3.2 CR 완료 → done. Amelia CR triage: PATCH 10 / DEFER 5 / DISMISS 7. 10 patch 적용(markdown char_start 정확화, seed prod fail-fast, count gate 현 run 검증, _FrontmatterSchema 필수 필드 복원, frontmatter regex CRLF/EOF tolerance, allergy ordering invariant, BOM 선처리, empty vector → None, dead structlog 정리). 회귀 0 — pytest 317 passed / 2 skipped / coverage 84.80% / ruff·format clean / mypy 신규 모듈 strict clean. 5 defer → deferred-work.md DF84-DF88. 다음: PR 생성 + master 머지.
 project: AI_diet
 project_key: NOKEY
 tracking_system: file-system
@@ -64,7 +64,7 @@ development_status:
   # Epic 3: AI 영양 분석 (Self-RAG + 인용 피드백)
   epic-3: in-progress
   3-1-음식-영양-rag-시드-pgvector: done
-  3-2-가이드라인-rag-시드-chunking: review
+  3-2-가이드라인-rag-시드-chunking: done
   3-3-langgraph-6노드-self-rag-saver: backlog
   3-4-음식명-정규화-매칭-fallback: backlog
   3-5-fit-score-알고리즘-알레르기-단락: backlog

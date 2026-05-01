@@ -198,6 +198,7 @@ async def test_run_guideline_seed_count_below_threshold_raises(
         "authority_grade: A\n"
         "topic: general\n"
         "applicable_health_goals: []\n"
+        "published_year: 2024\n"
         "doc_title: Tiny test doc\n"
         "---\n\n"
         "## 짧은 단락\n\n짧은 본문 테스트.\n",

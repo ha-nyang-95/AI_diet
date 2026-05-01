@@ -37,7 +37,8 @@ def test_verify_allergy_22_lookup_matches_frontmatter(
     out = capsys.readouterr().out
     assert exit_code == 0
     assert "check 1/3" in out
-    assert "OK (22 items match)" in out
+    assert "OK (22 items match" in out
+    assert "order preserved" in out
     assert "check 2/3" in out
     assert "official_law_attachment" in out
     assert "check 3/3" in out

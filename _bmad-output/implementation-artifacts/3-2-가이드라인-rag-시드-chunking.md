@@ -1,6 +1,6 @@
 # Story 3.2: 가이드라인 RAG 시드 + chunking 모듈
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -674,7 +674,41 @@ claude-opus-4-7[1m] (Amelia, BMad Senior Software Engineer)
 |------|--------|------|
 | 2026-05-01 | Amelia (claude-opus-4-7[1m]) | Story 3.2 ready-for-dev — 가이드라인 RAG 시드(KDRIs/KSSO/KDA/MFDS/KDCA 50+ chunks) + chunking 3-format 재사용 인터페이스(markdown 1차 + pdf/html 외주 인수 토대 — Architecture 결정 1) + `knowledge_chunks` 테이블 + HNSW(`vector_cosine_ops` m=16/ef_construction=64) + GIN(`applicable_health_goals` filtered top-K) + composite btree(`source, authority_grade`) 4 인덱스 + frontmatter Pydantic 검증(_FrontmatterSchema) + dev graceful D9 (`OPENAI_API_KEY` 미설정 → embedding NULL 진행, `RUN_GUIDELINE_SEED_STRICT=1` opt-in) + `data/guidelines/*.md` 6 파일 + `app/rag/chunking/{__init__,markdown,pdf,html}.py` + `app/rag/guidelines/seed.py` + `scripts/seed_guidelines.py` entry + `bootstrap_seed.py` food→guidelines 순차 + `scripts/verify_allergy_22.py` 22종 lookup vs frontmatter 비교 SOP(R8) + `pyproject.toml` `pypdf`/`bs4`/`langchain-text-splitters`/`pyyaml` + mypy.overrides 갱신 + `data/guidelines/README.md` 자료 갱신 SOP + 외주 PDF 시드 추가 3 경로 + `GuidelineSeedError` 3 예외 + alembic 0011 + ORM 신규 + `.env.example` 주석 + `README.md` Quick start 시드 1단락 baseline 컨텍스트 작성. Status: backlog → ready-for-dev. |
 | 2026-05-01 | Amelia (claude-opus-4-7[1m]) | Story 3.2 DS 완료 — 11 Task 모두 통과. alembic 0011 + KnowledgeChunk ORM 신규 + chunking 3-format 모듈 + 6 가이드라인 markdown 파일 + run_guideline_seed + scripts/seed_guidelines + bootstrap_seed food→guidelines 순차 + verify_allergy_22 SOP. pytest 317 passed / 2 skipped(perf) / coverage 84.89%. ruff/format clean / mypy 신규 모듈 strict clean (Story 1.3 baseline test_consents_deps 11 에러는 회귀 0). asyncpg `text[]` Python list native 매핑 패턴 채택(CAST 제거). chunking offset은 heading-aware best-effort(인용 정확도 영향 X — Story 3.6 generate_feedback이 chunk_text + doc_title 사용). Status: in-progress → review. |
+| 2026-05-01 | Amelia (claude-opus-4-7[1m]) | Story 3.2 CR 완료 — 3-layer adversarial review (Blind Hunter / Edge Case Hunter / Acceptance Auditor). raw 52 findings → dedup 22 → triage **PATCH 10 / DEFER 5 / DISMISS 7**. 10 patch 모두 적용: (1) `markdown.py` heading-aware char_start/end 정확화(sub_doc 내 multi-chunk가 `sc.char_start` 보존), (2) `seed.py` `FoodSeedAdapterError` prod fail-fast(D9 정합), (3) count gate를 *현 run inserted+updated*로 정정(table-wide pollution 방지), (4) `_FrontmatterSchema.applicable_health_goals` default 제거(spec 정합 — 필수화), (5) `published_year` default 제거(spec 정합), (6) `_FRONTMATTER_RE` CRLF + EOF tolerance, (7) `verify_allergy_22.py` ordering invariant 검증 추가(`mfds-allergens-22.md` body line 38 명시), (8) `_parse_markdown_with_frontmatter` UTF-8 BOM 선처리, (9) `_format_vector_literal([])` → None 강등(pgvector empty reject), (10) dead `structlog.get_logger` 2개 모듈 제거. 회귀 0건 — pytest 317 passed / 2 skipped / coverage 84.80% / ruff·format clean / mypy 신규 모듈 strict clean. 5 defer는 `deferred-work.md` DF84-DF88 등재. Status: review → done. |
 
 ### Review Findings
 
-(CR 시점에 채움)
+CR 실시: 2026-05-01 — Amelia (claude-opus-4-7[1m]) — 3-layer adversarial review (Blind Hunter / Edge Case Hunter / Acceptance Auditor). 사전 알림 2건은 finding 외 처리: ❶ `tests/test_consents_deps.py` mypy 11건 = Story 1.3 baseline pre-existing (회귀 0, git stash 검증), ❷ AC11 smoke = spec 자체가 *사용자 수동 검증 권장* OUT 명시.
+
+집계: raw 52 findings → dedup 후 22 unique → triage 결과 **PATCH 10 / DEFER 5 / DISMISS 7**.
+
+#### Patch (10)
+
+- [x] [Review][Patch] Markdown chunker char_start collision within heading section [api/app/rag/chunking/markdown.py:128-145] — heading-aware 분기에서 `_split_text` 결과의 `sc.char_start`를 무시하고 sub_doc 시작 offset만 사용 → 같은 섹션의 multi-chunk 모두 동일 `char_start`/`char_end`를 보고. dataclass docstring(`char_end = char_start + len(text)`)과 AC2 contract 위반. fix: `char_start = sub_doc_start_in_body + body_shift + sc.char_start`(heading prepend 길이는 차감) + `char_end = char_start + len(sc.text)`.
+- [x] [Review][Patch] `FoodSeedAdapterError`가 prod/strict에서도 NULL embedding으로 silent 강등 [api/app/rag/guidelines/seed.py:217-225] — `_embed_chunks`의 `except FoodSeedAdapterError` 분기가 환경 무관하게 warning + NULL 반환. D9 *"prod/staging fail-fast"* 위반. fix: `if not _is_graceful_environment(): raise GuidelineSeedAdapterError("guideline seed embed failed") from exc` 분기 추가.
+- [x] [Review][Patch] count gate가 테이블 전체 row를 카운트(현 run 분 X) [api/app/rag/guidelines/seed.py:334-341] — `SELECT count(*) FROM knowledge_chunks`는 prior run의 잔존 row 포함 → 현 run이 1건만 시드해도 게이트 통과 가능. fix: `if (inserted_total + updated_total) < GUIDELINE_SEED_MIN_CHUNKS: raise GuidelineSeedAdapterError(...)` (현 run 분만 검증).
+- [x] [Review][Patch] `_FrontmatterSchema.applicable_health_goals` `default_factory=list`로 optional화 — spec 위반 [api/app/rag/guidelines/seed.py:95-97] — AC3 spec line 99는 `applicable_health_goals: list[Literal[...]]`(default 없음 → 필수)로 명시. 현 코드는 누락 시 `[]` 기본값으로 silent 통과. fix: `Field(default_factory=list)` 제거(필수화) — 현 6 데이터 파일은 모두 명시했으므로 회귀 없음.
+- [x] [Review][Patch] `_FrontmatterSchema.published_year` `default=None`으로 optional화 — spec 위반 [api/app/rag/guidelines/seed.py:98] — AC3 spec line 100은 `published_year: int | None  # ge=1990, le=2100`(default 없음). 현 코드는 누락 시 None 기본값으로 silent 통과. fix: `Field(ge=1990, le=2100)`(default 제거).
+- [x] [Review][Patch] frontmatter 파서 분리(seed line-based vs chunker regex)로 CRLF/no-trailing-newline 케이스 disagreement [api/app/rag/chunking/markdown.py:32 + api/app/rag/guidelines/seed.py:141-175] — `_FRONTMATTER_RE`는 `\n---\s*\n` 종료 fence를 요구(LF + trailing newline 필수)하지만 `_parse_markdown_with_frontmatter`는 line-split 기반으로 더 관대. 외부 호출자가 raw 파일을 chunker에 직접 넘길 때 frontmatter가 chunk_text로 leak 가능. fix: chunker 정규식 `re.compile(r"\A---\s*\r?\n(.*?)\r?\n---\s*\r?\n?", re.DOTALL)`로 CRLF + EOF tolerance 추가.
+- [x] [Review][Patch] `verify_allergy_22.py` set 비교가 ordering invariant 검증 안 함 [scripts/verify_allergy_22.py:105-108] — body line 38은 *"본 22종은 정의 순서를 보존해야 한다"* 명시 + `app/domain/allergens.py` line 27 동일 invariant. 현 `set` 비교는 reordering을 silent accept. fix: set 일치 + length 검증 후 `if list(KOREAN_22_ALLERGENS) != list(fm_allergens): print order drift; return False` 추가.
+- [x] [Review][Patch] UTF-8 BOM이 frontmatter 감지를 우회 [api/app/rag/guidelines/seed.py:149] — Windows 편집기로 저장 시 leading `﻿`로 `content.startswith("---")`가 False → frontmatter 미존재로 처리되어 `_FrontmatterSchema.model_validate({})` 실패 → 모든 BOM 파일 시드 abort + 'frontmatter validation failed'로 원인 마스킹. fix: `if content.startswith("﻿"): content = content[1:]` 선처리(또는 `read_text(encoding="utf-8-sig")`).
+- [x] [Review][Patch] `_format_vector_literal([])`가 `"[]"` 반환 → pgvector reject [api/app/rag/guidelines/seed.py:127-138] — 빈 list가 NaN/Inf 검사 통과 후 `"[]"` literal로 INSERT → Postgres `cannot determine dimension` 에러로 트랜잭션 abort. fix: `if not vector: return None` 우선 분기 추가.
+- [x] [Review][Patch] 미사용 module-level `structlog.get_logger` (dead code) [api/app/rag/chunking/__init__.py:30 + scripts/seed_guidelines.py:28] — 두 모듈 모두 logger 정의 후 호출 0건. fix: 제거(또는 호출 추가).
+
+#### Defer (5)
+
+- [x] [Review][Defer] `pypdf` 6.10.2 vs spec/문서 `>=5.1` major-version drift [api/uv.lock:1630 + api/pyproject.toml:41] — deferred, pre-existing — `>=5.1` constraint는 6.x 허용하므로 lock 자체는 합법. 단 spec/dev-notes는 5.1 동작 기준 — 6.x에서 한국어 PDF 추출 parity 미검증. PR 게이트는 통과 + 시드 경로는 markdown only(pdf chunker는 외주 인수 인터페이스 토대만 — D1)이므로 prod 영향 0. Story 8 polish에서 pyproject `pypdf>=5,<7` 정합 또는 spec 갱신.
+- [x] [Review][Defer] `verify_allergy_22.py` 하드코딩 MFDS CMS IDs 부패 위험 [scripts/verify_allergy_22.py:36-49] — deferred, pre-existing — `flSeq=42533884` / `bbs_no=bbs001` / `seq=31242` 등 ephemeral CMS ID. 식약처 사이트 재구성 시 dead URL. 분기 SOP에서 운영자가 수동으로 fallback URL 검색 가능 + Story 8 polish에서 `last_verified_at` 메타 + 식약처 별표 PDF 자동 다운으로 흡수.
+- [x] [Review][Defer] `bootstrap_seed.main()` 직접 통합 테스트 부재 [api/tests/integration/test_bootstrap_seed.py:278-280] — deferred, pre-existing — `bootstrap_seed.main`은 sync wrapper(`asyncio.run` 내부)이므로 pytest-asyncio 환경에서 직접 호출 시 "running event loop" 충돌. 테스트는 `_run_seeds()`를 직접 await하여 sequencing 검증(test 코멘트로 design rationale 명시). docker compose 통합 smoke가 main 자체 검증(AC11). Story 8 polish에서 sync subprocess test 추가 검토.
+- [x] [Review][Defer] `KnowledgeChunk.updated_at` ORM `onupdate=now()`가 raw-SQL 경로에서 dead [api/app/db/models/knowledge_chunk.py + api/alembic/versions/0011_knowledge_chunks.py] — deferred, pre-existing — 시드는 raw INSERT의 `ON CONFLICT DO UPDATE SET ... updated_at = now()`로 명시 set하므로 실제 운영에서 issue 0. ORM `onupdate`는 ORM session.flush 시점에만 작동 — Story 3.6+에서 ORM update 패턴 도입 시 활성화. Postgres `ON UPDATE` 트리거 추가는 Growth deferred.
+- [x] [Review][Defer] `chunk_pdf` `for page in reader.pages` 루프가 try-block 외부 [api/app/rag/chunking/pdf.py:48] — deferred, low-risk — `PdfReader(...)` 생성자 try block 내부지만 `reader.pages` iteration은 외부. pypdf 6.x는 lazy load이므로 page 접근 시 `PdfReadError` 가능 → 외부로 leak하여 `GuidelineSeedAdapterError` 미래핑. PDF chunker는 MVP 시드 경로 호출 X(D1)이므로 운영 영향 0. 외주 인수 시 자동 PDF 파이프라인 활성화 시점에 catch 범위 확장.
+
+#### Dismiss (7) — 노이즈/검증 실패
+
+- ❌ Blind: PDF fixture가 plain text — VERIFIED `%PDF-1.4` 헤더로 정상 PDF 바이너리. diff 표시는 pypdf text-extraction preview.
+- ❌ Auditor: `RUN_GUIDELINE_SEED_STRICT=` 비주석 vs 주석 — 코드베이스 컨벤션은 `# RUN_*=1`(line 44 `# RUN_FOOD_SEED_STRICT=1` 동일 패턴). spec 예시는 ideal pattern일 뿐 codebase 정합성이 우선.
+- ❌ Auditor: index 4건 대신 3건 검증 — UNIQUE 제약은 `test_knowledge_chunks_unique_constraint`에서 `pg_constraint`로 별 검증, 합계 4건 충족.
+- ❌ Blind: "기타" sentinel 알레르기 — `KOREAN_22_ALLERGENS`(allergens.py:50) + frontmatter `allergens` 양쪽 모두 22번째 항목으로 일치. by-design.
+- ❌ Blind: `chunk_pdf`/`chunk_html`의 Chunk 재구성 비효율 — Chunk 필드 동일 복사로 의미 변경 0. 성능 noise.
+- ❌ Blind: `settings.environment` 빈 문자열 시 graceful 미적용 — `_is_graceful_environment()`는 enumset 멤버십만 검사 → 빈/None은 prod fail-fast로 떨어지는 게 *의도*(미설정 = 안전).
+- ❌ Edge: `MarkdownHeaderTextSplitter` H1 미포함으로 첫 단락 누락 — 6 데이터 파일 모두 `## `로 시작(H1 doc_title은 frontmatter로 흡수 — D8 정합), 실제 누락 0.

@@ -94,8 +94,8 @@ class _FrontmatterSchema(BaseModel):
     topic: Literal["macronutrient", "allergen", "disease_specific", "general"]
     applicable_health_goals: list[
         Literal["weight_loss", "muscle_gain", "maintenance", "diabetes_management"]
-    ] = Field(default_factory=list)
-    published_year: int | None = Field(default=None, ge=1990, le=2100)
+    ]
+    published_year: int | None = Field(ge=1990, le=2100)
     doc_title: str = Field(min_length=5)
     allergens: list[str] | None = None
 
@@ -130,7 +130,7 @@ def _format_vector_literal(vector: list[float] | None) -> str | None:
     NaN/Inf은 pgvector reject — None으로 강등 (검색 시 ``WHERE embedding IS NOT NULL``
     자동 제외).
     """
-    if vector is None:
+    if not vector:
         return None
     if any(not math.isfinite(v) for v in vector):
         logger.warning("guideline_seed.embedding_non_finite", dim=len(vector))
@@ -146,6 +146,10 @@ def _parse_markdown_with_frontmatter(content: str) -> tuple[dict[str, Any], str]
     Raises:
         ``GuidelineSeedValidationError`` — YAML 파싱 실패.
     """
+    # UTF-8 BOM(﻿) 선처리 — Windows 편집기 저장 파일 호환.
+    if content.startswith("﻿"):
+        content = content[1:]
+
     if not content.startswith("---"):
         return {}, content
 
@@ -215,11 +219,17 @@ async def _embed_chunks(
             f"OPENAI_API_KEY not configured (environment={settings.environment})"
         ) from exc
     except FoodSeedAdapterError as exc:
-        # embed_texts 어댑터 transient/영구 실패 — graceful 환경에서도 fail-fast(데이터 보호).
-        # 다만 NULL 시드로 시드 진행 + warning 로 흡수 (D4 graceful — Story 3.1 정합).
+        # embed_texts 어댑터 transient/영구 실패 — D9 정합:
+        #   prod/staging/strict 모드 → fail-fast (데이터 정합 보호).
+        #   dev/ci/test (graceful) → NULL 시드로 진행 + warning (외주 인수 첫 부팅 영업 demo).
+        if not _is_graceful_environment():
+            raise GuidelineSeedAdapterError(
+                f"guideline embedding failed (environment={settings.environment}): {exc}"
+            ) from exc
         logger.warning(
-            "guideline_seed.embed_failed",
+            "guideline_seed.embed_failed_graceful",
             chunks_count=len(chunks),
+            environment=settings.environment,
             error=str(exc),
         )
         return [None] * len(chunks), True
@@ -329,16 +339,20 @@ async def run_guideline_seed(session: AsyncSession) -> GuidelineSeedResult:
             updated=file_updated,
         )
 
+    # 게이트는 *현 run에서 처리한 chunks 합* 기준 — prior run 잔존 row가 게이트를 가짜로
+    # 통과시키지 않도록(테이블 전체 count는 cross-run pollution 위험).
+    run_total = inserted_total + updated_total
+    if run_total < GUIDELINE_SEED_MIN_CHUNKS:
+        raise GuidelineSeedAdapterError(
+            f"knowledge_chunks seed insufficient: run_total={run_total} "
+            f"< {GUIDELINE_SEED_MIN_CHUNKS}"
+        )
+
     await session.commit()
 
     count_result = await session.execute(text("SELECT count(*) AS n FROM knowledge_chunks"))
     count_row = count_result.first()
     total = int(count_row.n) if count_row else 0
-
-    if total < GUIDELINE_SEED_MIN_CHUNKS:
-        raise GuidelineSeedAdapterError(
-            f"knowledge_chunks seed insufficient: count={total} < {GUIDELINE_SEED_MIN_CHUNKS}"
-        )
 
     latency_ms = int((time.monotonic() - start) * 1000)
     logger.info(

@@ -106,9 +106,20 @@ def check_lookup_vs_frontmatter() -> bool:
     fm_set = set(fm_allergens)
 
     if lookup_set == fm_set and len(KOREAN_22_ALLERGENS) == len(fm_allergens) == 22:
+        # 본 22종은 *정의 순서*를 보존해야 한다(`mfds-allergens-22.md` body 명시 +
+        # `app/domain/allergens.py` line 27 invariant). set 비교만으로는 reorder를
+        # 잡지 못하므로 list 순서 일치까지 검증.
+        if list(KOREAN_22_ALLERGENS) != list(fm_allergens):
+            print(
+                "[verify_allergy_22] check 1/3: FAILED — set matches but order drift detected",
+                file=sys.stderr,
+            )
+            print(f"  lookup order: {list(KOREAN_22_ALLERGENS)}", file=sys.stderr)
+            print(f"  frontmatter order: {list(fm_allergens)}", file=sys.stderr)
+            return False
         print(
             f"[verify_allergy_22] check 1/3: lookup vs guideline frontmatter — OK "
-            f"({len(KOREAN_22_ALLERGENS)} items match)"
+            f"({len(KOREAN_22_ALLERGENS)} items match, order preserved)"
         )
         return True
 
