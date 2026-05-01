@@ -34,6 +34,15 @@ dependencies = [
     "boto3>=1.36",
     # --- LLM Vision (Story 2.3 — OpenAI Vision OCR / structured outputs) ---
     "openai>=1.55",
+    # --- Story 3.2 — 가이드라인 RAG 시드 + chunking 3-format 인터페이스 ---
+    # text-splitters는 langchain umbrella의 별 패키지(메인 langchain의 transitive 미보장).
+    "langchain-text-splitters>=0.3",
+    # PDF 텍스트 추출 (BSD-3, AGPL pymupdf 회피 — D1 한글 폰트 한계는 운영자 SOP 흡수).
+    "pypdf>=5.1",
+    # HTML 파싱 (MIT, lxml 별 의존 X — pure Python `html.parser` 사용).
+    "beautifulsoup4>=4.12",
+    # YAML frontmatter 파싱 — langchain transitive일 가능성이지만 명시 등재로 직접 의존성 표기.
+    "pyyaml>=6.0",
 ]
 
 [dependency-groups]
@@ -68,7 +77,7 @@ plugins = ["pydantic.mypy"]
 mypy_path = "."
 
 [[tool.mypy.overrides]]
-module = ["jose.*", "passlib.*", "pgvector.*", "slowapi.*", "apscheduler.*", "google.*", "boto3.*", "botocore.*"]
+module = ["jose.*", "passlib.*", "pgvector.*", "slowapi.*", "apscheduler.*", "google.*", "boto3.*", "botocore.*", "pypdf.*", "bs4.*", "langchain_text_splitters.*", "yaml.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

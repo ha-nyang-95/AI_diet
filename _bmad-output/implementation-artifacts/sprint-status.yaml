@@ -1,5 +1,5 @@
 # generated: 2026-04-27
-# last_updated: 2026-04-30 (Story 3.1 ready-for-dev — Epic 3 진입(epic-3 backlog → in-progress). 식약처 식품영양성분 DB OpenAPI 1차 + 통합 자료집 ZIP 백업 2단 fallback(USDA OUT — D1) + food_nutrition jsonb 표준 키 + vector(1536) HNSW(vector_cosine_ops m=16/ef_construction=64 — D2/D3) + food_aliases 50+건 핵심 변형(짜장면/자장면 등) + 시드 멱등 ON CONFLICT (source,source_id) DO UPDATE(D5) + Docker Compose seed 자동 시드(docker compose up 1-cmd) + app/adapters/mfds_openapi.py + openai_adapter.py embed_texts 확장(SDK singleton 공유 — D7) + app/rag/food/seed.py + aliases_data.py + scripts/seed_food_db.py + bootstrap_seed.py 갱신 + FoodSeedError 3 예외 + alembic 0010 + ORM 2종 baseline. Status: backlog → ready-for-dev.)
+# last_updated: 2026-05-01 (Story 3.2 ready-for-dev — 가이드라인 RAG 시드(KDRIs/KSSO/KDA/MFDS/KDCA 50+ chunks) + chunking 3-format 재사용 인터페이스(markdown 1차 + pdf/html 외주 인수 토대 — Architecture 결정 1 정합) + knowledge_chunks 테이블(chunk_text + Vector(1536) + applicable_health_goals text[] + 메타 7컬럼) + HNSW(vector_cosine_ops m=16/ef_construction=64) + GIN(applicable_health_goals) + composite btree(source, authority_grade) 4 인덱스 + frontmatter Pydantic 검증(_FrontmatterSchema) + dev graceful D9(OPENAI_API_KEY 미설정 → embedding NULL 진행, RUN_GUIDELINE_SEED_STRICT=1 opt-in) + data/guidelines/*.md 6 파일 + app/rag/chunking/{__init__,markdown,pdf,html}.py + app/rag/guidelines/seed.py + scripts/seed_guidelines.py + bootstrap_seed.py food→guidelines 순차 + scripts/verify_allergy_22.py 22종 lookup vs frontmatter 비교 SOP(R8) + pyproject.toml pypdf/bs4/langchain-text-splitters/pyyaml + mypy.overrides 갱신 + GuidelineSeedError 3 예외 + alembic 0011 + ORM 신규 baseline. Status: backlog → ready-for-dev.)
 # project: AI_diet
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-27
-last_updated: 2026-05-01  # Story 3.1 CR 완료 → done. 3-layer 병렬 리뷰(Blind Hunter + Edge Case Hunter + Acceptance Auditor) 12 patch 적용: D6/AC4 per-batch commit + NaN/Inf vector·jsonb 가드 + utf-8-sig BOM + source_id 안정 해시 + 카테고리 NFC·middle-dot 정규화 + zero-match guard + strict/graceful env 대소문자 무시 + AC11 stdout WARN + aliases len(FOOD_ALIASES) gate + 마지막 부분 페이지 break + _extract_items single-dict + _embed_batch 길이 graceful + test_bootstrap_seed_prod_fail_fast + dev_strict_opt_in 2 케이스 신규(AC6 5케이스 완전 커버). defer 9건은 deferred-work.md DF75-DF83 적재. 백엔드 게이트 통과(282 passed / 1 skip / coverage 84.21% / ruff·format clean / mypy 신규 0). epic-2 done 유지.
+last_updated: 2026-05-01  # Story 3.2 CR 완료 → done. Amelia CR triage: PATCH 10 / DEFER 5 / DISMISS 7. 10 patch 적용(markdown char_start 정확화, seed prod fail-fast, count gate 현 run 검증, _FrontmatterSchema 필수 필드 복원, frontmatter regex CRLF/EOF tolerance, allergy ordering invariant, BOM 선처리, empty vector → None, dead structlog 정리). 회귀 0 — pytest 317 passed / 2 skipped / coverage 84.80% / ruff·format clean / mypy 신규 모듈 strict clean. 5 defer → deferred-work.md DF84-DF88. 다음: PR 생성 + master 머지.
 project: AI_diet
 project_key: NOKEY
 tracking_system: file-system
@@ -64,7 +64,7 @@ development_status:
   # Epic 3: AI 영양 분석 (Self-RAG + 인용 피드백)
   epic-3: in-progress
   3-1-음식-영양-rag-시드-pgvector: done
-  3-2-가이드라인-rag-시드-chunking: backlog
+  3-2-가이드라인-rag-시드-chunking: done
   3-3-langgraph-6노드-self-rag-saver: backlog
   3-4-음식명-정규화-매칭-fallback: backlog
   3-5-fit-score-알고리즘-알레르기-단락: backlog

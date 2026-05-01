@@ -424,3 +424,61 @@ class FoodSeedQuotaExceededError(FoodSeedError):
     status: ClassVar[int] = 503
     code: ClassVar[str] = "food_seed.quota_exceeded"
     title: ClassVar[str] = "Food seed API quota exceeded"
+
+
+# --- Guideline Seed 계층 (Story 3.2 — 가이드라인 RAG 시드 + chunking 모듈) ---
+
+
+class GuidelineSeedError(BalanceNoteError):
+    """Epic 3 가이드라인 RAG 시드 도메인 예외 base.
+
+    ``FoodSeedError`` 카탈로그 패턴 정합 — 직접 raise 회피(서브클래스만 사용 권장 —
+    base 직접 raise는 status/code/title default를 leak). Story 3.2는 *시드 시점
+    예외 + chunking 어댑터 예외*만 — FastAPI 라우터에 노출 X (시드 스크립트가 자체
+    catch + 비-zero exit + Sentry capture). RFC 7807 변환은 정의만 — Story 3.6
+    retrieve guideline 노드가 503 raise 시 main.py 핸들러가 자동 변환.
+    """
+
+    status: ClassVar[int] = 503
+    code: ClassVar[str] = "guideline_seed.error"
+    title: ClassVar[str] = "Guideline seed error"
+
+
+class GuidelineSeedSourceUnavailableError(GuidelineSeedError):
+    """``OPENAI_API_KEY`` 미설정 / ``data/guidelines/`` 디렉토리 미존재 / ``.md`` 파일
+    0건 / prod 또는 strict 모드에서 임베딩 graceful 회피 실패.
+
+    fail-fast — 임베딩 키 미설정은 retry 무효 + cost 0 정합. dev/ci/test 분기는
+    시드 모듈이 catch 후 graceful 0건 또는 NULL embedding chunks 시드 진행.
+    """
+
+    status: ClassVar[int] = 503
+    code: ClassVar[str] = "guideline_seed.source_unavailable"
+    title: ClassVar[str] = "Guideline seed source unavailable"
+
+
+class GuidelineSeedAdapterError(GuidelineSeedError):
+    """chunking 실패(PDF parse / HTML parse) / OpenAI embeddings transient 후 retry
+    실패 / chunks count < 40 게이트 실패.
+
+    PDF 깨짐(헤더 invalid / pypdf 추출 실패) 또는 HTML 파싱 실패는 본 예외로 raise →
+    시드 경로에서 catch + 운영자 신호 + 부분 시드 진행 또는 entry point 비-zero exit.
+    """
+
+    status: ClassVar[int] = 503
+    code: ClassVar[str] = "guideline_seed.adapter_error"
+    title: ClassVar[str] = "Guideline seed adapter failure"
+
+
+class GuidelineSeedValidationError(GuidelineSeedError):
+    """``_FrontmatterSchema`` Pydantic 검증 실패 — 잘못된 ``source`` /
+    ``authority_grade`` / ``topic`` enum 값 또는 필수 필드 누락.
+
+    422 — Pydantic ValidationError 정합. 시드 fail-fast (잘못된 메타데이터로 시드
+    진행 시 Story 3.6 generate_feedback이 *(출처: 미상, 미상, NULL)* 패턴 출력 +
+    영업 카드 깨짐).
+    """
+
+    status: ClassVar[int] = 422
+    code: ClassVar[str] = "guideline_seed.validation_failed"
+    title: ClassVar[str] = "Guideline seed frontmatter validation failed"
