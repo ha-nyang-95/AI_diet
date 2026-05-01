@@ -45,13 +45,20 @@ _HEADER_LEVELS: list[tuple[str, str]] = [
 def _strip_frontmatter(content: str) -> tuple[str, int]:
     """frontmatter 제거 + body + body의 원본 내 offset(``shift``) 반환.
 
-    frontmatter 미존재 시 ``(content, 0)``.
+    frontmatter 미존재 시 ``(content, 0)``. UTF-8 BOM(``\\ufeff``)이 선두에 있으면
+    제거하고 ``shift``에 반영해 원본 파일 기준 좌표를 보존(``app.rag.guidelines.seed
+    ._parse_markdown_with_frontmatter``의 BOM 처리와 정합).
     """
+    bom_shift = 0
+    if content.startswith("﻿"):
+        content = content[1:]
+        bom_shift = 1
+
     match = _FRONTMATTER_RE.match(content)
     if match is None:
-        return content, 0
+        return content, bom_shift
     body = content[match.end() :]
-    return body, match.end()
+    return body, match.end() + bom_shift
 
 
 def _heading_aware_split(body: str) -> list[tuple[str, dict[str, str]]]:

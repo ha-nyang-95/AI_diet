@@ -314,9 +314,13 @@ async def run_guideline_seed(session: AsyncSession) -> GuidelineSeedResult:
 
     for md_path in md_files:
         raw = md_path.read_text(encoding="utf-8")
-        meta_dict, body = _parse_markdown_with_frontmatter(raw)
+        meta_dict, _body = _parse_markdown_with_frontmatter(raw)
         meta = _validate_frontmatter(meta_dict, md_path)
-        chunks = chunk_markdown(body)
+        # ``raw``를 그대로 chunker에 전달 — chunker 내부 ``_strip_frontmatter``가 BOM +
+        # frontmatter 제거 후 ``body_shift``로 *원본 파일 기준* char_start를 계산
+        # (``Chunk.char_start`` docstring contract). ``body``를 넘기면 body_shift=0이 되어
+        # body-relative 좌표가 되므로 인용 위치 추적이 어긋난다(Gemini CR HIGH 정합).
+        chunks = chunk_markdown(raw)
         if not chunks:
             logger.warning("guideline_seed.empty_body", file=md_path.name)
             continue
