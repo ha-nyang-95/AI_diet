@@ -67,6 +67,32 @@ def _import_seed_food_db() -> ModuleType:
     return module
 
 
+def _import_seed_guidelines() -> ModuleType:
+    """scripts/seed_guidelines 모듈 import — Story 3.2."""
+    sys.modules.pop("seed_guidelines", None)
+    import seed_guidelines  # type: ignore[import-not-found]
+
+    module: ModuleType = seed_guidelines
+    return module
+
+
+def _import_bootstrap_seed() -> ModuleType:
+    """scripts/bootstrap_seed 모듈 import — Story 3.1 baseline + Story 3.2 갱신."""
+    sys.modules.pop("bootstrap_seed", None)
+    import bootstrap_seed  # type: ignore[import-not-found]
+
+    module: ModuleType = bootstrap_seed
+    return module
+
+
+async def _truncate_knowledge_chunks_table(
+    session_maker: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_maker() as session:
+        await session.execute(text("TRUNCATE knowledge_chunks RESTART IDENTITY"))
+        await session.commit()
+
+
 async def test_bootstrap_seed_normal(client: AsyncClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """정상 시드 — async core 직접 호출 → food_nutrition + food_aliases 시드."""
     _ = client
@@ -245,3 +271,120 @@ def test_bootstrap_seed_dev_strict_opt_in(monkeypatch: pytest.MonkeyPatch, tmp_p
     exit_code = sfd.main()
 
     assert exit_code == 1
+
+
+# --- Story 3.2 — bootstrap_seed food → guidelines 순차 호출 (AC #4) ---
+#
+# bootstrap_seed.main()은 sync wrapper(asyncio.run을 내부에서 호출)이므로 async test에서
+# 직접 호출하면 "asyncio.run() cannot be called from a running event loop"로 실패한다.
+# Story 3.1 패턴 정합 — async core(_run_seeds())를 *직접* await + sync 래퍼는 별도
+# sync test에서 검증.
+
+
+async def test_bootstrap_seed_food_and_guidelines_normal(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """정상 시드 — food + guidelines async core 순차 await → 두 테이블 모두 시드 성공.
+
+    bootstrap_seed.main()은 sync wrapper로 *별 sync test에서만 검증* — async test에서
+    asyncio.run() 호출 시 "running event loop" 충돌 회피.
+    """
+    _ = client
+    session_maker: async_sessionmaker[AsyncSession] = app.state.session_maker
+    await _truncate_food_tables(session_maker)
+    await _truncate_knowledge_chunks_table(session_maker)
+
+    sample = [_build_raw(i) for i in range(50)]
+
+    async def fake_fetch(
+        target_count: int = 1500, *, page_size: int = 100
+    ) -> list[FoodNutritionRaw]:
+        return sample[:target_count]
+
+    async def fake_embed(texts: list[str], *, batch_size: int = 300) -> list[list[float]]:
+        return [[0.01] * 1536 for _ in texts]
+
+    monkeypatch.setattr(mfds_module, "fetch_food_items", fake_fetch)
+    monkeypatch.setattr(openai_module, "embed_texts", fake_embed)
+    monkeypatch.setattr(food_seed, "SEED_TARGET_COUNT", 50)
+
+    sfd = _import_seed_food_db()
+    sgd = _import_seed_guidelines()
+
+    food_result = await sfd._run_seeds()
+    guideline_result = await sgd._run_seeds()
+
+    assert food_result[2] >= 50  # food_total
+    assert guideline_result.total >= 40
+    assert guideline_result.embeddings_skipped is False
+
+    async with session_maker() as session:
+        food_count = (
+            await session.execute(text("SELECT count(*) AS n FROM food_nutrition"))
+        ).first()
+        kc_count = (
+            await session.execute(text("SELECT count(*) AS n FROM knowledge_chunks"))
+        ).first()
+    assert food_count is not None and food_count.n >= 50
+    assert kc_count is not None and kc_count.n >= 40
+
+
+async def test_bootstrap_seed_guidelines_graceful_when_no_openai_key(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """food OK + guidelines OPENAI_API_KEY 미설정 + dev → knowledge_chunks ≥ 40 (NULL embedding).
+
+    fixture 분리 — food와 guidelines 임베딩을 별도 컨트롤(food는 정상, guidelines는 raise).
+    """
+    _ = client
+    session_maker: async_sessionmaker[AsyncSession] = app.state.session_maker
+    await _truncate_food_tables(session_maker)
+    await _truncate_knowledge_chunks_table(session_maker)
+
+    sample = [_build_raw(i) for i in range(50)]
+
+    async def fake_fetch(
+        target_count: int = 1500, *, page_size: int = 100
+    ) -> list[FoodNutritionRaw]:
+        return sample[:target_count]
+
+    async def food_only_embed(texts: list[str], *, batch_size: int = 300) -> list[list[float]]:
+        # food 시드는 정상 임베딩 / guidelines 시드는 별도 monkeypatch에서 raise.
+        return [[0.01] * 1536 for _ in texts]
+
+    async def guidelines_no_key_embed(
+        texts: list[str], *, batch_size: int = 300
+    ) -> list[list[float]]:
+        from app.core.exceptions import MealOCRUnavailableError
+
+        raise MealOCRUnavailableError("OPENAI_API_KEY not configured (test)")
+
+    monkeypatch.setattr(mfds_module, "fetch_food_items", fake_fetch)
+    monkeypatch.setattr(food_seed, "SEED_TARGET_COUNT", 50)
+    monkeypatch.setattr(settings, "environment", "dev", raising=False)
+
+    # food 시드 — 정상 임베딩 fixture.
+    monkeypatch.setattr(openai_module, "embed_texts", food_only_embed)
+    sfd = _import_seed_food_db()
+    food_result = await sfd._run_seeds()
+    assert food_result[2] >= 50  # food_total
+
+    # guidelines 시드 — OPENAI_API_KEY 미설정 모사로 graceful.
+    monkeypatch.setattr(openai_module, "embed_texts", guidelines_no_key_embed)
+    sgd = _import_seed_guidelines()
+    guideline_result = await sgd._run_seeds()
+    assert guideline_result.total >= 40
+    assert guideline_result.embeddings_skipped is True
+
+    async with session_maker() as session:
+        kc_total = (
+            await session.execute(text("SELECT count(*) AS n FROM knowledge_chunks"))
+        ).first()
+        kc_null = (
+            await session.execute(
+                text("SELECT count(*) AS n FROM knowledge_chunks WHERE embedding IS NULL")
+            )
+        ).first()
+    assert kc_total is not None and kc_total.n >= 40
+    # graceful이면 모든 guideline chunks가 NULL embedding.
+    assert kc_null is not None and kc_null.n == kc_total.n

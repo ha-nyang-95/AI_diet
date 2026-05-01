@@ -8,8 +8,17 @@ from __future__ import annotations
 from app.db.models.consent import Consent
 from app.db.models.food_alias import FoodAlias
 from app.db.models.food_nutrition import FoodNutrition
+from app.db.models.knowledge_chunk import KnowledgeChunk
 from app.db.models.meal import Meal
 from app.db.models.refresh_token import RefreshToken
 from app.db.models.user import User
 
-__all__ = ["Consent", "FoodAlias", "FoodNutrition", "Meal", "RefreshToken", "User"]
+__all__ = [
+    "Consent",
+    "FoodAlias",
+    "FoodNutrition",
+    "KnowledgeChunk",
+    "Meal",
+    "RefreshToken",
+    "User",
+]
