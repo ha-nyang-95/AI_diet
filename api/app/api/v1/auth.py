@@ -285,22 +285,39 @@ async def _upsert_user_from_google(
     return user
 
 
-def _resolve_oauth_client(platform: PlatformLiteral) -> tuple[str, str | None]:
+_REVERSE_CLIENT_SCHEME_PREFIX = "com.googleusercontent.apps."
+
+
+def _resolve_oauth_client(platform: PlatformLiteral, redirect_uri: str) -> tuple[str, str | None]:
     """Platform별 google OAuth client_id + client_secret 결정.
 
     - web: confidential client → secret 첨부.
-    - mobile: native public client(PKCE only) → secret 없음. Android client_id 우선,
-      미설정 시 iOS, 둘 다 없으면 web client_id로 fallback (Expo Go/legacy 호환).
-
-    PlatformLiteral은 'web'/'mobile' 2개라 mobile 내부에서 Android/iOS 구분이 안 됨.
-    iOS 네이티브 build 도입 시점에 PlatformLiteral 세분화(`'android' | 'ios' | 'web'`)
-    혹은 `client_os` discriminator 추가 필요(Story 1.2 후속).
+    - mobile: native public client(PKCE only). redirect_uri의 reverse-client-id 스킴
+      (`com.googleusercontent.apps.<client_id>:/...`)에서 client_id를 파싱해 Android/iOS
+      를 정확히 구분. 두 native client가 모두 설정된 환경에서 mobile→Android 강제 매칭으로
+      iOS 요청에 401이 나는 회귀 차단(Gemini Code Assist PR #19 review). 매칭 실패/스킴
+      형식 불일치 시 Android → iOS → web 순으로 fallback (Expo Go / 미설정 환경 호환).
     """
     if platform == "web":
         return (
             settings.google_oauth_client_id,
             settings.google_oauth_client_secret or None,
         )
+
+    # Native mobile: redirect_uri에서 reverse-client-id 추출 시도.
+    if redirect_uri.startswith(_REVERSE_CLIENT_SCHEME_PREFIX):
+        # 형식: `com.googleusercontent.apps.<id>:/oauth2redirect` (single-slash, path-style).
+        # `:` 인덱스로 split — split('.')[3] 같은 인덱스 의존을 피해 strict 추출.
+        scheme_end = redirect_uri.find(":")
+        if scheme_end > len(_REVERSE_CLIENT_SCHEME_PREFIX):
+            scheme_id = redirect_uri[len(_REVERSE_CLIENT_SCHEME_PREFIX) : scheme_end]
+            inferred = f"{scheme_id}.apps.googleusercontent.com"
+            if inferred and inferred == settings.google_oauth_android_client_id:
+                return settings.google_oauth_android_client_id, None
+            if inferred and inferred == settings.google_oauth_ios_client_id:
+                return settings.google_oauth_ios_client_id, None
+
+    # Fallback chain — Android 우선(현재 dev 환경), 그 다음 iOS, 마지막 web 호환.
     if settings.google_oauth_android_client_id:
         return settings.google_oauth_android_client_id, None
     if settings.google_oauth_ios_client_id:
@@ -318,7 +335,7 @@ async def google_login(
     response: Response,
     db: DbSession,
 ) -> GoogleLoginResponseMobile | GoogleLoginResponseWeb:
-    client_id, client_secret = _resolve_oauth_client(body.platform)
+    client_id, client_secret = _resolve_oauth_client(body.platform, body.redirect_uri)
     token_response = await google_exchange_code(
         code=body.code,
         redirect_uri=body.redirect_uri,

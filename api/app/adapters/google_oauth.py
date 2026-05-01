@@ -19,7 +19,7 @@ import httpx
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token as google_id_token
 
-from app.core.config import GOOGLE_ID_TOKEN_ALLOWED_ISSUERS, settings
+from app.core.config import GOOGLE_ID_TOKEN_ALLOWED_ISSUERS
 from app.core.exceptions import EmailUnverifiedError, InvalidIdTokenError
 
 GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
