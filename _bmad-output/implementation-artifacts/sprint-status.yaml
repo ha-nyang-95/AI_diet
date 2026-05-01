@@ -1,5 +1,5 @@
 # generated: 2026-04-27
-# last_updated: 2026-05-01 (Story 3.2 ready-for-dev — 가이드라인 RAG 시드(KDRIs/KSSO/KDA/MFDS/KDCA 50+ chunks) + chunking 3-format 재사용 인터페이스(markdown 1차 + pdf/html 외주 인수 토대 — Architecture 결정 1 정합) + knowledge_chunks 테이블(chunk_text + Vector(1536) + applicable_health_goals text[] + 메타 7컬럼) + HNSW(vector_cosine_ops m=16/ef_construction=64) + GIN(applicable_health_goals) + composite btree(source, authority_grade) 4 인덱스 + frontmatter Pydantic 검증(_FrontmatterSchema) + dev graceful D9(OPENAI_API_KEY 미설정 → embedding NULL 진행, RUN_GUIDELINE_SEED_STRICT=1 opt-in) + data/guidelines/*.md 6 파일 + app/rag/chunking/{__init__,markdown,pdf,html}.py + app/rag/guidelines/seed.py + scripts/seed_guidelines.py + bootstrap_seed.py food→guidelines 순차 + scripts/verify_allergy_22.py 22종 lookup vs frontmatter 비교 SOP(R8) + pyproject.toml pypdf/bs4/langchain-text-splitters/pyyaml + mypy.overrides 갱신 + GuidelineSeedError 3 예외 + alembic 0011 + ORM 신규 baseline. Status: backlog → ready-for-dev.)
+# last_updated: 2026-05-01 (Story 3.3 ready-for-dev — LangGraph 6노드 + Self-RAG 분기(rewrite_attempts < 1 1회 한도, 무한 루프 차단) + AsyncPostgresSaver(lg_checkpoints schema 격리, Alembic 외 lib .setup()) + per-node tenacity retry(stop_after_attempt 2 + wait_exponential 1-4) + Pydantic IO 모델 6세트(MealAnalysisState TypedDict + ParseMealOutput/RetrievalResult/EvaluationDecision/UserProfileSnapshot/FitEvaluation/FeedbackOutput) + Sentry transaction(op=analysis.pipeline) + 노드별 child span(op=langgraph.node) + analysis_service 진입점(run/aget_state/aresume) + AnalysisGraphError 4 서브클래스(NodeError/CheckpointerError/StateValidationError/RewriteLimitExceededError) + psycopg[binary,pool]>=3.2 직접 의존성 승격(transitive→직접) + langgraph-checkpoint-postgres>=3.0 강화 + lifespan 4 자원(checkpointer/pool/graph/analysis_service) graceful 분기 + perf 골격(@pytest.mark.perf NFR-P4 ≤3s + NFR-P5 +2s + T1 100회 ≤2%) skip 디폴트. 6노드 중 evaluate_retrieval_quality만 *실 결정 로직*(Self-RAG 핵심) + fetch_user_profile은 *실 DB 조회* — 나머지 5 노드는 결정성 stub(Story 3.4-3.6 책임 영역). PIPA 게이트/Rate limit/SSE/LangSmith/실 LLM은 모두 OUT — 후속 스토리. branch feat/story-3.3 분기 완료. Status: backlog → ready-for-dev.)
 # project: AI_diet
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-27
-last_updated: 2026-05-01  # Story 3.2 CR 완료 → done. Amelia CR triage: PATCH 10 / DEFER 5 / DISMISS 7. 10 patch 적용(markdown char_start 정확화, seed prod fail-fast, count gate 현 run 검증, _FrontmatterSchema 필수 필드 복원, frontmatter regex CRLF/EOF tolerance, allergy ordering invariant, BOM 선처리, empty vector → None, dead structlog 정리). 회귀 0 — pytest 317 passed / 2 skipped / coverage 84.80% / ruff·format clean / mypy 신규 모듈 strict clean. 5 defer → deferred-work.md DF84-DF88. 다음: PR 생성 + master 머지.
+last_updated: 2026-05-02  # Story 3.3 DS 완료 — LangGraph 6노드 stub + Self-RAG 분기(rewrite_attempts < 1, 1회 한도 회귀 가드) + AsyncPostgresSaver(lg_checkpoints schema 격리 + autocommit pool + setup() idempotent) + analysis_service 진입점 + AnalysisGraphError 4 서브클래스 + psycopg[binary,pool]>=3.2 직접 의존 + langgraph-checkpoint-postgres>=3.0 강화 + lifespan 4 자원(checkpointer/pool/graph/analysis_service) graceful + perf 골격(NFR-P4/P5/T1 skip 디폴트) + Windows ProactorEventLoop → SelectorEventLoop fix(psycopg 호환). 397 passed / 5 skipped(perf opt-in) / 0 failed / coverage 86% / mypy strict 0 errors. branch feat/story-3.3. Status: ready-for-dev → in-progress → review.
 project: AI_diet
 project_key: NOKEY
 tracking_system: file-system
@@ -65,7 +65,7 @@ development_status:
   epic-3: in-progress
   3-1-음식-영양-rag-시드-pgvector: done
   3-2-가이드라인-rag-시드-chunking: done
-  3-3-langgraph-6노드-self-rag-saver: backlog
+  3-3-langgraph-6노드-self-rag-saver: review
   3-4-음식명-정규화-매칭-fallback: backlog
   3-5-fit-score-알고리즘-알레르기-단락: backlog
   3-6-인용형-피드백-광고-가드-듀얼-llm: backlog

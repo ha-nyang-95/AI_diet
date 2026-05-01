@@ -37,6 +37,7 @@ from app.core.config import settings
 from app.core.exceptions import (
     PROBLEM_JSON_MEDIA_TYPE,
     X_CONSENT_LATEST_VERSION_HEADER,
+    AnalysisCheckpointerError,
     AutomatedDecisionConsentVersionMismatchError,
     BalanceNoteError,
     ConsentVersionMismatchError,
@@ -46,6 +47,8 @@ from app.core.exceptions import (
 from app.core.logging import configure_logging
 from app.core.middleware import RequestIdMiddleware
 from app.core.sentry import init_sentry
+from app.graph.checkpointer import build_checkpointer, dispose_checkpointer
+from app.graph.deps import NodeDeps
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -103,10 +106,47 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         log.error("app.startup.limiter_init_failed", error=str(exc))
         app.state.limiter = _build_limiter("memory://")
 
+    # Story 3.3 — LangGraph 분석 파이프라인 4 자원 (checkpointer/pool/graph/service).
+    # DB 미가동 / connection 거절 시 graceful 분기 — `app.state.graph = None` (D10).
+    # 라우터(Story 3.7) None 가드 + 503 안내. compile_pipeline / AnalysisService import는
+    # circular 회피 — lifespan 안에서만 lazy.
+    try:
+        if app.state.session_maker is None:
+            raise AnalysisCheckpointerError("checkpointer.session_maker_unavailable")
+        checkpointer, pool = await build_checkpointer(settings.database_url)
+        from app.graph.pipeline import compile_pipeline
+        from app.services.analysis_service import AnalysisService
+
+        app.state.checkpointer = checkpointer
+        app.state.checkpointer_pool = pool
+        analysis_deps = NodeDeps(
+            session_maker=app.state.session_maker,
+            redis=app.state.redis,
+            settings=settings,
+        )
+        app.state.graph = compile_pipeline(checkpointer, analysis_deps)
+        app.state.analysis_service = AnalysisService(
+            graph=app.state.graph,
+            deps=analysis_deps,
+        )
+    except AnalysisCheckpointerError as exc:
+        log.error("app.startup.checkpointer_init_failed", error=str(exc))
+        app.state.checkpointer = None
+        app.state.checkpointer_pool = None
+        app.state.graph = None
+        app.state.analysis_service = None
+
     try:
         yield
     finally:
         # cleanup 자원별 독립 — 한쪽 실패가 나머지 cleanup을 막지 않음.
+        cleanup_pool = getattr(app.state, "checkpointer_pool", None)
+        if cleanup_pool is not None:
+            try:
+                await dispose_checkpointer(cleanup_pool)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("app.shutdown.checkpointer_dispose_failed", error=str(exc))
+
         cleanup_engine = getattr(app.state, "engine", None)
         if cleanup_engine is not None:
             try:

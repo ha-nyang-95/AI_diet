@@ -72,6 +72,14 @@ class Settings(BaseSettings):
     langsmith_project: str = "balancenote-dev"
     langchain_tracing_v2: bool = False
 
+    # --- LangGraph Self-RAG (Story 3.3) ---
+    # `evaluate_retrieval_quality` 노드의 분기 임계값 — `retrieval_confidence < threshold`
+    # AND `rewrite_attempts < 1` 시 `rewrite_query` 재검색. prd.md line 610 baseline 0.6
+    # (W2 spike 튜닝 후 prod 환경별 override 가능).
+    self_rag_confidence_threshold: float = 0.6
+    # LangGraph `compile(debug=...)` 토글 — dev에서만 True 권장(SSE 디버깅 정합).
+    langgraph_debug: bool = False
+
     # --- JWT (사용자 / 관리자 분리) ---
     jwt_user_secret: str = "dev-user-secret-please-rotate"
     jwt_admin_secret: str = "dev-admin-secret-please-rotate"

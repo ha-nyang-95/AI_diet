@@ -1,0 +1,98 @@
+"""Story 3.3 — `AnalysisService` pipeline thin wrapper (AC8).
+
+`compile_pipeline()` 결과 graph를 *서비스 레이어*에서 감싸 — 라우터는 본 service만
+호출, 그래프 내부 SOT(노드/edges/state)는 직접 노출 X. Story 3.4의 `needs_clarification`
+재개 흐름의 *현재 state 조회* + 사용자 응답 후 재개 진입점도 본 service가 SOT.
+
+design:
+- `run`: 새 분석 1회 — `thread_id` 미지정 시 `meal:{meal_id}` 기본. Sentry transaction
+  진입점.
+- `aget_state`: Story 3.4 needs_clarification 후 *현재 state*만 보고 싶을 때.
+- `aresume`: needs_clarification 후 사용자 응답을 받아 그래프 재개. 본 스토리는
+  *인터페이스 박기*만 — 실 사용자 응답 갱신 분기는 Story 3.4가 강화.
+"""
+
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, cast
+
+import sentry_sdk
+
+from app.graph.deps import NodeDeps
+from app.graph.state import MealAnalysisState
+
+if TYPE_CHECKING:  # pragma: no cover
+    from langchain_core.runnables import RunnableConfig
+    from langgraph.graph.state import CompiledStateGraph
+
+
+@dataclass(frozen=True)
+class AnalysisService:
+    """LangGraph compiled pipeline의 thin wrapper — 라우터 진입점."""
+
+    graph: CompiledStateGraph[Any, Any, Any, Any]
+    deps: NodeDeps
+
+    async def run(
+        self,
+        *,
+        meal_id: uuid.UUID,
+        user_id: uuid.UUID,
+        raw_text: str,
+        thread_id: str | None = None,
+    ) -> MealAnalysisState:
+        """단일 분석 호출 — Sentry transaction(`op="analysis.pipeline"`) 진입점.
+
+        `thread_id` 미지정 시 `meal:{meal_id}` 기본 — checkpoint 자체가 동일 meal에
+        대한 멱등 가드 역할.
+        """
+        actual_thread_id = thread_id or f"meal:{meal_id}"
+        config: RunnableConfig = {"configurable": {"thread_id": actual_thread_id}}
+        initial_state: MealAnalysisState = {
+            "meal_id": meal_id,
+            "user_id": user_id,
+            "raw_text": raw_text,
+            "rewrite_attempts": 0,
+            "node_errors": [],
+            "needs_clarification": False,
+        }
+        with sentry_sdk.start_transaction(
+            op="analysis.pipeline",
+            name="meal_analysis",
+        ):
+            final_state = await self.graph.ainvoke(initial_state, config=config)
+        return cast(MealAnalysisState, final_state)
+
+    async def aget_state(self, *, thread_id: str) -> MealAnalysisState:
+        """현재 state 조회 — Story 3.4 needs_clarification 흐름 진입점.
+
+        unknown thread_id의 경우 LangGraph는 빈 state를 반환 (graceful — 라우터가
+        클라이언트에 *분석 미시작* 안내).
+        """
+        config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
+        snapshot = await self.graph.aget_state(config)
+        return cast(MealAnalysisState, snapshot.values)
+
+    async def aresume(
+        self,
+        *,
+        thread_id: str,
+        user_input: dict[str, Any],
+    ) -> MealAnalysisState:
+        """needs_clarification 후 사용자 응답을 받아 재개 — 인터페이스만 박음.
+
+        Story 3.4가 `parse_meal` 갱신 분기 + 실 분기 라우팅 강화. 본 스토리는
+        `await self.graph.ainvoke(user_input, config=...)` thin pass-through.
+        """
+        config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
+        with sentry_sdk.start_transaction(
+            op="analysis.pipeline",
+            name="meal_analysis_resume",
+        ):
+            final_state = await self.graph.ainvoke(user_input, config=config)
+        return cast(MealAnalysisState, final_state)
+
+
+__all__ = ["AnalysisService"]

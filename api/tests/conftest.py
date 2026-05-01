@@ -16,10 +16,17 @@ Story 1.2부터:
 from __future__ import annotations
 
 import asyncio
+import sys
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
 from decimal import Decimal
+
+# Story 3.3 — psycopg async는 Windows ProactorEventLoop 비호환 (psycopg `InterfaceError`).
+# SelectorEventLoop으로 전환 — asyncpg (SQLAlchemy)는 양쪽 호환이라 안전. macOS/Linux는
+# 영향 없음(이미 SelectorEventLoop 디폴트).
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())  # type: ignore[attr-defined]
 
 import pytest
 import pytest_asyncio
