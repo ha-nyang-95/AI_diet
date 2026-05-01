@@ -50,7 +50,7 @@ def _stub_google(
             token_type="Bearer",
         )
 
-    def fake_verify(_token: str) -> GoogleIdTokenClaims:
+    def fake_verify(_token: str, _expected_audience: str) -> GoogleIdTokenClaims:
         if raise_on_verify is not None:
             raise raise_on_verify("stubbed")
         return GoogleIdTokenClaims(

@@ -285,6 +285,32 @@ async def _upsert_user_from_google(
     return user
 
 
+def _resolve_oauth_client(platform: PlatformLiteral) -> tuple[str, str | None]:
+    """Platform별 google OAuth client_id + client_secret 결정.
+
+    - web: confidential client → secret 첨부.
+    - mobile: native public client(PKCE only) → secret 없음. Android client_id 우선,
+      미설정 시 iOS, 둘 다 없으면 web client_id로 fallback (Expo Go/legacy 호환).
+
+    PlatformLiteral은 'web'/'mobile' 2개라 mobile 내부에서 Android/iOS 구분이 안 됨.
+    iOS 네이티브 build 도입 시점에 PlatformLiteral 세분화(`'android' | 'ios' | 'web'`)
+    혹은 `client_os` discriminator 추가 필요(Story 1.2 후속).
+    """
+    if platform == "web":
+        return (
+            settings.google_oauth_client_id,
+            settings.google_oauth_client_secret or None,
+        )
+    if settings.google_oauth_android_client_id:
+        return settings.google_oauth_android_client_id, None
+    if settings.google_oauth_ios_client_id:
+        return settings.google_oauth_ios_client_id, None
+    return (
+        settings.google_oauth_client_id,
+        settings.google_oauth_client_secret or None,
+    )
+
+
 @router.post("/google")
 async def google_login(
     body: GoogleLoginRequest,
@@ -292,12 +318,16 @@ async def google_login(
     response: Response,
     db: DbSession,
 ) -> GoogleLoginResponseMobile | GoogleLoginResponseWeb:
+    client_id, client_secret = _resolve_oauth_client(body.platform)
     token_response = await google_exchange_code(
         code=body.code,
         redirect_uri=body.redirect_uri,
         code_verifier=body.code_verifier,
+        client_id=client_id,
+        client_secret=client_secret,
     )
-    claims = google_verify_id_token(token_response.id_token)
+    # id_token aud는 code를 발급받은 client_id와 동일 — 같은 값으로 검증.
+    claims = google_verify_id_token(token_response.id_token, client_id)
 
     user = await _upsert_user_from_google(
         db,

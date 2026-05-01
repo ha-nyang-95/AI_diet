@@ -12,7 +12,7 @@ export const metadata = {
 
 export default async function OnboardingAutomatedDecisionPage() {
   const user = await getServerSideUser();
-  if (!user) redirect("/login");
+  if (!user) redirect("/api/auth/cleanup");
 
   // basic 4종 미통과 사용자는 disclaimer로 강제(흐름 강제, Story 1.4 AC9).
   const consents = await getServerSideConsents();

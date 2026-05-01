@@ -51,24 +51,27 @@ async def exchange_code(
     code: str,
     redirect_uri: str,
     code_verifier: str,
+    client_id: str,
+    client_secret: str | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> GoogleTokenResponse:
     """Authorization code → Google token endpoint 교환.
 
-    PKCE flow: client_secret 없이 code_verifier로 검증(모바일).
-    Web 서버사이드 흐름은 client_secret + code_verifier 둘 다 첨부 가능 — Google은
-    PKCE 사용 시 client_secret 검증을 우회하지 않으므로 dev에서는 PKCE만으로 충분.
+    PKCE flow: client_secret 없이 code_verifier로 검증(native mobile public client).
+    Web confidential client은 client_secret + code_verifier 둘 다 첨부.
+    `client_id`/`client_secret`은 호출자(라우터)가 platform별로 결정해 주입 — 단일 globals
+    참조를 끊어 mobile/web에서 같은 어댑터를 사용 가능하게 한다.
     """
     payload: dict[str, str] = {
         "code": code,
-        "client_id": settings.google_oauth_client_id,
+        "client_id": client_id,
         "redirect_uri": redirect_uri,
         "grant_type": "authorization_code",
         "code_verifier": code_verifier,
     }
-    if settings.google_oauth_client_secret:
+    if client_secret:
         # Web confidential client인 경우만 첨부.
-        payload["client_secret"] = settings.google_oauth_client_secret
+        payload["client_secret"] = client_secret
 
     own_client = client is None
     http_client = client or httpx.AsyncClient(timeout=GOOGLE_TOKEN_EXCHANGE_TIMEOUT_SECONDS)
@@ -108,19 +111,23 @@ async def exchange_code(
     )
 
 
-def verify_id_token(id_token_str: str) -> GoogleIdTokenClaims:
+def verify_id_token(id_token_str: str, expected_audience: str) -> GoogleIdTokenClaims:
     """Google id_token 검증.
 
     google.oauth2.id_token.verify_oauth2_token이 audience(client_id), exp, signature를
     검증한다. issuer는 `accounts.google.com` / `https://accounts.google.com` 둘 다 발급
     가능 — 본 함수가 별도로 검증해 화이트리스트 enforcement.
+
+    `expected_audience`: 호출자가 platform별 client_id를 주입(mobile=android/ios, web=web).
+    Native 클라이언트로 발급된 id_token의 `aud` claim은 native client_id이므로 web client_id로
+    검증하면 ValueError가 던져진다.
     """
     try:
         # google-auth는 stub 미제공 → mypy 경고. mypy override(`google.*`)로 일괄 무시 처리.
         claims: dict[str, Any] = google_id_token.verify_oauth2_token(  # type: ignore[no-untyped-call]
             id_token_str,
             google_requests.Request(),
-            settings.google_oauth_client_id,
+            expected_audience,
         )
     except ValueError as exc:
         raise InvalidIdTokenError(f"google id_token invalid: {exc}") from exc

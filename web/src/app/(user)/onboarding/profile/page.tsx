@@ -18,7 +18,7 @@ export const metadata = {
  */
 export default async function OnboardingProfilePage() {
   const user = await getServerSideUser();
-  if (!user) redirect("/login");
+  if (!user) redirect("/api/auth/cleanup");
 
   const consents = await getServerSideConsents();
   if (!consents?.basic_consents_complete) redirect("/onboarding/disclaimer");

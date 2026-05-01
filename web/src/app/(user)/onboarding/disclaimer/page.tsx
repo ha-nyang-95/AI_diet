@@ -12,7 +12,7 @@ export const metadata = {
 
 export default async function OnboardingDisclaimerPage() {
   const user = await getServerSideUser();
-  if (!user) redirect("/login");
+  if (!user) redirect("/api/auth/cleanup");
 
   // 이미 동의 완료한 사용자가 페이지 직접 진입 시 dashboard로 — 중복 POST 회피.
   const consents = await getServerSideConsents();
