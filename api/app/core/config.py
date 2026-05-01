@@ -82,8 +82,14 @@ class Settings(BaseSettings):
     sentry_dsn: str = ""
 
     # --- Google OAuth ---
+    # Web confidential client — `client_secret`과 함께 사용.
     google_oauth_client_id: str = ""
     google_oauth_client_secret: str = ""
+    # Native public clients — PKCE only(client_secret 없음). dev/native build에서 필수.
+    # Google Console에서 "Android"/"iOS" application type으로 별개 client 등록 필요.
+    # 비어있으면 mobile platform 요청은 web client_id로 fallback (Expo Go/legacy 호환).
+    google_oauth_android_client_id: str = ""
+    google_oauth_ios_client_id: str = ""
 
     # --- Cloudflare R2 ---
     r2_account_id: str = ""

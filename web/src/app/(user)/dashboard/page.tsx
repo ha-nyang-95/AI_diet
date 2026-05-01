@@ -12,7 +12,10 @@ export const metadata = {
 export default async function DashboardPage() {
   const user = await getServerSideUser();
   if (!user) {
-    redirect("/login");
+    // user=null은 (a) 쿠키 부재 (b) backend 401(서명 무효 / 사용자 레코드 없음 등 stale 쿠키)
+    // 둘 다 가능. cleanup route가 양쪽을 idempotent하게 처리(쿠키 폐기 + /login redirect)
+    // — middleware의 가벼운 exp 검사가 못 잡는 stale 케이스에서 ping-pong loop 차단.
+    redirect("/api/auth/cleanup");
   }
 
   // Story 1.3 AC2 — 동의 미통과 사용자는 onboarding 강제. 인증 게이트(`current_user`)와

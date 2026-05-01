@@ -23,15 +23,18 @@ function isProductionEnvironment(): boolean {
 }
 
 function clearOAuthTempCookies(response: NextResponse): void {
-  const secure = isProductionEnvironment();
+  // raw `headers.append("set-cookie", ...)` 사용 — `response.cookies.set()`은 NextResponse 생성
+  // 시점에 만들어진 ResponseCookies 인스턴스가 _parsed map을 빈 채로 시작하기 때문에 위험.
+  // 그 후 우리가 `headers.append`로 backend의 bn_access/bn_refresh를 직접 추가하면 _parsed에는
+  // 안 들어가고 raw header에만 들어감. 이어서 `.cookies.set()`이 호출되면 내부 `replace()`가
+  // 모든 set-cookie 헤더를 wipe → _parsed에 있는 것만 다시 emit → forwarded backend 쿠키가
+  // 사라짐(웹 로그인 무한 루프의 근본 원인). 따라서 same-API path에서는 raw append만 쓴다.
+  const secureAttr = isProductionEnvironment() ? "; Secure" : "";
   for (const key of OAUTH_TEMP_COOKIE_KEYS) {
-    response.cookies.set(key, "", {
-      httpOnly: true,
-      secure,
-      sameSite: "lax",
-      path: "/api/auth/google",
-      maxAge: 0,
-    });
+    response.headers.append(
+      "set-cookie",
+      `${key}=; Path=/api/auth/google; Max-Age=0; HttpOnly; SameSite=lax${secureAttr}`,
+    );
   }
 }
 
