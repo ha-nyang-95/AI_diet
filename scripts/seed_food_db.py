@@ -81,10 +81,10 @@ def main() -> int:
             f"updated={alias_updated} total={alias_total}"
         )
         if food_total == 0 and source == "none":
+            # AC11 시나리오 2 — stdout warning(컨테이너 stdout 수집기 정합).
             print(
                 f"[seed_food_db] WARN — food_nutrition seed unavailable "
-                f"(MFDS_OPENAPI_KEY missing or ZIP empty), aliases-only mode for {settings.environment}",
-                file=sys.stderr,
+                f"(MFDS_OPENAPI_KEY missing or ZIP empty), aliases-only mode for {settings.environment}"
             )
         return 0
     except FoodSeedError as exc:

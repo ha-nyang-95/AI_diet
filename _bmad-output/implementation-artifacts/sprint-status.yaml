@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-27
-last_updated: 2026-04-30  # Story 3.1 DS 완료 → review — alembic 0010(food_nutrition + food_aliases + HNSW vector_cosine_ops m=16/ef_construction=64) + ORM 2종 + mfds_openapi.py 어댑터(httpx + 한식 카테고리 화이트리스트 + tenacity retry) + embed_texts 확장(text-embedding-3-small 1536 dim + batch 300건) + app/rag/food/seed.py(1차 OpenAPI + 2차 ZIP + dev graceful D9 + RUN_FOOD_SEED_STRICT opt-in) + aliases_data.py 52건 + aliases_seed.py 멱등 + scripts/seed_food_db.py entry + bootstrap_seed.py 갱신 + FoodSeedError 3 예외 + .env.example/README.md/data/README.md SOP. 백엔드 게이트 통과(280 passed / 1 skip / coverage 84.7% / ruff·format clean / mypy 신규 에러 0). epic-2 done 유지.
+last_updated: 2026-05-01  # Story 3.1 CR 완료 → done. 3-layer 병렬 리뷰(Blind Hunter + Edge Case Hunter + Acceptance Auditor) 12 patch 적용: D6/AC4 per-batch commit + NaN/Inf vector·jsonb 가드 + utf-8-sig BOM + source_id 안정 해시 + 카테고리 NFC·middle-dot 정규화 + zero-match guard + strict/graceful env 대소문자 무시 + AC11 stdout WARN + aliases len(FOOD_ALIASES) gate + 마지막 부분 페이지 break + _extract_items single-dict + _embed_batch 길이 graceful + test_bootstrap_seed_prod_fail_fast + dev_strict_opt_in 2 케이스 신규(AC6 5케이스 완전 커버). defer 9건은 deferred-work.md DF75-DF83 적재. 백엔드 게이트 통과(282 passed / 1 skip / coverage 84.21% / ruff·format clean / mypy 신규 0). epic-2 done 유지.
 project: AI_diet
 project_key: NOKEY
 tracking_system: file-system
@@ -63,7 +63,7 @@ development_status:
 
   # Epic 3: AI 영양 분석 (Self-RAG + 인용 피드백)
   epic-3: in-progress
-  3-1-음식-영양-rag-시드-pgvector: review
+  3-1-음식-영양-rag-시드-pgvector: done
   3-2-가이드라인-rag-시드-chunking: backlog
   3-3-langgraph-6노드-self-rag-saver: backlog
   3-4-음식명-정규화-매칭-fallback: backlog

@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import threading
 import time
+import unicodedata
 from typing import Any, Final
 
 import httpx
@@ -107,6 +108,25 @@ MFDS_KOREAN_FOOD_CATEGORIES: Final[frozenset[str]] = frozenset(
         "한과류",
         "음청류",
     }
+)
+
+
+def _normalize_category(value: str | None) -> str | None:
+    """카테고리 명 비교 정규화 — NFC + 공백 제거 + middle-dot 변종(U+30FB ``・`` /
+    U+318D ``ㆍ``) → U+00B7 ``·`` 통일.
+
+    공공데이터포털 응답은 인코딩 변종이 잦음 — exact-match 비교 시 silent zero-rows
+    위험. 본 정규화는 화이트리스트와 응답 양쪽에 적용해 일관 비교.
+    """
+    if not value:
+        return None
+    normalized = unicodedata.normalize("NFC", value).strip()
+    normalized = normalized.replace("・", "·").replace("ㆍ", "·")
+    return normalized or None
+
+
+_NORMALIZED_KOREAN_FOOD_CATEGORIES: Final[frozenset[str]] = frozenset(
+    {_normalize_category(c) or c for c in MFDS_KOREAN_FOOD_CATEGORIES}
 )
 
 # 모듈 lazy singleton — Story 2.2/2.3 P1 정합. httpx.AsyncClient는 thread-safe +
@@ -247,20 +267,41 @@ def _is_quota_exceeded(response: httpx.Response, body: dict[str, Any] | None) ->
     return result_code in {"22", "LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR"}
 
 
+def _filter_dict_items(raw: list[Any]) -> list[dict[str, Any]]:
+    """list 안의 dict 항목만 추출 — 비-dict (null / str / int) silent skip 가시화 로그."""
+    filtered = [item for item in raw if isinstance(item, dict)]
+    if len(filtered) != len(raw):
+        logger.warning(
+            "mfds.openapi.non_dict_items_skipped",
+            total=len(raw),
+            filtered=len(filtered),
+        )
+    return filtered
+
+
 def _extract_items(body: dict[str, Any]) -> list[dict[str, Any]]:
     """공공데이터포털 표준 응답 envelope에서 items 배열 추출.
 
     표준: `{"response": {"body": {"items": [...]}}}` 또는 `{"data": [...]}` 또는 `{"items": [...]}`.
+    `data` / `items`가 단일 dict로 오는 single-result envelope도 list로 wrap.
     """
-    if "data" in body and isinstance(body["data"], list):
-        return [item for item in body["data"] if isinstance(item, dict)]
+    data_value = body.get("data")
+    if isinstance(data_value, list):
+        return _filter_dict_items(data_value)
+    if isinstance(data_value, dict):
+        # single-result envelope — list로 wrap.
+        return [data_value]
     response_block = body.get("response", {})
     body_block = response_block.get("body", {}) if isinstance(response_block, dict) else {}
     items = body_block.get("items") if isinstance(body_block, dict) else None
     if isinstance(items, list):
-        return [item for item in items if isinstance(item, dict)]
+        return _filter_dict_items(items)
+    if isinstance(items, dict):
+        return [items]
     if isinstance(body.get("items"), list):
-        return [item for item in body["items"] if isinstance(item, dict)]
+        return _filter_dict_items(body["items"])
+    if isinstance(body.get("items"), dict):
+        return [body["items"]]
     return []
 
 
@@ -329,6 +370,7 @@ async def fetch_food_items(
     collected: list[FoodNutritionRaw] = []
     page_index = 1
     max_pages = 100  # 무한 루프 방어 (3K건 / 100건 = 30 페이지 + 여유).
+    rows_seen = 0
 
     while len(collected) < target_count and page_index <= max_pages:
         try:
@@ -349,17 +391,31 @@ async def fetch_food_items(
             # 빈 페이지 — 전체 페이지 소진 신호.
             break
 
+        rows_seen += len(raw_items)
         for item in raw_items:
             mapped = _raw_to_standard(item)
             if mapped is None:
                 continue
-            # 한식 카테고리 우선 필터 — 카테고리 명이 화이트리스트에 있을 때만 채택.
-            # 카테고리 None이면 한식 비분류로 분류 → skip (DS 시점 카테고리 명 변동
-            # 가능성 — 운영 부팅 시 응답 샘플 검증 필요).
-            if mapped.category and mapped.category in MFDS_KOREAN_FOOD_CATEGORIES:
+            # 한식 카테고리 우선 필터 — 정규화(NFC + middle-dot 통일) 후 화이트리스트
+            # 비교. 카테고리 None이면 한식 비분류로 분류 → skip (DS 시점 카테고리 명
+            # 변동 가능성 — 운영 부팅 시 응답 샘플 검증 필요).
+            normalized_category = _normalize_category(mapped.category)
+            if normalized_category and normalized_category in _NORMALIZED_KOREAN_FOOD_CATEGORIES:
                 collected.append(mapped)
             if len(collected) >= target_count:
                 break
+
+        # 부분 페이지 — 마지막 페이지 도달 신호 (서버는 빈 페이지를 보내지 않을 수도).
+        if len(raw_items) < page_size:
+            break
         page_index += 1
+
+    # 응답은 있으나 화이트리스트가 모두 silent miss — 카테고리 명 변동 가능성. 빠른 진단
+    # 신호 발생 (생산 부팅 시 OpenAPI 카테고리 명 검증 트리거).
+    if rows_seen >= page_size * 5 and not collected:
+        raise FoodSeedAdapterError(
+            f"MFDS OpenAPI category whitelist matched zero rows after {rows_seen} rows "
+            f"— verify MFDS_KOREAN_FOOD_CATEGORIES against current API response"
+        )
 
     return collected

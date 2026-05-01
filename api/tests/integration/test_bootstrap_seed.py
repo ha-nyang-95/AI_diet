@@ -175,3 +175,73 @@ async def test_bootstrap_seed_idempotent(
     assert second_food_inserted == 0
     assert second_food_updated == 50
     assert second_food_total == 50
+
+
+def test_bootstrap_seed_prod_fail_fast(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """environment=prod + 두 경로 실패 → ``main()`` exit 1 + Sentry capture (AC #6 case 3)."""
+    from app.core.exceptions import FoodSeedSourceUnavailableError
+
+    async def fake_fetch(
+        target_count: int = 1500, *, page_size: int = 100
+    ) -> list[FoodNutritionRaw]:
+        raise FoodSeedSourceUnavailableError("no key")
+
+    monkeypatch.setattr(mfds_module, "fetch_food_items", fake_fetch)
+    csv_path = tmp_path / "empty.csv"
+    csv_path.write_text(
+        "name,category,energy_kcal,carbohydrate_g,protein_g,fat_g,saturated_fat_g,sugar_g,fiber_g,sodium_mg,cholesterol_mg,serving_size_g,serving_unit,source_id\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(food_seed, "_SEED_CSV_PATH", csv_path)
+    monkeypatch.setattr(settings, "environment", "prod", raising=False)
+    monkeypatch.setattr(settings, "sentry_dsn", "https://example@sentry.local/1", raising=False)
+    monkeypatch.setattr(food_seed, "SEED_TARGET_COUNT", 50)
+
+    sfd = _import_seed_food_db()
+    captured: list[BaseException] = []
+    captured_tags: list[tuple[str, str]] = []
+    monkeypatch.setattr(sfd.sentry_sdk, "capture_exception", lambda exc: captured.append(exc))
+
+    class _ScopeStub:
+        def __enter__(self) -> _ScopeStub:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def set_tag(self, key: str, value: str) -> None:
+            captured_tags.append((key, value))
+
+    monkeypatch.setattr(sfd.sentry_sdk, "push_scope", lambda: _ScopeStub())
+
+    exit_code = sfd.main()
+
+    assert exit_code == 1
+    assert any(v == "food_db_total_failure" for _, v in captured_tags)
+    assert captured, "Sentry capture_exception was not called"
+
+
+def test_bootstrap_seed_dev_strict_opt_in(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """environment=dev + RUN_FOOD_SEED_STRICT=1 → graceful 무효 → exit 1 (AC #6 case 4)."""
+    from app.core.exceptions import FoodSeedSourceUnavailableError
+
+    async def fake_fetch(
+        target_count: int = 1500, *, page_size: int = 100
+    ) -> list[FoodNutritionRaw]:
+        raise FoodSeedSourceUnavailableError("no key")
+
+    monkeypatch.setattr(mfds_module, "fetch_food_items", fake_fetch)
+    csv_path = tmp_path / "empty.csv"
+    csv_path.write_text(
+        "name,category,energy_kcal,carbohydrate_g,protein_g,fat_g,saturated_fat_g,sugar_g,fiber_g,sodium_mg,cholesterol_mg,serving_size_g,serving_unit,source_id\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(food_seed, "_SEED_CSV_PATH", csv_path)
+    monkeypatch.setattr(settings, "environment", "dev", raising=False)
+    monkeypatch.setenv("RUN_FOOD_SEED_STRICT", "1")
+    monkeypatch.setattr(food_seed, "SEED_TARGET_COUNT", 50)
+
+    sfd = _import_seed_food_db()
+    exit_code = sfd.main()
+
+    assert exit_code == 1

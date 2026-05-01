@@ -22,6 +22,11 @@ from app.rag.food.aliases_data import ALIASES_MIN_COUNT, FOOD_ALIASES
 
 logger = structlog.get_logger(__name__)
 
+# 모듈 import 단계에서 SOT 회귀 차단 — DB count 게이트는 pre-existing 행으로 통과될 수
+# 있어 dict 길이 검증을 1차로 박음(시드 사전 축소 시 즉시 fail).
+if len(FOOD_ALIASES) < ALIASES_MIN_COUNT:
+    raise AssertionError(f"FOOD_ALIASES regression: len={len(FOOD_ALIASES)} < {ALIASES_MIN_COUNT}")
+
 
 @dataclass(frozen=True, slots=True)
 class AliasesSeedResult:
@@ -71,8 +76,16 @@ async def seed_food_aliases(session: AsyncSession) -> AliasesSeedResult:
         else:
             updated += 1
 
-    # count 게이트 — DB row 기준(같은 alias 중복은 UNIQUE 제약으로 차단되므로 dict
-    # 단일 출처 길이 게이트가 1차, DB count는 2차 방어).
+    # count 게이트 — 1차는 모듈 import 시 ``len(FOOD_ALIASES) >= ALIASES_MIN_COUNT``로
+    # SOT 회귀 차단(pre-existing 행으로 통과되는 silent regression 차단). 2차는 DB
+    # count로 시드 누락 검증 + 이번 run에서 처리된 alias 수가 dict 길이와 일치하는지
+    # 확인(부분 INSERT 실패 가시화).
+    processed = inserted + updated
+    if processed != len(FOOD_ALIASES):
+        raise FoodSeedAdapterError(
+            f"food_aliases seed processed count mismatch: processed={processed} "
+            f"!= len(FOOD_ALIASES)={len(FOOD_ALIASES)}"
+        )
     count_result = await session.execute(text("SELECT count(*) AS n FROM food_aliases"))
     count_row = count_result.first()
     total = int(count_row.n) if count_row else 0

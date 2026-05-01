@@ -21,6 +21,9 @@ NFR-S5 — 음식명 raw 노출 X(잠재 raw_text 포함 — 식습관 추론). 
 from __future__ import annotations
 
 import csv
+import hashlib
+import json
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -81,16 +84,23 @@ class FoodSeedResult:
     source: str  # "primary" / "fallback" / "none"
 
 
+_STRICT_TRUTHY: Final[frozenset[str]] = frozenset({"1", "true", "yes", "on"})
+
+
 def _is_strict_mode() -> bool:
-    """``RUN_FOOD_SEED_STRICT=1`` 환경 변수 set 여부 — dev에서도 fail-fast opt-in."""
-    return os.environ.get(RUN_FOOD_SEED_STRICT_ENV, "").strip() in {"1", "true", "True"}
+    """``RUN_FOOD_SEED_STRICT`` 환경 변수 set 여부 — dev에서도 fail-fast opt-in.
+
+    12-factor 정합 — 대소문자 무시 + ``1``/``true``/``yes``/``on`` 모두 허용.
+    """
+    return os.environ.get(RUN_FOOD_SEED_STRICT_ENV, "").strip().lower() in _STRICT_TRUTHY
 
 
 def _is_graceful_environment() -> bool:
     """현 환경이 graceful 분기 대상인지 (D9). strict opt-in 시 graceful 무효."""
     if _is_strict_mode():
         return False
-    return settings.environment in SEED_GRACEFUL_ENVIRONMENTS
+    env = (settings.environment or "").strip().lower()
+    return env in SEED_GRACEFUL_ENVIRONMENTS
 
 
 def _embedding_text(item: FoodNutritionRaw) -> str:
@@ -124,13 +134,21 @@ def _read_zip_fallback() -> list[FoodNutritionRaw]:
         return []
 
     items: list[FoodNutritionRaw] = []
-    with _SEED_CSV_PATH.open(encoding="utf-8") as f:
+    # ``utf-8-sig`` — Excel-export BOM 자동 제거 (운영자가 통합 자료집을 Excel로 변환 시
+    # ``﻿name`` 키 silent skip 차단).
+    with _SEED_CSV_PATH.open(encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
-        for idx, row in enumerate(reader, start=1):
+        for row in reader:
             name = (row.get("name") or "").strip()
             if not name:
                 continue
-            source_id = (row.get("source_id") or f"MFDS-ZIP-{idx}").strip()
+            raw_source_id = (row.get("source_id") or "").strip()
+            if raw_source_id:
+                source_id = raw_source_id
+            else:
+                # ``MFDS-ZIP-{idx}`` 인덱스 fallback은 CSV 행 재정렬 시 ON CONFLICT가 잘못된
+                # 행을 덮어쓰는 데이터 손상 위험 → name 기반 안정 해시로 충돌 분리.
+                source_id = f"MFDS-ZIP-{hashlib.sha1(name.encode('utf-8')).hexdigest()[:12]}"
             try:
                 items.append(
                     FoodNutritionRaw.model_validate(
@@ -185,8 +203,15 @@ def _nutrition_payload(item: FoodNutritionRaw) -> dict[str, object]:
 
 
 def _format_vector_literal(vector: list[float] | None) -> str | None:
-    """pgvector ``vector`` 입력 literal — ``[0.1,0.2,...]`` 문자열 cast."""
+    """pgvector ``vector`` 입력 literal — ``[0.1,0.2,...]`` 문자열 cast.
+
+    NaN/Inf은 pgvector가 reject — 1행이 batch 전체 transaction을 abort시키지 않도록
+    None으로 강등 (검색 시 ``WHERE embedding IS NOT NULL`` 자동 제외, D4 graceful 흡수).
+    """
     if vector is None:
+        return None
+    if any(not math.isfinite(v) for v in vector):
+        logger.warning("food_seed.embedding_non_finite", dim=len(vector))
         return None
     return "[" + ",".join(format(v, ".7g") for v in vector) + "]"
 
@@ -199,13 +224,21 @@ async def _insert_batch(
     """단일 batch INSERT 멱등 — ``(inserted, updated)`` 카운터 반환."""
     inserted = 0
     updated = 0
-    import json
 
     for item, embedding in zip(items, embeddings, strict=True):
+        try:
+            nutrition_json = json.dumps(
+                _nutrition_payload(item), ensure_ascii=False, allow_nan=False
+            )
+        except ValueError:
+            # NaN/Inf nutrition 값 — jsonb invalid literal 회피용 row skip
+            # (전 batch transaction abort 차단).
+            logger.warning("food_seed.nutrition_non_finite", source_id=item.source_id)
+            continue
         params: dict[str, object] = {
             "name": item.name,
             "category": item.category,
-            "nutrition": json.dumps(_nutrition_payload(item), ensure_ascii=False),
+            "nutrition": nutrition_json,
             "embedding": _format_vector_literal(embedding),
             "source": item.source,
             "source_id": item.source_id,
@@ -236,6 +269,15 @@ async def _embed_batch(items: list[FoodNutritionRaw]) -> list[list[float] | None
             "food_seed.embedding_batch_failed",
             items_count=len(items),
             error=str(exc),
+        )
+        return [None] * len(items)
+    if len(embeddings) != len(items):
+        # OpenAI 부분 응답(undocumented but possible) — ``zip(..., strict=True)``
+        # ValueError로 batch abort 차단. 전 batch NULL로 강등 (D4 graceful 흡수).
+        logger.warning(
+            "food_seed.embedding_count_mismatch",
+            items_count=len(items),
+            embeddings_count=len(embeddings),
         )
         return [None] * len(items)
     return list(embeddings)
@@ -276,7 +318,9 @@ async def run_food_seed(
 ) -> FoodSeedResult:
     """음식 영양 시드 — 1차 OpenAPI + 2차 ZIP fallback + dev graceful 분기.
 
-    호출자(시드 스크립트)가 session commit/rollback 책임 — 본 함수는 INSERT만 수행.
+    각 batch INSERT 직후 ``session.commit()`` — D6 *"5 batch / 5 commit / 부분 실패 시
+    마지막 commit 이전 batch는 보존"* 정합. 호출자는 graceful 0건 분기 시점에 별도
+    commit 처리.
 
     Returns:
         ``FoodSeedResult`` — inserted/updated/total/source. source는
@@ -314,13 +358,15 @@ async def run_food_seed(
     # target_count 상한 — 과다 수집 회피 (메모리/cost 보호).
     items = items[:target_count]
 
-    # Batch 처리 — 300건 단위 (D6).
+    # Batch 처리 — 300건 단위 (D6 — 5 batch / 5 commit). 각 batch 종료 직후 commit해
+    # 부분 실패 시 마지막 commit 이전 chunk는 DB에 보존.
     inserted_total = 0
     updated_total = 0
     for chunk_start in range(0, len(items), SEED_BATCH_SIZE):
         chunk = items[chunk_start : chunk_start + SEED_BATCH_SIZE]
         embeddings = await _embed_batch(chunk)
         chunk_inserted, chunk_updated = await _insert_batch(session, chunk, embeddings)
+        await session.commit()
         inserted_total += chunk_inserted
         updated_total += chunk_updated
 
