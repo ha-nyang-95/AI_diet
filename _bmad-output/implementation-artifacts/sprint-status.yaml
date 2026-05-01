@@ -1,5 +1,5 @@
 # generated: 2026-04-27
-# last_updated: 2026-04-30 (Story 2.5 done — CR 16 patches 적용 + 3 decision-needed 해결 완료. 백엔드 pytest 244 + ruff/format/mypy clean + 모바일 tsc/lint clean. P1 per-userId mutex + P2 R-M-W 직렬화 + P3 IntegrityError 인덱스명 한정 + P4 race [200,201] 단일 + P5 PATCH offline ref guard + P6 401abort/429transient/400-422 영구 + P7 ate_at +09:00 KST + P8 3회 send cap + P9 UUID v4 검증 + P10 빈 userId 가드 + P11 4xx Alert raw_text 발췌 + P12 Idempotency-Key trim + P13 last_error 마스킹 + P14 item shape 검증 + P15 stuck_count + P16 resetAttempts(DF46 closed). DN1 ActionSheet 카드 액션 단일 노출 + DN3 summary 유지(스펙 정정). DF54-DF69 신규 15건 등재. epic-2 in-progress 유지(Story 2.1~2.5 done).)
+# last_updated: 2026-04-30 (Story 3.1 ready-for-dev — Epic 3 진입(epic-3 backlog → in-progress). 식약처 식품영양성분 DB OpenAPI 1차 + 통합 자료집 ZIP 백업 2단 fallback(USDA OUT — D1) + food_nutrition jsonb 표준 키 + vector(1536) HNSW(vector_cosine_ops m=16/ef_construction=64 — D2/D3) + food_aliases 50+건 핵심 변형(짜장면/자장면 등) + 시드 멱등 ON CONFLICT (source,source_id) DO UPDATE(D5) + Docker Compose seed 자동 시드(docker compose up 1-cmd) + app/adapters/mfds_openapi.py + openai_adapter.py embed_texts 확장(SDK singleton 공유 — D7) + app/rag/food/seed.py + aliases_data.py + scripts/seed_food_db.py + bootstrap_seed.py 갱신 + FoodSeedError 3 예외 + alembic 0010 + ORM 2종 baseline. Status: backlog → ready-for-dev.)
 # project: AI_diet
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-27
-last_updated: 2026-04-30  # Story 2.5 done — CR 16 patches + 3 decisions resolved. 백엔드 pytest 244 통과(83% cov) + 모바일 tsc/lint clean. P1 per-userId mutex + P8 3회 send cap + P16 resetAttempts(DF46 closed) 등 16 patches. DF54-DF69 신규 15 deferred. epic-2 in-progress 유지(Story 2.1~2.5 done, epic-3 진입 준비).
+last_updated: 2026-05-01  # Story 3.1 CR 완료 → done. 3-layer 병렬 리뷰(Blind Hunter + Edge Case Hunter + Acceptance Auditor) 12 patch 적용: D6/AC4 per-batch commit + NaN/Inf vector·jsonb 가드 + utf-8-sig BOM + source_id 안정 해시 + 카테고리 NFC·middle-dot 정규화 + zero-match guard + strict/graceful env 대소문자 무시 + AC11 stdout WARN + aliases len(FOOD_ALIASES) gate + 마지막 부분 페이지 break + _extract_items single-dict + _embed_batch 길이 graceful + test_bootstrap_seed_prod_fail_fast + dev_strict_opt_in 2 케이스 신규(AC6 5케이스 완전 커버). defer 9건은 deferred-work.md DF75-DF83 적재. 백엔드 게이트 통과(282 passed / 1 skip / coverage 84.21% / ruff·format clean / mypy 신규 0). epic-2 done 유지.
 project: AI_diet
 project_key: NOKEY
 tracking_system: file-system
@@ -53,7 +53,7 @@ development_status:
   epic-1-retrospective: optional
 
   # Epic 2: 식단 입력 + 일별 기록 + 권한 흐름
-  epic-2: in-progress
+  epic-2: done
   2-1-식단-텍스트-입력-crud: done
   2-2-식단-사진-입력-권한-흐름: done
   2-3-ocr-vision-추출-확인-카드: done
@@ -62,8 +62,8 @@ development_status:
   epic-2-retrospective: optional
 
   # Epic 3: AI 영양 분석 (Self-RAG + 인용 피드백)
-  epic-3: backlog
-  3-1-음식-영양-rag-시드-pgvector: backlog
+  epic-3: in-progress
+  3-1-음식-영양-rag-시드-pgvector: done
   3-2-가이드라인-rag-시드-chunking: backlog
   3-3-langgraph-6노드-self-rag-saver: backlog
   3-4-음식명-정규화-매칭-fallback: backlog

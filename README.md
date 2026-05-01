@@ -25,6 +25,14 @@ cp .env.example .env             # 시크릿 채우기 (LLM key 없이도 인프
 docker compose up                # postgres + redis + api + seed 일괄 부팅 (≤ 10분)
 ```
 
+`docker compose up`은 첫 부팅 시 식약처 식품영양성분 DB OpenAPI에서 1,500건 한식 우선
+음식 영양 데이터(`food_nutrition` + HNSW 임베딩)와 50+ 한국식 변형 정규화 사전
+(`food_aliases`)을 자동 시드합니다. `MFDS_OPENAPI_KEY` 미설정 + ZIP fallback
+placeholder 상태면 `dev/ci/test` 환경에서는 `food_aliases`만 시드하고 진행합니다
+(외주 인수 첫 부팅 영업 demo 보호 — Story 3.1 D9). `prod/staging` 또는
+`RUN_FOOD_SEED_STRICT=1`은 비-zero exit 으로 실패. 시드는 멱등(`ON CONFLICT DO UPDATE`) —
+재 부팅 시 회귀 0건. 자세한 SOP는 `api/data/README.md`.
+
 다음 엔드포인트가 200을 반환하면 성공:
 
 - `http://localhost:8000/healthz` — liveness

@@ -50,6 +50,7 @@ from tenacity import (
 
 from app.core.config import settings
 from app.core.exceptions import (
+    FoodSeedAdapterError,
     MealOCRPayloadInvalidError,
     MealOCRUnavailableError,
 )
@@ -59,6 +60,15 @@ logger = structlog.get_logger(__name__)
 # Vision 모델 — `gpt-4o-mini`는 한식 정확도 부족(영업 데모는 짜장면+군만두 사진에서
 # 정확 추출 필수). Story 8 cost polish 시점에 `gpt-4o-mini` 또는 snapshot pin 검토.
 VISION_MODEL: Final[str] = "gpt-4o"
+
+# Story 3.1 — text-embedding-3-small (1536 dim, $0.02/1M tokens, 8K context).
+# `text-embedding-3-large`(3072 dim)는 architecture vector(1536) 컬럼 변경 + 비용 5배로 OUT (D2).
+EMBEDDING_MODEL: Final[str] = "text-embedding-3-small"
+EMBEDDING_DIMENSIONS: Final[int] = 1536
+# 300건 batch — OpenAI embeddings API 한계(2048건/요청 + 8K context 토큰 합산) 안전치.
+# 음식명 평균 ~10 토큰 × 300건 = 3K 토큰. 1500건 시드 = 5 batches → cold start latency ↓
+# (100건 batch 대비 round-trip 1/3) — D6 결정.
+EMBEDDING_BATCH_SIZE: Final[int] = 300
 
 # 30초 hard cap — 모바일 4G + p95 4초 soft target + tenacity 1회 retry 여유.
 VISION_TIMEOUT_SECONDS: Final[float] = 30.0
@@ -245,3 +255,88 @@ async def parse_meal_image(image_url: str, *, image_key: str | None = None) -> P
         latency_ms=latency_ms,
     )
     return parsed
+
+
+# ---------------------------------------------------------------------------
+# Story 3.1 — embeddings (food RAG 시드)
+# ---------------------------------------------------------------------------
+
+
+@retry(
+    stop=stop_after_attempt(2),
+    wait=wait_exponential(multiplier=1, min=1, max=4),
+    retry=retry_if_exception_type(_TRANSIENT_RETRY_TYPES),
+    reraise=True,
+)
+async def _call_embedding(client: AsyncOpenAI, batch: list[str]) -> list[list[float]]:
+    """Embeddings API 단일 batch 호출 + tenacity 1회 retry — *transient*만 retry.
+
+    영구 오류(``openai.AuthenticationError`` / ``openai.BadRequestError`` 등)는
+    ``_TRANSIENT_RETRY_TYPES``에 미포함 → 즉시 fail (retry 무효 + cost 낭비 차단).
+    Story 2.3 OCR Vision 패턴 정합.
+    """
+    response = await client.embeddings.create(
+        model=EMBEDDING_MODEL,
+        input=batch,
+    )
+    return [item.embedding for item in response.data]
+
+
+async def embed_texts(
+    texts: list[str], *, batch_size: int = EMBEDDING_BATCH_SIZE
+) -> list[list[float]]:
+    """텍스트 리스트 → 1536-dim 임베딩 리스트 — Story 3.1 음식 영양 RAG 시드 입력.
+
+    - 빈 입력 — 빈 리스트 즉시 반환 (API 호출 X / cost 0).
+    - ``len(texts) > batch_size`` — 자동 chunk + 결과 concat (1500건 → 5 batches).
+    - SDK singleton 공유 — Vision OCR ``_get_client()`` 재활용 (D7 connection pool 공유).
+    - 차원 검증 — 응답 임베딩 길이가 ``EMBEDDING_DIMENSIONS``(1536) 미일치 시
+      ``FoodSeedAdapterError`` (모델 변경 회귀 차단).
+
+    오류 매핑:
+    - ``OPENAI_API_KEY`` 미설정 — ``_get_client()``가 ``MealOCRUnavailableError(503)``
+      raise — 시드 컨텍스트에서는 그대로 전파(상위 503 의미 동등 + 별 변환 X — AC3 명시).
+    - tenacity retry 후 transient 실패 / 영구 오류 — ``FoodSeedAdapterError(503)``.
+
+    NFR-S5 마스킹 — ``texts`` raw 출력 X (잠재 raw_text 포함 가능 — Story 2.3 정합).
+    """
+    if not texts:
+        return []
+
+    client = _get_client()
+    start = time.monotonic()
+    embeddings: list[list[float]] = []
+
+    for chunk_start in range(0, len(texts), batch_size):
+        batch = texts[chunk_start : chunk_start + batch_size]
+        try:
+            batch_embeddings = await _call_embedding(client, batch)
+        except _TRANSIENT_RETRY_TYPES as exc:
+            # tenacity retry 후 최종 transient 실패 — 503 변환.
+            raise FoodSeedAdapterError(
+                f"OpenAI embeddings transient failure after retry: {type(exc).__name__}"
+            ) from exc
+        except openai.APIError as exc:
+            # 영구 오류(AuthenticationError, BadRequestError 등) — retry 무효 + 즉시 fail.
+            raise FoodSeedAdapterError(
+                f"OpenAI embeddings API failure: {type(exc).__name__}"
+            ) from exc
+
+        for i, vector in enumerate(batch_embeddings):
+            if len(vector) != EMBEDDING_DIMENSIONS:
+                raise FoodSeedAdapterError(
+                    f"OpenAI embeddings: dimension mismatch "
+                    f"(expected {EMBEDDING_DIMENSIONS}, got {len(vector)} at batch index {i})"
+                )
+        embeddings.extend(batch_embeddings)
+
+    latency_ms = int((time.monotonic() - start) * 1000)
+    # NFR-S5 — texts raw 노출 X. count + model + latency만.
+    logger.info(
+        "openai.embeddings.batch",
+        texts_count=len(texts),
+        batch_count=(len(texts) + batch_size - 1) // batch_size,
+        model=EMBEDDING_MODEL,
+        latency_ms=latency_ms,
+    )
+    return embeddings
