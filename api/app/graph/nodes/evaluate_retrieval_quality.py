@@ -20,11 +20,11 @@ retry 의미 X.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from app.graph.deps import NodeDeps
 from app.graph.nodes._wrapper import _node_wrapper
-from app.graph.state import EvaluationDecision, MealAnalysisState
+from app.graph.state import EvaluationDecision, MealAnalysisState, get_state_field
 
 
 @_node_wrapper("evaluate_retrieval_quality")
@@ -34,13 +34,18 @@ async def evaluate_retrieval_quality(
     deps: NodeDeps,
 ) -> dict[str, Any]:
     threshold = deps.settings.self_rag_confidence_threshold
+    # `retrieval`/`node_errors`는 체크포인터 직렬화 round-trip 시 Pydantic instance
+    # 또는 dict 양 형태 가능 — `get_state_field`로 일관된 안전 access.
     retrieval = state.get("retrieval")
-    confidence = retrieval.retrieval_confidence if retrieval is not None else 0.0
+    confidence_raw = get_state_field(retrieval, "retrieval_confidence", 0.0)
+    confidence = float(cast(float, confidence_raw)) if confidence_raw is not None else 0.0
     counter = state.get("rewrite_attempts", 0) or 0
     # wrapper fallback이 rewrite_query 실패 시 `rewrite_attempts` increment 누락 →
     # 무한 루프 방지로 node_errors 내 rewrite_query 실패도 attempts에 합산.
     node_errors = state.get("node_errors", []) or []
-    rewrite_failures = sum(1 for e in node_errors if e.node_name == "rewrite_query")
+    rewrite_failures = sum(
+        1 for e in node_errors if get_state_field(e, "node_name") == "rewrite_query"
+    )
     attempts = counter + rewrite_failures
 
     if confidence < threshold and attempts < 1:

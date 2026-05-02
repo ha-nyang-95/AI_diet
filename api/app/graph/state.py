@@ -11,6 +11,10 @@
   로 변환되어 NodeError append + 다음 노드 진행(FR45).
 - enum 재사용: `HealthGoal`/`ActivityLevel`은 Story 1.5 `app.domain.health_profile`
   Literal SOT(중복 정의 금지 — DB ENUM과 wire drift 회피).
+- 체크포인터 직렬화 일관성: LangGraph `JsonPlusSerializer`(default)는 Pydantic v2
+  round-trip 보존하나, 안전성 정합으로 노드 간 access는 `get_state_field` helper로
+  양 형태(Pydantic instance / dict) 모두 수용. 라우터/평가 노드의 attribute access
+  가 dict 역직렬화 시 `AttributeError` 회귀 차단.
 """
 
 from __future__ import annotations
@@ -122,6 +126,21 @@ class NodeError(BaseModel):
     error_class: str
     message: str
     attempts: int
+
+
+def get_state_field(obj: object, name: str, default: object = None) -> object:
+    """Pydantic instance + dict 양 형태 수용 — 체크포인터 직렬화 round-trip 안전.
+
+    LangGraph `JsonPlusSerializer`는 Pydantic v2 모델을 round-trip 보존하지만, 다른
+    serializer(예: `JsonSerializer`)나 외부 도구가 dict로 변환할 가능성에 대비하여
+    state 필드 access는 본 helper를 거치는 것이 안전. `node_errors`/`retrieval`/
+    `evaluation_decision` 등 객체 access 모든 지점이 대상.
+    """
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    return getattr(obj, name, default)
 
 
 class MealAnalysisState(TypedDict, total=False):

@@ -78,6 +78,40 @@ async def test_missing_retrieval_treated_as_zero(fake_deps: NodeDeps) -> None:
     assert out["evaluation_decision"]["route"] == "rewrite"
 
 
+async def test_evaluate_handles_dict_form_retrieval_and_node_errors(
+    fake_deps: NodeDeps,
+) -> None:
+    """체크포인터 직렬화 round-trip — `retrieval`/`node_errors`가 dict로 들어와도 처리.
+
+    Gemini Code Assist 권고: 노드 access는 `get_state_field`로 Pydantic/dict 양
+    형태 수용.
+    """
+    state: MealAnalysisState = {
+        "meal_id": uuid.uuid4(),
+        "user_id": uuid.uuid4(),
+        "raw_text": "x",
+        # dict 형태(체크포인터 역직렬화 시뮬레이션)
+        "retrieval": {  # type: ignore[typeddict-item]
+            "retrieved_foods": [],
+            "retrieval_confidence": 0.3,
+        },
+        "rewrite_attempts": 0,
+        # dict 형태
+        "node_errors": [  # type: ignore[typeddict-item]
+            {
+                "node_name": "rewrite_query",
+                "error_class": "TimeoutException",
+                "message": "transient",
+                "attempts": 2,
+            }
+        ],
+    }
+    out = await evaluate_retrieval_quality(state, deps=fake_deps)
+    # rewrite_query NodeError 1건 → attempts >= 1 → 강제 "continue"
+    assert out["evaluation_decision"]["route"] == "continue"
+    assert out["evaluation_decision"]["reason"] == "rewrite_limit_reached"
+
+
 async def test_node_errors_rewrite_query_count_toward_attempts(
     fake_deps: NodeDeps,
 ) -> None:

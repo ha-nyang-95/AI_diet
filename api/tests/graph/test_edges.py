@@ -82,6 +82,25 @@ def test_route_after_node_error_fetch_user_profile_terminates() -> None:
     assert route_after_node_error(state) == "end"
 
 
+def test_route_after_node_error_handles_dict_form_node_errors() -> None:
+    """체크포인터 직렬화 round-trip — `node_errors` 요소가 dict로 들어와도 처리.
+
+    Gemini Code Assist 권고: state 필드가 dict로 역직렬화 시에도 attribute access
+    (`last.node_name`)가 깨지지 않도록 `get_state_field`로 양 형태 수용.
+    """
+    state = _state(
+        node_errors=[
+            {
+                "node_name": "fetch_user_profile",
+                "error_class": "AnalysisNodeError",
+                "message": "user_not_found",
+                "attempts": 1,
+            },
+        ],
+    )
+    assert route_after_node_error(state) == "end"
+
+
 def test_route_after_node_error_fetch_user_profile_other_class_continues() -> None:
     """`fetch_user_profile`이라도 `AnalysisNodeError`가 아닌 transient류는 `"next"`."""
     state = _state(

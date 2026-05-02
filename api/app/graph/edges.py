@@ -18,7 +18,7 @@ from typing import Literal
 
 import structlog
 
-from app.graph.state import MealAnalysisState
+from app.graph.state import MealAnalysisState, get_state_field
 
 log = structlog.get_logger()
 
@@ -29,11 +29,7 @@ def _extract_route(decision: object) -> str:
     AC3 — 노드 출력은 `.model_dump()` 후 dict 저장이 SOT이지만, checkpoint
     직렬화/역직렬화 경계에서 형태가 바뀔 수 있으므로 양 형태 모두 수용 (defensive).
     """
-    if decision is None:
-        return "continue"
-    if isinstance(decision, dict):
-        return str(decision.get("route", "continue"))
-    return str(getattr(decision, "route", "continue"))
+    return str(get_state_field(decision, "route", "continue"))
 
 
 def route_after_evaluate(
@@ -57,13 +53,17 @@ def route_after_node_error(state: MealAnalysisState) -> Literal["next", "end"]:
     """노드 격리 fallback 라우터.
 
     디폴트 `"next"` — 부분 state로 다음 노드 진행. 치명적 케이스(`fetch_user_profile`이
-    `AnalysisNodeError`로 실패)만 `"end"` 반환.
+    `AnalysisNodeError`로 실패)만 `"end"` 반환. `node_errors` 요소는 Pydantic instance
+    또는 dict 양 형태 수용 (체크포인터 직렬화 round-trip 안전).
     """
     errors = state.get("node_errors", []) or []
     if not errors:
         return "next"
     last = errors[-1]
-    if last.node_name == "fetch_user_profile" and last.error_class == "AnalysisNodeError":
+    if (
+        get_state_field(last, "node_name") == "fetch_user_profile"
+        and get_state_field(last, "error_class") == "AnalysisNodeError"
+    ):
         return "end"
     return "next"
 
