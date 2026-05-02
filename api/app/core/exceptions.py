@@ -482,3 +482,66 @@ class GuidelineSeedValidationError(GuidelineSeedError):
     status: ClassVar[int] = 422
     code: ClassVar[str] = "guideline_seed.validation_failed"
     title: ClassVar[str] = "Guideline seed frontmatter validation failed"
+
+
+# --- LangGraph 분석 파이프라인 계층 (Story 3.3 — 6노드 + Self-RAG + AsyncPostgresSaver) ---
+
+
+class AnalysisGraphError(BalanceNoteError):
+    """Epic 3 분석 파이프라인 도메인 예외 base.
+
+    ``FoodSeedError`` / ``GuidelineSeedError`` 카탈로그 패턴 정합 — 직접 raise 회피
+    (서브클래스만 사용 권장 — base 직접 raise는 status/code/title default를 leak).
+    Story 3.3은 *그래프 레이어 예외* — 라우터 노출은 Story 3.7 (분석 SSE endpoint)에서.
+    main.py 글로벌 핸들러가 ``BalanceNoteError`` 분기로 RFC 7807 변환.
+    """
+
+    status: ClassVar[int] = 500
+    code: ClassVar[str] = "analysis.graph.error"
+    title: ClassVar[str] = "Analysis Graph Error"
+
+
+class AnalysisNodeError(AnalysisGraphError):
+    """노드 retry 후 fallback 진입 신호 — ``_node_wrapper``가 NodeError instance로 변환
+    후 state.node_errors에 append. Story 3.7 라우터 노출 시 503 + ``analysis.node.failed``.
+
+    ``fetch_user_profile.user_not_found``처럼 retry 의미 X 케이스도 본 예외로 즉시 raise
+    (``retry_if_exception_type``이 ``AnalysisNodeError`` 제외 — retry skip).
+    """
+
+    status: ClassVar[int] = 503
+    code: ClassVar[str] = "analysis.node.failed"
+    title: ClassVar[str] = "Analysis Node Failed"
+
+
+class AnalysisCheckpointerError(AnalysisGraphError):
+    """``AsyncPostgresSaver.setup()`` 또는 ``AsyncConnectionPool`` 연결 실패 —
+    ``OperationalError`` / ``InterfaceError`` 매핑. lifespan에서 catch + ``app.state
+    .graph = None`` graceful 분기(D10).
+    """
+
+    status: ClassVar[int] = 503
+    code: ClassVar[str] = "analysis.checkpointer.failed"
+    title: ClassVar[str] = "Analysis Checkpointer Failed"
+
+
+class AnalysisStateValidationError(AnalysisGraphError):
+    """노드 출력 Pydantic 검증 실패 — ``<NodeOutput>(**raw)`` ValidationError 후
+    ``_node_wrapper``의 1회 retry도 실패 시 본 예외로 변환 + NodeError append.
+    """
+
+    status: ClassVar[int] = 422
+    code: ClassVar[str] = "analysis.state.invalid"
+    title: ClassVar[str] = "Analysis State Validation Failed"
+
+
+class AnalysisRewriteLimitExceededError(AnalysisGraphError):
+    """Self-RAG 1회 한도 초과 — 본 스토리 정상 흐름에서는 발생 X
+    (``evaluate_retrieval_quality``의 강제 ``"continue"`` 라우트가 1회 한도에서 차단).
+    *알림 신호용 안전망* — 잘못된 외부 호출 시 단락(예: 외부에서 직접
+    ``rewrite_query`` 노드 진입 후 ``rewrite_attempts >= 2``).
+    """
+
+    status: ClassVar[int] = 422
+    code: ClassVar[str] = "analysis.rewrite.limit_exceeded"
+    title: ClassVar[str] = "Self-RAG Rewrite Limit Exceeded"

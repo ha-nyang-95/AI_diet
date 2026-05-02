@@ -2,6 +2,20 @@
 
 리뷰·구현 과정에서 식별되었으나 다음 스토리·시점으로 미룬 항목 모음.
 
+## Deferred from: code review of 3-3-langgraph-6노드-self-rag-saver (2026-05-02)
+
+- **DF89 — `aresume`의 진짜 LangGraph resume semantics 미구현** — `api/app/services/analysis_service.py:aresume`. 현 구현은 `await self.graph.ainvoke(user_input, config=...)`로 START부터 재실행. 진짜 resume은 `Command(resume=...)` 또는 `ainvoke(None, config=...)` 패턴. 사유: spec line 125-126이 *인터페이스 박기만* 명시 — Story 3.4 needs_clarification 흐름에서 실 분기 갱신 로직과 함께 도입. **재검토 시점**: Story 3.4 — `needs_clarification = True` 후 사용자 응답 받아 parsed_items 갱신 후 재개 흐름 확정 시.
+- **DF90 — `parse_meal` `raw[:50]` 그래프임 클러스터/이모지 mid-codepoint cut** — `api/app/graph/nodes/parse_meal.py:25-27`. 현 stub은 단순 `[:50]` 슬라이스로 multi-codepoint emoji/ZWJ 시퀀스 중간 절단 가능. 사유: Story 3.4가 실 LLM parse로 stub 대체 시 이 슬라이스 자체가 사라짐. **재검토 시점**: Story 3.4.
+- **DF91 — `evaluate_retrieval_quality` 결정성 노드 retry 의미 0** — `_node_wrapper`가 모든 노드에 동일 retry 적용. 결정적 노드는 같은 입력으로 2회 실패 → 의미 없는 1회 추가 호출. 사유: 본 스토리는 stub만 — Story 3.6 실 LLM router 진입 시점에 retry 정책 분기(per-node opt-out 또는 deterministic 노드 wrapper override). **재검토 시점**: Story 3.6.
+- **DF92 — `fetch_user_profile.health_goal` Literal 강제 변환 누락** — `api/app/graph/nodes/fetch_user_profile.py`. SQLAlchemy PG_ENUM이 raw string 반환 → DB enum drift 시 PydanticValidationError → wrapper retry 의미 없는 fallback. 사유: 현 단계 enum 안정. **재검토 시점**: Story 5.x 회원 프로필 수정 시 enum 마이그레이션과 함께.
+- **DF93 — `AsyncConnectionPool max_size=4` 하드코딩** — `api/app/graph/checkpointer.py:74-75`. 동시 분석 호출 5+ 개 시 풀 starvation 가능. `RATE_LIMIT_LANGGRAPH = "10/minute"`와 정합 X. 사유: 실 부하 측정 전 premature optimization. **재검토 시점**: Story 8 운영 hardening + perf 측정.
+- **DF94 — `WindowsSelectorEventLoopPolicy` conftest 글로벌 스코프** — `api/tests/conftest.py:21-22`. import-time 정책 변경이 모든 테스트에 영향 → 향후 subprocess 테스트 도입 시 충돌. 사유: 현 시점 subprocess 테스트 부재. **재검토 시점**: Story 8 hardening.
+- **DF95 — `--cov-fail-under=70`을 신규 패키지 80% per-module로 강화** — `api/pyproject.toml:1900`. spec AC12 line 182는 `app/graph/` + `analysis_service.py` ≥ 80% 명시이나 게이트 미강화. 현 실측 86-100%로 충족. 사유: 게이트 강화는 cross-cutting CI 정책. **재검토 시점**: Story 8 polish CI 일괄.
+- **DF96 — `psycopg-pool>=3.3` 명시 핀 부재** — `api/pyproject.toml`. `psycopg[pool]` extra가 transitive로 락(현 3.3.0). `open=False` deprecation 회피 패턴이 ≥3.3 의존. 사유: 현 lock 안정 + uv lock이 transitive 핀. **재검토 시점**: Story 8 polish — 외주 인수 readiness 정합 시 직접 핀.
+- **DF97 — async fixture가 `app.state.session_maker` 공유** — `api/tests/graph/conftest.py`. pytest-xdist 병렬 도입 시 cross-test thread_id corruption 가능. 사유: 현 sequential mode 안전. **재검토 시점**: Story 8 CI 병렬화 도입 시.
+- **DF98 — `_to_psycopg_dsn`이 `?driver=` query param 미스트립** — `api/app/graph/checkpointer.py:51-56`. `postgresql://...?driver=asyncpg` 같은 비표준 URL은 psycopg가 unknown param으로 거부. 사유: 현 codebase는 SQLAlchemy DATABASE_URL convention(`postgresql+asyncpg://...`)만 사용 — 발생 시나리오 X. **재검토 시점**: Story 8 polish 또는 외부 DSN convention 도입 시.
+- **DF99 — `aresume`이 managed-field 주입 sanitize 부재** — `api/app/services/analysis_service.py:aresume`. 호출자가 `user_input={"rewrite_attempts": 99, "node_errors": [...]}` 같은 managed field 주입 가능 → state corruption. 사유: 본 스토리는 인터페이스만(spec line 125-126). 실 user_input shape는 Story 3.4가 정의. **재검토 시점**: Story 3.4 — 사용자 응답 payload 스키마 확정 시 sanitize layer 추가.
+
 ## Deferred from: code review of 2-2-식단-사진-입력-권한-흐름 (2026-04-29)
 
 - **DF1 — declared `content_length` vs 실제 R2 PUT body-size enforcement 부재** — `api/app/adapters/r2.py:create_presigned_upload`. 클라이언트가 presign 요청 시 `content_length=1`로 신고 후 50MB body PUT 시 R2 측 거부 게이트 부재 → storage abuse 가능. 사유: spec.md:37("R2 측 enforcement 부재 — Story 8 hardening") 명시 + 본 스토리는 발급 게이트 책임만 담당. **재검토 시점**: Story 8(운영·hardening) — `Content-Length-Range` SigV4 condition 도입 또는 PUT 완료 후 `head_object` size 비교 게이트 추가. 본 스토리에 P21(POST/PATCH attach 시 `head_object` HEAD-check)가 도입되어 *미PUT 키 attach 1차 차단*은 됐으나, *PUT 후 size 우회*는 미해결.
