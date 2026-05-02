@@ -46,7 +46,9 @@ class AnalysisService:
         """단일 분석 호출 — Sentry transaction(`op="analysis.pipeline"`) 진입점.
 
         `thread_id` 미지정 시 `meal:{meal_id}` 기본 — checkpoint 자체가 동일 meal에
-        대한 멱등 가드 역할.
+        대한 멱등 가드 역할. `graph.ainvoke`는 `dict[str, Any]`를 반환하지만 노드 출력의
+        union이 그대로 들어오므로 SOT TypedDict로 cast (런타임 검증은 노드 wrapper의
+        Pydantic이 1차 게이트 — D7).
         """
         actual_thread_id = thread_id or f"meal:{meal_id}"
         config: RunnableConfig = {"configurable": {"thread_id": actual_thread_id}}
@@ -68,12 +70,15 @@ class AnalysisService:
     async def aget_state(self, *, thread_id: str) -> MealAnalysisState:
         """현재 state 조회 — Story 3.4 needs_clarification 흐름 진입점.
 
-        unknown thread_id의 경우 LangGraph는 빈 state를 반환 (graceful — 라우터가
-        클라이언트에 *분석 미시작* 안내).
+        unknown thread_id의 경우 LangGraph는 빈 StateSnapshot 반환 — `.values`가
+        `None`/missing이어도 빈 dict로 graceful 처리.
         """
         config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
         snapshot = await self.graph.aget_state(config)
-        return cast(MealAnalysisState, snapshot.values)
+        if snapshot is None:
+            return cast(MealAnalysisState, {})
+        values = getattr(snapshot, "values", None) or {}
+        return cast(MealAnalysisState, values)
 
     async def aresume(
         self,
@@ -83,8 +88,9 @@ class AnalysisService:
     ) -> MealAnalysisState:
         """needs_clarification 후 사용자 응답을 받아 재개 — 인터페이스만 박음.
 
-        Story 3.4가 `parse_meal` 갱신 분기 + 실 분기 라우팅 강화. 본 스토리는
-        `await self.graph.ainvoke(user_input, config=...)` thin pass-through.
+        Story 3.4가 `parse_meal` 갱신 분기 + 실 분기 라우팅 강화 + 진짜 LangGraph
+        resume semantics(`Command(resume=...)` / `ainvoke(None, ...)`) 도입. 본
+        스토리는 `await self.graph.ainvoke(user_input, config=...)` thin pass-through.
         """
         config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
         with sentry_sdk.start_transaction(

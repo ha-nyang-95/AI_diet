@@ -131,6 +131,13 @@ def test_citation_year_optional() -> None:
     assert c2.published_year is None
 
 
+def test_citation_empty_list_allowed_in_feedback_output() -> None:
+    """AC1 line 46 — `Citation` 빈 리스트 허용 (stub 정합)."""
+    out = FeedbackOutput(text="(분석 준비 중)", citations=[], used_llm="stub")
+    assert out.citations == []
+    assert isinstance(out.citations, list)
+
+
 def test_node_error_fields() -> None:
     err = NodeError(
         node_name="parse_meal",

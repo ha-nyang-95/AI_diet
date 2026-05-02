@@ -20,23 +20,40 @@ def _state(**kwargs: object) -> MealAnalysisState:
     return base
 
 
-def test_route_after_evaluate_rewrite() -> None:
+def test_route_after_evaluate_rewrite_dict() -> None:
+    """AC3 정합 — 노드는 `.model_dump()`로 dict 저장."""
+    state = _state(
+        evaluation_decision=EvaluationDecision(route="rewrite", reason="low").model_dump(),
+    )
+    assert route_after_evaluate(state) == "rewrite_query"
+
+
+def test_route_after_evaluate_continue_dict() -> None:
+    state = _state(
+        evaluation_decision=EvaluationDecision(route="continue", reason="ok").model_dump(),
+    )
+    assert route_after_evaluate(state) == "fetch_user_profile"
+
+
+def test_route_after_evaluate_pydantic_instance_defensive() -> None:
+    """defensive — 만약 노드가 instance를 흘리더라도 `_extract_route`가 처리."""
     state = _state(
         evaluation_decision=EvaluationDecision(route="rewrite", reason="low"),
     )
     assert route_after_evaluate(state) == "rewrite_query"
 
 
-def test_route_after_evaluate_continue() -> None:
-    state = _state(
-        evaluation_decision=EvaluationDecision(route="continue", reason="ok"),
-    )
-    assert route_after_evaluate(state) == "fetch_user_profile"
-
-
 def test_route_after_evaluate_missing_decision_fail_soft() -> None:
     """`evaluation_decision` 부재 시 디폴트 `"continue"` — fail-soft."""
     state = _state()
+    assert route_after_evaluate(state) == "fetch_user_profile"
+
+
+def test_route_after_evaluate_unknown_route_logs_warning_and_continues(
+    caplog: object,
+) -> None:
+    """알 수 없는 route 값 → `route.unknown` warning + `"continue"` 강제."""
+    state = _state(evaluation_decision={"route": "abort", "reason": "tampered"})
     assert route_after_evaluate(state) == "fetch_user_profile"
 
 

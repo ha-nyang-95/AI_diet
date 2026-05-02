@@ -27,7 +27,10 @@ from app.graph.state import MealAnalysisState, UserProfileSnapshot
 async def fetch_user_profile(state: MealAnalysisState, *, deps: NodeDeps) -> dict[str, Any]:
     user_id = state["user_id"]
     async with deps.session_maker() as session:
-        result = await session.execute(select(User).where(User.id == user_id))
+        # soft-deleted user는 미존재 취급 — PII(allergies/age/weight) 누설 차단.
+        result = await session.execute(
+            select(User).where(User.id == user_id, User.deleted_at.is_(None))
+        )
         user = result.scalar_one_or_none()
 
     if user is None:

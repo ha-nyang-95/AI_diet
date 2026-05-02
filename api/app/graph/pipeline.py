@@ -20,9 +20,8 @@ from typing import TYPE_CHECKING, Any
 
 from langgraph.graph import END, START, StateGraph
 
-from app.core.config import settings
 from app.graph.deps import NodeDeps
-from app.graph.edges import route_after_evaluate
+from app.graph.edges import route_after_evaluate, route_after_node_error
 from app.graph.nodes import (
     evaluate_fit,
     evaluate_retrieval_quality,
@@ -36,6 +35,10 @@ from app.graph.state import MealAnalysisState
 
 if TYPE_CHECKING:  # pragma: no cover
     from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+# `LANGGRAPH_DEBUG=1` 시 LangGraph가 raw state print → raw_text/allergies PII 누설.
+# prod에서는 강제 False(NFR-S5 정합).
+_DEBUG_ALLOWED_ENVIRONMENTS = {"dev", "test", "ci"}
 
 
 def compile_pipeline(checkpointer: AsyncPostgresSaver, deps: NodeDeps) -> Any:
@@ -80,14 +83,24 @@ def compile_pipeline(checkpointer: AsyncPostgresSaver, deps: NodeDeps) -> Any:
     # 가 한 번 더 평가하고 `rewrite_attempts >= 1`이라 강제 `"continue"` 반환.
     builder.add_edge("rewrite_query", "retrieve_nutrition")
 
-    # 정상 흐름 종단.
-    builder.add_edge("fetch_user_profile", "evaluate_fit")
+    # `fetch_user_profile` 실패 시 (user_not_found / profile_incomplete) 강제 종료 —
+    # 후속 노드가 user_profile 없이 fit_score 계산 시 의미 X 결과 생성. 그 외 노드
+    # 실패는 부분 state로 진행 (FR45).
+    builder.add_conditional_edges(
+        "fetch_user_profile",
+        route_after_node_error,
+        {"end": END, "next": "evaluate_fit"},
+    )
     builder.add_edge("evaluate_fit", "generate_feedback")
     builder.add_edge("generate_feedback", END)
 
+    # `LANGGRAPH_DEBUG=1` + dev/test/ci에서만 — prod는 강제 False (raw state PII 차단).
+    debug_enabled = bool(deps.settings.langgraph_debug) and (
+        deps.settings.environment in _DEBUG_ALLOWED_ENVIRONMENTS
+    )
     return builder.compile(
         checkpointer=checkpointer,
-        debug=settings.langgraph_debug,
+        debug=debug_enabled,
     )
 
 

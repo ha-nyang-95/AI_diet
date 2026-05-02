@@ -49,6 +49,8 @@ from app.core.middleware import RequestIdMiddleware
 from app.core.sentry import init_sentry
 from app.graph.checkpointer import build_checkpointer, dispose_checkpointer
 from app.graph.deps import NodeDeps
+from app.graph.pipeline import compile_pipeline
+from app.services.analysis_service import AnalysisService
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -107,15 +109,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.limiter = _build_limiter("memory://")
 
     # Story 3.3 — LangGraph 분석 파이프라인 4 자원 (checkpointer/pool/graph/service).
-    # DB 미가동 / connection 거절 시 graceful 분기 — `app.state.graph = None` (D10).
-    # 라우터(Story 3.7) None 가드 + 503 안내. compile_pipeline / AnalysisService import는
-    # circular 회피 — lifespan 안에서만 lazy.
+    # DB 미가동 / connection 거절 / schema mismatch / setup() 내부 장애 등 모든 실패는
+    # graceful 분기 — `app.state.graph = None` (D10). 라우터(Story 3.7) None 가드 + 503 안내.
     try:
         if app.state.session_maker is None:
             raise AnalysisCheckpointerError("checkpointer.session_maker_unavailable")
         checkpointer, pool = await build_checkpointer(settings.database_url)
-        from app.graph.pipeline import compile_pipeline
-        from app.services.analysis_service import AnalysisService
 
         app.state.checkpointer = checkpointer
         app.state.checkpointer_pool = pool
@@ -131,6 +130,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
     except AnalysisCheckpointerError as exc:
         log.error("app.startup.checkpointer_init_failed", error=str(exc))
+        app.state.checkpointer = None
+        app.state.checkpointer_pool = None
+        app.state.graph = None
+        app.state.analysis_service = None
+    except Exception as exc:  # noqa: BLE001
+        # `setup()` 내부 RuntimeError / ProgrammingError / DuplicateTable / 버전 mismatch 등
+        # — D10 graceful 정합. 부팅을 막지 않고 라우터 503 안내.
+        log.error("app.startup.checkpointer_init_failed", error=str(exc), exc_info=True)
         app.state.checkpointer = None
         app.state.checkpointer_pool = None
         app.state.graph = None

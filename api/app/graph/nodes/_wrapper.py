@@ -39,7 +39,11 @@ _RETRY_TYPES: tuple[type[BaseException], ...] = (
     PydanticValidationError,
     AnalysisStateValidationError,
     asyncio.TimeoutError,
-    httpx.HTTPError,
+    # transient httpx — 4xx/5xx response error는 retry 의미 X (요청 재시도 ≠ 응답 재시도).
+    httpx.TimeoutException,
+    httpx.ConnectError,
+    httpx.ReadError,
+    httpx.RemoteProtocolError,
 )
 
 

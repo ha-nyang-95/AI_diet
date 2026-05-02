@@ -16,7 +16,24 @@ from __future__ import annotations
 
 from typing import Literal
 
+import structlog
+
 from app.graph.state import MealAnalysisState
+
+log = structlog.get_logger()
+
+
+def _extract_route(decision: object) -> str:
+    """`evaluation_decision`에서 `route` 추출 — Pydantic instance, dict, None 모두 수용.
+
+    AC3 — 노드 출력은 `.model_dump()` 후 dict 저장이 SOT이지만, checkpoint
+    직렬화/역직렬화 경계에서 형태가 바뀔 수 있으므로 양 형태 모두 수용 (defensive).
+    """
+    if decision is None:
+        return "continue"
+    if isinstance(decision, dict):
+        return str(decision.get("route", "continue"))
+    return str(getattr(decision, "route", "continue"))
 
 
 def route_after_evaluate(
@@ -24,11 +41,15 @@ def route_after_evaluate(
 ) -> Literal["rewrite_query", "fetch_user_profile"]:
     """`evaluate_retrieval_quality` 출력의 `route` 필드 분기.
 
-    `state["evaluation_decision"]` 부재 시 디폴트 `"continue"` (fail-soft) →
-    `fetch_user_profile`로 분기.
+    `state["evaluation_decision"]` 부재 또는 알 수 없는 route 값 시 디폴트
+    `"continue"` (fail-soft) → `fetch_user_profile`로 분기. 알 수 없는 값은
+    `route.unknown` warn 로그 — 디버깅 용이성.
     """
     decision = state.get("evaluation_decision")
-    route = decision.route if decision is not None else "continue"
+    route = _extract_route(decision)
+    if route not in {"rewrite", "continue"}:
+        log.warning("route.unknown", route=route)
+        route = "continue"
     return "rewrite_query" if route == "rewrite" else "fetch_user_profile"
 
 

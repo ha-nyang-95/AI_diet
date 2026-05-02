@@ -94,7 +94,12 @@ async def test_wrapper_analysis_node_error_skipped_retry(fake_deps: NodeDeps) ->
 
 
 async def test_wrapper_sentry_span_called(fake_deps: NodeDeps) -> None:
-    """Sentry `start_span(op="langgraph.node", description=node_name)` 호출 검증."""
+    """Sentry `start_span(op="langgraph.node", name=node_name)` 호출 검증.
+
+    NOTE: spec naming line 315의 `description=`은 Sentry SDK 1.x 컨벤션. SDK 2.x
+    에서 `description` deprecated → span은 `name`이 SOT (transaction과 동일 키).
+    Debug Log line 545 정합.
+    """
 
     @_node_wrapper("traced_node")
     async def _node(state: MealAnalysisState, *, deps: NodeDeps) -> dict[str, Any]:

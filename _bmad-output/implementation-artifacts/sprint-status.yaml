@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-27
-last_updated: 2026-05-02  # Story 3.3 DS 완료 — LangGraph 6노드 stub + Self-RAG 분기(rewrite_attempts < 1, 1회 한도 회귀 가드) + AsyncPostgresSaver(lg_checkpoints schema 격리 + autocommit pool + setup() idempotent) + analysis_service 진입점 + AnalysisGraphError 4 서브클래스 + psycopg[binary,pool]>=3.2 직접 의존 + langgraph-checkpoint-postgres>=3.0 강화 + lifespan 4 자원(checkpointer/pool/graph/analysis_service) graceful + perf 골격(NFR-P4/P5/T1 skip 디폴트) + Windows ProactorEventLoop → SelectorEventLoop fix(psycopg 호환). 397 passed / 5 skipped(perf opt-in) / 0 failed / coverage 86% / mypy strict 0 errors. branch feat/story-3.3. Status: ready-for-dev → in-progress → review.
+last_updated: 2026-05-02  # Story 3.3 CR 완료 — 18 patches + 1 decision(option A) + 11 defer + 7 dismiss. Self-RAG 무한 루프 가드(`evaluate_retrieval_quality`가 node_errors 내 rewrite_query 실패 카운트), `evaluation_decision .model_dump()` AC3 정합, `fetch_user_profile` soft-delete 필터, lifespan generic Exception graceful catch, `_ensure_schema` autocommit + `psycopg.sql.Identifier`, `retrieve_nutrition` low_confidence sentinel(prod 안전), `compile_pipeline` deps.settings + LANGGRAPH_DEBUG env gate, `route_after_evaluate` unknown route warn + dict access, `dispose_checkpointer` exc_info + closed guard, `_to_psycopg_dsn` ValueError → AnalysisCheckpointerError, `aget_state` None snapshot, AC11 graceful-failure 테스트 2건, `_RETRY_TYPES` httpx 좁힘, lifespan import top-level, AC1 spec evaluation_decision 명시, Citation 빈 리스트 명시 테스트. DECISION_A: `route_after_node_error`를 fetch_user_profile 후 wire(치명적 종료 강제). 404 passed / 5 skipped / 0 failed / coverage 86% / mypy strict 0 errors / ruff clean. Status: review → done.
 project: AI_diet
 project_key: NOKEY
 tracking_system: file-system
@@ -65,7 +65,7 @@ development_status:
   epic-3: in-progress
   3-1-음식-영양-rag-시드-pgvector: done
   3-2-가이드라인-rag-시드-chunking: done
-  3-3-langgraph-6노드-self-rag-saver: review
+  3-3-langgraph-6노드-self-rag-saver: done
   3-4-음식명-정규화-매칭-fallback: backlog
   3-5-fit-score-알고리즘-알레르기-단락: backlog
   3-6-인용형-피드백-광고-가드-듀얼-llm: backlog

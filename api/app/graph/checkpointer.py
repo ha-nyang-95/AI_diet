@@ -60,11 +60,15 @@ async def _ensure_schema(dsn: str, schema: str) -> None:
     """schema 사전 생성 — single-flight, lifespan 1회 호출.
 
     pool 외부의 별 connection으로 실행 — pool open *전*에 schema가 존재해야 setup()
-    이 안전. `IF NOT EXISTS`로 idempotent.
+    이 안전. `IF NOT EXISTS`로 idempotent. `autocommit=True`로 broken-state rollback
+    회피(`CREATE SCHEMA` 실패 시에도 connection close가 깨끗).
     """
-    async with await psycopg.AsyncConnection.connect(dsn) as conn:
-        await conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}"')
-        await conn.commit()
+    async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
+        # 식별자 SQL injection 방어 — `psycopg.sql.Identifier`로 quoting 위임.
+        from psycopg import sql as _sql
+
+        stmt = _sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(_sql.Identifier(schema))
+        await conn.execute(stmt)
 
 
 async def build_checkpointer(
@@ -97,6 +101,9 @@ async def build_checkpointer(
         await pool.open()
         checkpointer = AsyncPostgresSaver(pool)  # type: ignore[arg-type]
         await checkpointer.setup()
+    except ValueError as exc:
+        # `_to_psycopg_dsn`의 비표준 scheme 거부 — 앱 부팅 hard crash 방지.
+        raise AnalysisCheckpointerError("checkpointer.setup_failed") from exc
     except (pg_errors.OperationalError, pg_errors.InterfaceError) as exc:
         raise AnalysisCheckpointerError("checkpointer.setup_failed") from exc
     except OSError as exc:
@@ -113,11 +120,13 @@ async def build_checkpointer(
 
 
 async def dispose_checkpointer(pool: AsyncConnectionPool) -> None:
-    """pool close — shutdown 경로 graceful (예외 swallow 후 warn 로그)."""
+    """pool close — shutdown 경로 graceful (이미 close된 경우 idempotent)."""
+    if getattr(pool, "closed", False):
+        return
     try:
         await pool.close()
-    except Exception as exc:  # noqa: BLE001
-        log.warning("checkpointer.dispose_failed", error=str(exc))
+    except Exception:  # noqa: BLE001
+        log.warning("checkpointer.dispose_failed", exc_info=True)
 
 
 __all__ = [

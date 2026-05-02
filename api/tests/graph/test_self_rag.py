@@ -55,9 +55,11 @@ async def test_self_rag_one_attempt_limit_under_persistent_low_confidence(
             )
             # 1회 한도 도달 — 정확히 1
             assert result["rewrite_attempts"] == 1
-            # rewrite_limit_reached 분기 — `evaluate_retrieval_quality`가 강제 "continue"
-            assert result["evaluation_decision"].route == "continue"
-            assert result["evaluation_decision"].reason == "rewrite_limit_reached"
+            # rewrite_limit_reached 분기 — `evaluate_retrieval_quality`가 강제 "continue".
+            # AC3 정합 — 결정은 `.model_dump()` dict로 저장.
+            decision = result["evaluation_decision"]
+            assert decision["route"] == "continue"
+            assert decision["reason"] == "rewrite_limit_reached"
             # 종단 — fit_evaluation/feedback이 stub으로 진행
             assert result["fit_evaluation"].fit_score == 50
     finally:
@@ -86,7 +88,56 @@ async def test_self_rag_high_confidence_skips_rewrite(
             config={"configurable": {"thread_id": thread_id}},
         )
         assert result["rewrite_attempts"] == 0
-        assert result["evaluation_decision"].route == "continue"
-        assert result["evaluation_decision"].reason == "confidence_ok"
+        decision = result["evaluation_decision"]
+        assert decision["route"] == "continue"
+        assert decision["reason"] == "confidence_ok"
+    finally:
+        await dispose_checkpointer(pool)
+
+
+async def test_self_rag_terminates_when_rewrite_query_fails_persistently(
+    user_factory: UserFactory,
+    db_deps: NodeDeps,
+) -> None:
+    """무한 루프 회귀 가드 — `rewrite_query`가 transient로 매번 실패해 `rewrite_attempts`
+    increment 못 해도 `evaluate_retrieval_quality`가 `node_errors` 카운트로 1회 한도 강제.
+
+    `_node_wrapper`의 fallback이 `rewrite_attempts` increment를 누락하는 경로 (NodeError만
+    append) → `evaluate_retrieval_quality`가 visit한 후 `node_errors` 내 rewrite_query
+    실패를 attempts에 합산 → `"continue"` 강제 → 종료.
+    """
+    import httpx
+
+    from app.graph.nodes._wrapper import _node_wrapper
+
+    user = await user_factory(profile_completed=True)
+    checkpointer, pool = await build_checkpointer(settings.database_url)
+
+    @_node_wrapper("rewrite_query")
+    async def _wrapped_always_fail(state: dict[str, object], **_: object) -> dict[str, object]:
+        raise httpx.TimeoutException("rewrite_query transient")
+
+    try:
+        with patch("app.graph.pipeline.rewrite_query", new=_wrapped_always_fail):
+            graph = compile_pipeline(checkpointer, db_deps)
+            thread_id = f"test-thread-{uuid.uuid4()}"
+            result = await graph.ainvoke(
+                {
+                    "meal_id": uuid.uuid4(),
+                    "user_id": user.id,
+                    "raw_text": "__test_low_confidence__",
+                    "rewrite_attempts": 0,
+                    "node_errors": [],
+                    "needs_clarification": False,
+                },
+                config={"configurable": {"thread_id": thread_id}},
+            )
+            # `rewrite_attempts` 자체는 0(wrapper fallback이 increment 누락) — 그러나
+            # `node_errors`에 rewrite_query NodeError 누적 → evaluate가 "continue" 강제.
+            errs = result.get("node_errors", [])
+            assert any(e.node_name == "rewrite_query" for e in errs)
+            decision = result["evaluation_decision"]
+            assert decision["route"] == "continue"
+            assert decision["reason"] == "rewrite_limit_reached"
     finally:
         await dispose_checkpointer(pool)

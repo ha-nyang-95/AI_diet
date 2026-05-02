@@ -32,8 +32,8 @@ async def test_low_conf_zero_attempts_routes_rewrite(fake_deps: NodeDeps) -> Non
         _state(confidence=0.3, rewrite_attempts=0),
         deps=fake_deps,
     )
-    assert out["evaluation_decision"].route == "rewrite"
-    assert "low_confidence_0.30" in out["evaluation_decision"].reason
+    assert out["evaluation_decision"]["route"] == "rewrite"
+    assert "low_confidence_0.30" in out["evaluation_decision"]["reason"]
 
 
 async def test_low_conf_one_attempt_routes_continue_limit_reached(
@@ -44,8 +44,8 @@ async def test_low_conf_one_attempt_routes_continue_limit_reached(
         _state(confidence=0.3, rewrite_attempts=1),
         deps=fake_deps,
     )
-    assert out["evaluation_decision"].route == "continue"
-    assert out["evaluation_decision"].reason == "rewrite_limit_reached"
+    assert out["evaluation_decision"]["route"] == "continue"
+    assert out["evaluation_decision"]["reason"] == "rewrite_limit_reached"
 
 
 async def test_high_conf_zero_attempts_routes_continue(fake_deps: NodeDeps) -> None:
@@ -53,8 +53,8 @@ async def test_high_conf_zero_attempts_routes_continue(fake_deps: NodeDeps) -> N
         _state(confidence=0.7, rewrite_attempts=0),
         deps=fake_deps,
     )
-    assert out["evaluation_decision"].route == "continue"
-    assert out["evaluation_decision"].reason == "confidence_ok"
+    assert out["evaluation_decision"]["route"] == "continue"
+    assert out["evaluation_decision"]["reason"] == "confidence_ok"
 
 
 async def test_high_conf_one_attempt_routes_continue(fake_deps: NodeDeps) -> None:
@@ -62,7 +62,7 @@ async def test_high_conf_one_attempt_routes_continue(fake_deps: NodeDeps) -> Non
         _state(confidence=0.85, rewrite_attempts=1),
         deps=fake_deps,
     )
-    assert out["evaluation_decision"].route == "continue"
+    assert out["evaluation_decision"]["route"] == "continue"
 
 
 async def test_missing_retrieval_treated_as_zero(fake_deps: NodeDeps) -> None:
@@ -75,4 +75,35 @@ async def test_missing_retrieval_treated_as_zero(fake_deps: NodeDeps) -> None:
         "node_errors": [],
     }
     out = await evaluate_retrieval_quality(state, deps=fake_deps)
-    assert out["evaluation_decision"].route == "rewrite"
+    assert out["evaluation_decision"]["route"] == "rewrite"
+
+
+async def test_node_errors_rewrite_query_count_toward_attempts(
+    fake_deps: NodeDeps,
+) -> None:
+    """무한 루프 회귀 가드 — wrapper fallback이 `rewrite_attempts` increment를 누락한 시나리오.
+
+    `rewrite_query`가 transient 실패로 wrapper fallback → `rewrite_attempts == 0`
+    그대로지만 `node_errors`에 rewrite_query NodeError 1건 누적 → 본 노드는 그것을
+    1회 attempt로 인정하여 `"continue"` route 강제.
+    """
+    from app.graph.state import NodeError, RetrievalResult
+
+    state: MealAnalysisState = {
+        "meal_id": uuid.uuid4(),
+        "user_id": uuid.uuid4(),
+        "raw_text": "x",
+        "retrieval": RetrievalResult(retrieved_foods=[], retrieval_confidence=0.3),
+        "rewrite_attempts": 0,
+        "node_errors": [
+            NodeError(
+                node_name="rewrite_query",
+                error_class="TimeoutException",
+                message="transient",
+                attempts=2,
+            )
+        ],
+    }
+    out = await evaluate_retrieval_quality(state, deps=fake_deps)
+    assert out["evaluation_decision"]["route"] == "continue"
+    assert out["evaluation_decision"]["reason"] == "rewrite_limit_reached"

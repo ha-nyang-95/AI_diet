@@ -75,7 +75,7 @@ async def test_pipeline_low_confidence_triggers_self_rag(
             {
                 "meal_id": uuid.uuid4(),
                 "user_id": user.id,
-                "raw_text": "low_confidence_food",
+                "raw_text": "__test_low_confidence__",
                 "rewrite_attempts": 0,
                 "node_errors": [],
                 "needs_clarification": False,
@@ -93,12 +93,11 @@ async def test_pipeline_low_confidence_triggers_self_rag(
         await dispose_checkpointer(pool)
 
 
-async def test_pipeline_user_not_found_continues_with_node_error(
+async def test_pipeline_user_not_found_terminates_at_fetch_user_profile(
     db_deps: NodeDeps,
 ) -> None:
-    """user 미존재 → `fetch_user_profile`에서 `AnalysisNodeError` → wrapper가 NodeError로
-    swallow + state 누적. evaluate_fit/generate_feedback은 *그래프 정의상* 진행
-    (라우팅은 add_edge linear). user_profile 없이 stub 진행 (FR45 정합).
+    """user 미존재 → `fetch_user_profile`에서 `AnalysisNodeError` → wrapper가 NodeError 누적
+    → `route_after_node_error`가 `"end"` 분기 → 후속 노드 미진행 (치명적 케이스 종료).
     """
     checkpointer, pool = await build_checkpointer(settings.database_url)
     try:
@@ -121,6 +120,10 @@ async def test_pipeline_user_not_found_continues_with_node_error(
         assert any(
             e.node_name == "fetch_user_profile" and "user_not_found" in e.message for e in errs
         )
+        # 치명적 종료 — 후속 노드 미진행
+        assert result.get("user_profile") is None
+        assert result.get("fit_evaluation") is None
+        assert result.get("feedback") is None
     finally:
         await dispose_checkpointer(pool)
 
