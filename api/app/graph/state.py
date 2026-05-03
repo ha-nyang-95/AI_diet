@@ -24,15 +24,25 @@ from typing import Literal, TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.domain.fit_score import FitScoreComponents
+from app.domain.fit_score import to_summary_label as to_summary_label  # noqa: PLC0414
 from app.domain.health_profile import ActivityLevel, HealthGoal
+
+# CR D-2: `to_summary_label`은 `app.graph.state`에서도 직접 참조 가능하도록
+# explicit re-export(PEP 484 `as` 구문). Story 3.6 `MealAnalysisSummary` 영속화
+# 시점에 wiring helper로 사용.
 
 
 class FoodItem(BaseModel):
-    """`parse_meal` 노드 출력의 단일 음식 — Story 3.4가 실 LLM parse로 대체."""
+    """`parse_meal` 노드 출력의 단일 음식 — Story 3.4가 실 LLM parse로 대체.
+
+    CR M-2: `name`에 `min_length=1` — LLM/OCR glitch로 빈 문자열 leak 시
+    `aggregate_meal_macros` substring 매칭이 모든 음식과 매칭하는 회귀 차단.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    name: str
+    name: str = Field(min_length=1)
     quantity: str | None = None
     confidence: float = Field(ge=0, le=1)
 
@@ -46,14 +56,18 @@ class ParseMealOutput(BaseModel):
 
 
 class RetrievedFood(BaseModel):
-    """RAG top-k 결과 단일 음식 — Story 3.4가 실 alias lookup + HNSW로 채움."""
+    """RAG top-k 결과 단일 음식 — Story 3.4가 실 alias lookup + HNSW로 채움.
+
+    Story 3.5 — ``nutrition`` value 타입에 ``str`` 추가: ``category`` 등 텍스트 메타가
+    jsonb에 동거(``detect_allergen_violations`` substring 매칭 입력).
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     name: str
     food_id: uuid.UUID | None = None
     score: float = Field(ge=0, le=1)
-    nutrition: dict[str, float | int]
+    nutrition: dict[str, float | int | str]
 
 
 class RetrievalResult(BaseModel):
@@ -109,12 +123,24 @@ class UserProfileSnapshot(BaseModel):
 
 
 class FitEvaluation(BaseModel):
-    """`evaluate_fit` 노드 *공식 출력* — Story 3.5 stub: 50 + []."""
+    """`evaluate_fit` 노드 *공식 출력* — Story 3.5 결정성 알고리즘.
+
+    Story 3.3/3.4 stub 호환을 위해 신규 필드는 모두 default 값 부여:
+    - ``fit_reason``: ``"ok"`` 정상, ``"allergen_violation"`` 단락, ``"incomplete_data"``
+      profile/parsed_items 부재.
+    - ``fit_label`` band(NFR-A4 색약 대응): ``good`` 80+ / ``caution`` 60-79 /
+      ``needs_adjust`` <60 / ``allergen_violation`` 단락 케이스.
+    - ``components``: 4 컴포넌트(macro/calorie/allergen/balance) + coverage_ratio
+      분해 노출 — Story 3.6 인용 피드백 입력 + Story 4.3 차트 입력.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     fit_score: int = Field(ge=0, le=100)
     reasons: list[str]
+    fit_reason: Literal["ok", "allergen_violation", "incomplete_data"] = "ok"
+    fit_label: Literal["good", "caution", "needs_adjust", "allergen_violation"] = "needs_adjust"
+    components: FitScoreComponents = Field(default_factory=FitScoreComponents.zero)
 
 
 class Citation(BaseModel):

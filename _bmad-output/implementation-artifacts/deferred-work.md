@@ -2,6 +2,15 @@
 
 리뷰·구현 과정에서 식별되었으나 다음 스토리·시점으로 미룬 항목 모음.
 
+## Deferred from: code review of 3-5-fit-score-알고리즘-알레르기-단락 (2026-05-03)
+
+- **df-1 hardcoded `sex="female"` for all users** — `api/app/domain/fit_score.py:compute_fit_score` BMR 호출이 `sex="female"`로 고정. 남성 사용자 BMR 166 kcal 과소산정 → meal target ~76-105 kcal 과소 → calorie_score systematic 편향. **재검토 시점**: Story 8.4 polish — `UserProfileSnapshot.sex` 필드 추가 + Story 1.5 alembic 마이그레이션 + fetch_user_profile 갱신 (스펙 line 26 명시 OUT).
+- **df-2 negation phrasing(`땅콩없음`/`우유 미함유`) substring false-positive** — `api/app/domain/fit_score.py:detect_allergen_violations`. `"땅콩 미함유"` 라벨도 `"땅콩"` substring으로 fire. 스펙 posture는 "보수적 false-positive 우선 — 안전 측면". 실 메뉴는 negation을 name 필드보다 ingredient list에 명시. **재검토 시점**: Story 4.x ingredient list 처리 도입 시 또는 Story 8.4 polish.
+- **df-3 `포크` alias가 비식품 단어(포크송/포크댄스/포크리프트)에 fire 가능** — `api/app/domain/fit_score.py:ALLERGEN_ALIAS_MAP`. LLM/OCR 파이프라인이 비식품 단어를 음식명으로 emit 가능성 낮음. **재검토 시점**: Story 8.4 alias map 50+ 확장 + 외주 클라이언트 자사 메뉴 보강 SOP.
+- **df-4 tautological 22-allergen 테스트 (`아황산류`/`잔류 우유 단백`)** — `api/tests/domain/test_fit_score_allergen_22.py`. food name이 라벨 string 자체를 verbatim 포함 → 단순 `label in text` 매칭. 실 한국 메뉴는 `"드라이와인"`/`"카제인 함유 단백질바"` 처럼 alias 필요. **재검토 시점**: Story 8.4 alias map 50+ 확장 시 와인/카제인 매핑 추가.
+- **df-5 detect_allergen_violations가 quantity 무시 (trace amount == primary ingredient)** — `api/app/domain/fit_score.py:detect_allergen_violations`. `"우유 1방울"` 같은 trace도 fit_score=0 단락. 안전 baseline 의식적 선택. **재검토 시점**: Story 8.4 dose threshold(예: `>= 5g` 또는 ingredient ratio).
+- **df-6 BMR 검증이 ratio sanity 미체크 (age=150 + weight=1 → 음수 BMR)** — `api/app/domain/bmr.py:compute_bmr_mifflin`. DB CHECK가 SOT — 실 시나리오에서 도달 불가. 음수 출력 가드는 m-6 패치로 처리. **재검토 시점**: Story 8.4 polish — input ratio sanity validator (예: `weight_kg/height_cm > 0.05`).
+
 ## Deferred from: code review of 3-3-langgraph-6노드-self-rag-saver (2026-05-02)
 
 - **DF89 — `aresume`의 진짜 LangGraph resume semantics 미구현** — `api/app/services/analysis_service.py:aresume`. 현 구현은 `await self.graph.ainvoke(user_input, config=...)`로 START부터 재실행. 진짜 resume은 `Command(resume=...)` 또는 `ainvoke(None, config=...)` 패턴. 사유: spec line 125-126이 *인터페이스 박기만* 명시 — Story 3.4 needs_clarification 흐름에서 실 분기 갱신 로직과 함께 도입. **재검토 시점**: Story 3.4 — `needs_clarification = True` 후 사용자 응답 받아 parsed_items 갱신 후 재개 흐름 확정 시.

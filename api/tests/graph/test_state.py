@@ -13,6 +13,7 @@ from app.graph.state import (
     EvaluationDecision,
     FeedbackOutput,
     FitEvaluation,
+    FitScoreComponents,
     FoodItem,
     MealAnalysisState,
     NodeError,
@@ -142,6 +143,67 @@ def test_fit_evaluation_score_bounds() -> None:
         FitEvaluation(fit_score=-1, reasons=[])
     with pytest.raises(ValidationError):
         FitEvaluation(fit_score=101, reasons=[])
+
+
+def test_fit_evaluation_default_compatibility_with_legacy_constructor() -> None:
+    """Story 3.5 — legacy 2-arg constructor에 Pydantic default가 적용됨을 검증.
+
+    CR m-8: 본 테스트는 Pydantic *default* 동작 검증만 — `fit_label="needs_adjust"`는
+    fit_score(85)와 band-일관성을 시사하지 *않음*. 신규 callsite는 항상 explicit한
+    `compute_fit_score` 산출 결과를 전달해야 한다(band 일관성은 도메인 함수 책임).
+    legacy stub callsite의 *deprecation 회피*만이 본 테스트의 contract.
+
+    추후 `FitEvaluation`에 band 일관성 `model_validator`를 도입할 경우 본 테스트는
+    inconsistent state(score=85 + label=needs_adjust)이므로 의도적으로 깨질 것 —
+    동시에 legacy stub callsite도 함께 정리해야 함.
+    """
+    fe = FitEvaluation(fit_score=85, reasons=["..."])
+    assert fe.fit_reason == "ok"
+    # Pydantic field default — band 일관성을 시사하지 않음.
+    assert fe.fit_label == "needs_adjust"
+    assert fe.components == FitScoreComponents.zero()
+
+
+def test_fit_evaluation_full_constructor_with_components() -> None:
+    fe = FitEvaluation(
+        fit_score=0,
+        reasons=["알레르기 위반: 우유"],
+        fit_reason="allergen_violation",
+        fit_label="allergen_violation",
+        components=FitScoreComponents.allergen_violation(),
+    )
+    assert fe.fit_reason == "allergen_violation"
+    assert fe.fit_label == "allergen_violation"
+    assert fe.components.coverage_ratio == 0.0
+
+
+def test_fit_evaluation_invalid_fit_reason_rejected() -> None:
+    with pytest.raises(ValidationError):
+        FitEvaluation(
+            fit_score=50,
+            reasons=[],
+            fit_reason="invalid",  # type: ignore[arg-type]
+        )
+
+
+def test_fit_evaluation_invalid_fit_label_rejected() -> None:
+    with pytest.raises(ValidationError):
+        FitEvaluation(
+            fit_score=50,
+            reasons=[],
+            fit_label="other",  # type: ignore[arg-type]
+        )
+
+
+def test_fit_evaluation_components_macro_over_40_rejected() -> None:
+    with pytest.raises(ValidationError):
+        FitEvaluation(
+            fit_score=50,
+            reasons=[],
+            components=FitScoreComponents(
+                macro=41, calorie=0, allergen=0, balance=0, coverage_ratio=0
+            ),
+        )
 
 
 def test_feedback_output_default_used_llm() -> None:
