@@ -37,7 +37,11 @@ log = structlog.get_logger()
 
 
 def _coerce_profile(raw: object) -> UserProfileSnapshot | None:
-    """state[user_profile]이 dict 또는 Pydantic instance일 수 있음 — 안전 변환."""
+    """state[user_profile]이 dict 또는 Pydantic instance일 수 있음 — 안전 변환.
+
+    CR m-2: 변환 실패 시 masked warning(예외 클래스명만, 필드 값 X) — silent
+    swallow 회귀로 데이터 corruption을 디버깅 불가능하게 만드는 경로 차단.
+    """
     if raw is None:
         return None
     if isinstance(raw, UserProfileSnapshot):
@@ -45,7 +49,8 @@ def _coerce_profile(raw: object) -> UserProfileSnapshot | None:
     if isinstance(raw, dict):
         try:
             return UserProfileSnapshot(**raw)
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            log.warning("evaluate_fit.coerce_failed", kind="profile", error=type(e).__name__)
             return None
     return None
 
@@ -56,7 +61,8 @@ def _coerce_food_item(raw: object) -> FoodItem | None:
     if isinstance(raw, dict):
         try:
             return FoodItem(**raw)
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            log.warning("evaluate_fit.coerce_failed", kind="food_item", error=type(e).__name__)
             return None
     return None
 
@@ -67,7 +73,12 @@ def _coerce_retrieved_food(raw: object) -> RetrievedFood | None:
     if isinstance(raw, dict):
         try:
             return RetrievedFood(**raw)
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "evaluate_fit.coerce_failed",
+                kind="retrieved_food",
+                error=type(e).__name__,
+            )
             return None
     return None
 
@@ -107,10 +118,11 @@ async def evaluate_fit(state: MealAnalysisState, *, deps: NodeDeps) -> dict[str,
 
     latency_ms = int((time.monotonic() - start) * 1000)
     # NFR-S5 마스킹 — fit_score/fit_label/components(int)/coverage_ratio/violated_count만.
+    # CR m-3: self-emitted prefix 문자열 파싱(`"알레르기 위반:"`) 대신 reasons 길이를
+    # 직접 사용 — `compute_fit_score`가 violation 케이스에서 `reasons = [f"알레르기 위반: {a}"
+    # for a in sorted(violations)]`로 채우므로 `len(reasons)` 가 violation 카운트와 정합.
     violated_count = (
-        len([r for r in fit_evaluation.reasons if r.startswith("알레르기 위반:")])
-        if fit_evaluation.fit_reason == "allergen_violation"
-        else 0
+        len(fit_evaluation.reasons) if fit_evaluation.fit_reason == "allergen_violation" else 0
     )
     log.info(
         "node.evaluate_fit.complete",

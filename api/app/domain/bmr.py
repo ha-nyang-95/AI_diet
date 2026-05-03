@@ -61,7 +61,12 @@ def compute_bmr_mifflin(
     if age < 1 or age > 150 or weight_kg <= 0 or height_cm <= 0:
         raise ValueError("invalid bmr inputs")
     base = 10 * weight_kg + 6.25 * height_cm - 5 * age
-    return base + (5 if sex == "male" else -161)
+    bmr = base + (5 if sex == "male" else -161)
+    # CR m-6: 극단 valid 입력 조합(예: age=150 + weight=1 + height=1)이 음수 BMR을
+    # silent 통과해 downstream `target_meal_kcal < 0` → score 왜곡되는 경로 차단.
+    if bmr <= 0:
+        raise ValueError("invalid bmr inputs")
+    return bmr
 
 
 def compute_tdee(*, bmr: float, activity_level: ActivityLevel) -> float:

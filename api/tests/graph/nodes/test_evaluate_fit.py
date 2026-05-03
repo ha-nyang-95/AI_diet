@@ -6,10 +6,9 @@
 
 from __future__ import annotations
 
-import logging
 import uuid
 
-import pytest
+import structlog.testing as structlog_testing
 
 from app.graph.deps import NodeDeps
 from app.graph.nodes import evaluate_fit
@@ -211,22 +210,118 @@ async def test_evaluate_fit_dict_state_for_checkpointer_replay(fake_deps: NodeDe
     assert 0 <= fe["fit_score"] <= 100
 
 
-async def test_evaluate_fit_log_masks_pii(
+def _profile_for_masking(*, allergies: list[str] | None = None) -> UserProfileSnapshot:
+    """CR M-1: masking test 전용 — 비ambiguous 값(unique substrings)."""
+    return UserProfileSnapshot(
+        user_id=uuid.UUID("aaaaaaaa-bbbb-cccc-dddd-000000000001"),
+        health_goal="weight_loss",
+        age=47,
+        weight_kg=63.7,
+        height_cm=171.5,
+        activity_level="light",
+        allergies=allergies or [],
+    )
+
+
+# CR M-1: 마스킹되어야 하는 *키* 집합 — log entry dict에 *절대* 등장 금지.
+_FORBIDDEN_LOG_KEYS: frozenset[str] = frozenset(
+    {
+        "weight_kg",
+        "height_cm",
+        "age",
+        "user_id",
+        "allergies",
+        "parsed_items",
+        "raw_text",
+        "health_goal",
+        "name",  # FoodItem.name / RetrievedFood.name 직접 노출 금지
+        "profile",
+        "user_profile",
+    }
+)
+
+
+def _assert_no_pii_keys(captured: list[dict[str, object]]) -> None:
+    """log entry dict들에 forbidden key가 노출되지 않았음을 검증."""
+    for entry in captured:
+        for forbidden_key in _FORBIDDEN_LOG_KEYS:
+            assert forbidden_key not in entry, (
+                f"forbidden key '{forbidden_key}' leaked in log entry: {entry}"
+            )
+
+
+async def test_evaluate_fit_log_masks_pii_allergen_short_circuit(
     fake_deps: NodeDeps,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """NFR-S5 — 로그에 raw weight/height/age/allergies/parsed name 노출 금지."""
-    profile = _profile(allergies=["땅콩"])
+    """CR M-1: NFR-S5 마스킹 — 알레르기 short-circuit 경로에서 PII 비노출.
+
+    `caplog`(기존 테스트는 PrintLoggerFactory를 캡처 X — vacuous-pass) →
+    `structlog.testing.capture_logs`로 교체. raw weight/height/age/user_id/
+    allergen 라벨/parsed name/health_goal 모두 로그 entries에 노출 금지.
+    """
+    profile = _profile_for_masking(allergies=["땅콩"])
     items = [FoodItem(name="땅콩버터쿠키", confidence=0.9)]
     state = _state(profile=profile, parsed_items=items)
 
-    with caplog.at_level(logging.INFO):
+    with structlog_testing.capture_logs() as captured:
         await evaluate_fit(state, deps=fake_deps)
 
-    log_text = " ".join(record.getMessage() for record in caplog.records)
-    # raw 값들이 로그에 X.
-    assert "60.0" not in log_text  # weight_kg
-    assert "165.0" not in log_text  # height_cm
-    # 알레르기 라벨 자체("땅콩")도 X — count만.
-    # 단, allergen_violation 모드에서도 reasons에 라벨이 들어가 있지만 로그 출력은 violated_count.
-    assert "땅콩버터쿠키" not in log_text
+    # 1차 — forbidden key 절대 노출 금지 (key-level 검증).
+    _assert_no_pii_keys(captured)
+
+    # 2차 — value substring 검증 (fail-safe: 다른 키로 값이 leak되는 회귀 차단).
+    log_text = " ".join(str(entry) for entry in captured)
+    for forbidden_substr in (
+        "63.7",  # weight_kg
+        "171.5",  # height_cm
+        "aaaaaaaa-bbbb-cccc-dddd",  # user_id prefix
+        "땅콩버터쿠키",  # parsed name
+        "weight_loss",  # health_goal value
+    ):
+        assert forbidden_substr not in log_text, (
+            f"PII value '{forbidden_substr}' leaked — log={log_text}"
+        )
+    # 알레르기 라벨 자체 — reasons에 "알레르기 위반: 땅콩"이 *FitEvaluation*에 들어가지만
+    # *로그 출력*은 violated_count 정수만이어야 함.
+    assert "땅콩" not in log_text, f"allergen label leaked — log={log_text}"
+
+
+async def test_evaluate_fit_log_masks_pii_happy_path_with_bmr_compute(
+    fake_deps: NodeDeps,
+) -> None:
+    """CR M-1: NFR-S5 마스킹 — BMR/TDEE 계산 경로에서도 PII 비노출.
+
+    allergen short-circuit가 아닌 정상 경로 — `compute_fit_score`가 weight/height/
+    age로 BMR/TDEE 산출을 거치므로 마스킹 효과를 *실제로* 검증.
+    """
+    profile = _profile_for_masking()  # allergies=[]
+    items = [FoodItem(name="짜장면", quantity="1인분", confidence=0.9)]
+    foods = [
+        RetrievedFood(
+            name="짜장면",
+            food_id=None,
+            score=0.9,
+            nutrition={"energy_kcal": 240, "carbohydrate_g": 32, "protein_g": 6, "fat_g": 8},
+        )
+    ]
+    state = _state(profile=profile, parsed_items=items, retrieval=_retrieval(foods))
+
+    with structlog_testing.capture_logs() as captured:
+        out = await evaluate_fit(state, deps=fake_deps)
+
+    # 정상 경로 — fit_reason="ok" 이어야 BMR/TDEE 계산을 거친 것.
+    assert out["fit_evaluation"]["fit_reason"] == "ok"
+
+    _assert_no_pii_keys(captured)
+
+    log_text = " ".join(str(entry) for entry in captured)
+    for forbidden_substr in (
+        "63.7",
+        "171.5",
+        "aaaaaaaa-bbbb-cccc-dddd",
+        "짜장면",
+        "weight_loss",
+    ):
+        assert forbidden_substr not in log_text, (
+            f"PII value '{forbidden_substr}' leaked — log={log_text}"
+        )

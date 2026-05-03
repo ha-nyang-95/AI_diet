@@ -84,22 +84,27 @@ def _retrieved(name: str, **nutrition: float | int | str) -> RetrievedFood:
     )
 
 
-def test_aggregate_meal_macros_quantity_1인분_default() -> None:
-    """quantity='1인분' / None / "1인분" 모두 multiplier 1.0."""
+def test_aggregate_meal_macros_quantity_1인분_scales_by_2_5() -> None:
+    """CR D-1: quantity='1인분' → multiplier 2.5 (한국 외식 1인분 ≈ 250g, 100g 베이시스).
+
+    `RetrievedFood.nutrition`은 식약처 OpenAPI 100g 기준이므로 1인분(250g) → 2.5×.
+    """
     items = [FoodItem(name="짜장면", quantity="1인분", confidence=0.9)]
     foods = [
         _retrieved(
             "짜장면",
-            energy_kcal=600,
-            carbohydrate_g=80,
-            protein_g=15,
-            fat_g=20,
-            fiber_g=2,
+            energy_kcal=240,  # per 100g (식약처 baseline 짜장면 ≈ 240 kcal/100g)
+            carbohydrate_g=32,
+            protein_g=6,
+            fat_g=8,
+            fiber_g=1.2,
         )
     ]
     out = aggregate_meal_macros(items, foods)
-    assert out.kcal == 600
-    assert out.carb_g == 80
+    assert out.kcal == 600  # 240 * 2.5
+    assert out.carb_g == 80  # 32 * 2.5
+    assert out.protein_g == 15  # 6 * 2.5
+    assert out.fat_g == 20  # 8 * 2.5
     assert out.coverage_ratio == 1.0
 
 
@@ -120,6 +125,23 @@ def test_aggregate_meal_macros_quantity_grams_scales_per_100g() -> None:
     assert out.carb_g == 80
 
 
+def test_aggregate_meal_macros_quantity_kg_scales_x10() -> None:
+    """CR M-4: quantity='1kg' → multiplier 10.0 (1000g / 100g basis)."""
+    items = [FoodItem(name="고구마", quantity="1kg", confidence=0.9)]
+    foods = [_retrieved("고구마", energy_kcal=130)]
+    out = aggregate_meal_macros(items, foods)
+    assert out.kcal == 1300  # 130 * 10
+
+
+def test_aggregate_meal_macros_quantity_nan_g_falls_back_to_1() -> None:
+    """CR M-3: quantity='NaNg' → multiplier 1.0 fallback (NaN 전파 차단)."""
+    items = [FoodItem(name="짜장면", quantity="NaNg", confidence=0.9)]
+    foods = [_retrieved("짜장면", energy_kcal=500)]
+    out = aggregate_meal_macros(items, foods)
+    # NaN 가드 → multiplier 1.0 → kcal 변화 X
+    assert out.kcal == 500
+
+
 def test_aggregate_meal_macros_quantity_none_defaults_to_1() -> None:
     items = [FoodItem(name="짜장면", quantity=None, confidence=0.9)]
     foods = [_retrieved("짜장면", energy_kcal=500)]
@@ -130,8 +152,8 @@ def test_aggregate_meal_macros_quantity_none_defaults_to_1() -> None:
 def test_aggregate_meal_macros_unmatched_lowers_coverage() -> None:
     """매칭 실패 item은 coverage_ratio < 1.0 반영."""
     items = [
-        FoodItem(name="짜장면", quantity="1인분", confidence=0.9),
-        FoodItem(name="알수없는음식", quantity="1인분", confidence=0.5),
+        FoodItem(name="짜장면", confidence=0.9),
+        FoodItem(name="알수없는음식", confidence=0.5),
     ]
     foods = [_retrieved("짜장면", energy_kcal=500)]
     out = aggregate_meal_macros(items, foods)
@@ -344,8 +366,8 @@ def test_allergen_alias_map_targets_are_22_labels() -> None:
 
 
 def test_allergen_alias_map_baseline_size() -> None:
-    """baseline 8-12건 (story L62 약속)."""
-    assert 8 <= len(ALLERGEN_ALIAS_MAP) <= 14  # 약간의 여유
+    """baseline 8-13건 (story L62 8-12 + CR B-3 `기타알레르기성분` 추가)."""
+    assert 8 <= len(ALLERGEN_ALIAS_MAP) <= 13
 
 
 # ---------- compute_fit_score (entry) ----------
@@ -452,16 +474,28 @@ def test_compute_fit_score_band_label_consistent_with_score() -> None:
 
 
 def test_compute_fit_score_uses_macro_targets_lookup() -> None:
-    """diabetes_management user는 다른 macro target → 같은 식사도 다른 score 분포 가능."""
+    """CR M-5: weight_loss vs diabetes_management — 다른 macro target → 다른 score.
+
+    weight_loss(carb 0.50/protein 0.25/fat 0.25) vs diabetes_management
+    (carb 0.45/protein 0.25/fat 0.30). 동일 식사(고탄수)에 대해 두 target은 *다른*
+    macro deviation을 산출하므로 macro_score(따라서 fit_score)도 달라야 한다.
+    """
+    # 고탄수 식사 — weight_loss target(0.50)이 diabetes(0.45)보다 더 우호적.
     items = [FoodItem(name="짜장면", confidence=0.9)]
     foods = [_retrieved("짜장면", energy_kcal=600, carbohydrate_g=85, protein_g=15, fat_g=20)]
     p1 = _profile(health_goal="weight_loss")
     p2 = _profile(health_goal="diabetes_management")
     r1 = compute_fit_score(profile=p1, parsed_items=items, retrieved_foods=foods)
     r2 = compute_fit_score(profile=p2, parsed_items=items, retrieved_foods=foods)
-    # 다른 health_goal lookup 사용했음을 검증 (양쪽 결정성 — 같은 입력 → 같은 출력)
-    assert r1.fit_score >= 0 and r2.fit_score >= 0
-    # 산출 자체는 결정성
+    # 실제 lookup 분기 입증 — macro 또는 calorie(서로 다른 adj) 둘 중 하나는 달라야.
+    different_macro = r1.components.macro != r2.components.macro
+    different_calorie = r1.components.calorie != r2.components.calorie
+    assert different_macro or different_calorie, (
+        f"macro lookup이 분기 X — r1.macro={r1.components.macro} "
+        f"r2.macro={r2.components.macro} "
+        f"r1.calorie={r1.components.calorie} r2.calorie={r2.components.calorie}"
+    )
+    # 결정성 — 같은 입력 → 같은 출력
     assert (
         compute_fit_score(profile=p1, parsed_items=items, retrieved_foods=foods).fit_score
         == r1.fit_score
@@ -493,3 +527,75 @@ def test_compute_fit_score_deterministic_same_input_same_output() -> None:
     r1 = compute_fit_score(profile=profile, parsed_items=items, retrieved_foods=foods)
     r2 = compute_fit_score(profile=profile, parsed_items=items, retrieved_foods=foods)
     assert r1.model_dump() == r2.model_dump()
+
+
+# ---------- CR substring false-positive 회귀 가드 ----------
+
+
+def test_buckwheat_does_not_trigger_wheat_allergy() -> None:
+    """CR B-1: 메밀(buckwheat, Fagopyrum)은 밀(wheat, Triticum)과 별개 알레르겐.
+
+    user_allergies=["밀"]만 있을 때 메밀국수는 밀 위반으로 단락되면 안 됨 — 클리닉적으로
+    밀 알레르기 환자는 메밀을 안전한 대체식으로 섭취.
+    """
+    items = [FoodItem(name="메밀국수", confidence=0.9)]
+    out = detect_allergen_violations(items, [], ["밀"])
+    assert out == set(), f"메밀국수가 밀 알레르기를 false-trigger — detected={out}"
+
+
+def test_buckwheat_food_with_buckwheat_allergy_still_triggers() -> None:
+    """CR B-1 회귀 — 메밀 알레르기 환자가 메밀국수 → 정상 단락(false negative 방지)."""
+    items = [FoodItem(name="메밀국수", confidence=0.9)]
+    out = detect_allergen_violations(items, [], ["메밀"])
+    assert out == {"메밀"}
+
+
+def test_donut_does_not_trigger_walnut_allergy() -> None:
+    """CR B-2: 도넛(donut, no walnut)이 호두(walnut) 알레르기를 false-trigger 금지."""
+    items = [FoodItem(name="도넛", confidence=0.9)]
+    out = detect_allergen_violations(items, [], ["호두"])
+    assert out == set(), f"도넛이 호두 알레르기를 false-trigger — detected={out}"
+
+
+def test_coconut_does_not_trigger_walnut_allergy() -> None:
+    """CR B-2: 코코넛(coconut)은 호두(walnut)와 별개 식물 — false-trigger 금지."""
+    items = [FoodItem(name="코코넛쉐이크", confidence=0.9)]
+    out = detect_allergen_violations(items, [], ["호두"])
+    assert out == set(), f"코코넛이 호두 알레르기를 false-trigger — detected={out}"
+
+
+def test_walnut_food_with_walnut_allergy_still_triggers() -> None:
+    """CR B-2 회귀 — 호두 알레르기 환자가 호두강정 → 정상 단락."""
+    items = [FoodItem(name="호두강정", confidence=0.9)]
+    out = detect_allergen_violations(items, [], ["호두"])
+    assert out == {"호두"}
+
+
+def test_food_category_기타가공식품_does_not_trigger_기타_allergy() -> None:
+    """CR B-3: 식약처 nutrition.category='기타가공식품'이 generic 기타 라벨 false-trigger 금지."""
+    food = RetrievedFood(
+        name="치즈케이크",
+        food_id=None,
+        score=0.9,
+        nutrition={"category": "기타가공식품", "energy_kcal": 350},  # type: ignore[arg-type]
+    )
+    out = detect_allergen_violations([], [food], ["기타"])
+    assert out == set(), f"기타가공식품 카테고리가 기타 알레르기를 false-trigger — detected={out}"
+
+
+def test_food_with_기타_substring_in_name_does_not_trigger_unless_alias_match() -> None:
+    """CR B-3: 기타 substring 음식명(예: 기타치킨)도 alias 미등록이면 false-trigger 금지."""
+    items = [FoodItem(name="기타치킨", confidence=0.9)]
+    # 22-라벨 substring 매칭에서 '기타'는 SKIP — 닭고기는 alias로 매칭됨(치킨 → 닭고기).
+    out = detect_allergen_violations(items, [], ["기타"])
+    assert out == set(), f"기타치킨이 기타 알레르기를 false-trigger — detected={out}"
+    # 닭고기 alias는 정상 동작 검증
+    out2 = detect_allergen_violations(items, [], ["닭고기"])
+    assert out2 == {"닭고기"}
+
+
+def test_explicit_기타알레르기성분_food_with_기타_allergy_triggers_via_alias() -> None:
+    """CR B-3 회귀 — 음식명이 '기타알레르기성분' alias substring을 포함 → 정상 단락(alias 경로)."""
+    items = [FoodItem(name="기타알레르기성분 함유 푸딩", confidence=0.9)]
+    out = detect_allergen_violations(items, [], ["기타"])
+    assert out == {"기타"}

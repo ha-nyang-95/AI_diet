@@ -170,6 +170,15 @@ async def test_aresume_resumes_from_parse_meal_with_clarified_text(
     assert result.get("rewrite_attempts") == 1
     # node_errors 없음 — checkpoint의 user_id로 fetch_user_profile 정상 진행.
     assert result.get("node_errors", []) == []
+    # CR m-9: AC10 — clarify→aresume 후 evaluate_fit이 정상 산출되어야 함
+    # (fit_evaluation 미진행 incomplete_data가 아닌 정상 ok 경로).
+    fe = result.get("fit_evaluation")
+    assert fe is not None, "aresume 후 fit_evaluation 미산출 — incomplete_data 회귀"
+    assert fe["fit_reason"] == "ok", f"aresume 후 fit_reason!=ok — {fe['fit_reason']}"
+    assert fe["fit_label"] != "allergen_violation", (
+        f"sentinel 흐름은 알레르기 X — fit_label={fe['fit_label']}"
+    )
+    assert 0 <= fe["fit_score"] <= 100
 
 
 async def test_aresume_clean_slate_resets_state_fields(

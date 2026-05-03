@@ -108,6 +108,14 @@ def test_compute_tdee_active() -> None:
     assert tdee == pytest.approx(1500.0 * 1.725)
 
 
+def test_bmr_extreme_inputs_yielding_negative_raises_value_error() -> None:
+    """CR m-6: 극단 valid 조합(예: 여성 150세 1kg 1cm)이 음수 BMR을 silent 통과해
+    downstream `target_meal_kcal < 0` → score 왜곡되는 경로 차단.
+    """
+    with pytest.raises(ValueError, match=r"invalid bmr inputs"):
+        compute_bmr_mifflin(sex="female", age=150, weight_kg=1.0, height_cm=1.0)
+
+
 def test_compute_tdee_very_active_female_age_50_baseline() -> None:
     """여성 50세 65kg 160cm + very_active baseline 종단 검증.
 

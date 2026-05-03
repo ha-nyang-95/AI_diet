@@ -108,5 +108,5 @@ def test_allergen_alias_map_targets_all_in_22_sot() -> None:
 
 
 def test_allergen_alias_map_baseline_size_in_range() -> None:
-    """baseline 8-12건 약속 (story L62)."""
-    assert 8 <= len(ALLERGEN_ALIAS_MAP) <= 14
+    """baseline 8-13건 (story L62 8-12 + CR B-3 `기타알레르기성분` 추가)."""
+    assert 8 <= len(ALLERGEN_ALIAS_MAP) <= 13

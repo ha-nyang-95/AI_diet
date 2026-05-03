@@ -137,28 +137,53 @@ target_meal_kcal = ``(TDEE + adj) / 3`` (3끼 분배 가정).
 UI는 색상+숫자+텍스트 라벨 동시 노출(NFR-A4) — 한국어 텍스트 라벨은 모바일/웹
 i18n 자원 영역(백엔드는 enum SOT만).
 
+`MealAnalysisSummary.fit_score_label`(presentation 5단계 — `low/moderate/good/excellent/
+allergen_violation`)와는 별개 SOT. Story 3.6/4.x 영속화 시점에는
+`app.domain.fit_score.to_summary_label(fit_label, fit_score)` 어댑터 helper를 거쳐
+band 변환(domain 4단계 → presentation 5단계, CR D-2 결정).
+
+### quantity multiplier 단위 의미 (CR D-1 정렬)
+
+`RetrievedFood.nutrition`의 모든 macro/kcal 값은 **100g 베이시스**(식약처 OpenAPI
+정합). `_quantity_multiplier(quantity)`가 *grams / 100*로 환산해 `aggregate_meal_macros`
+가 합산:
+
+| quantity 입력 | multiplier | 환산 근거                                      |
+|---------------|------------|------------------------------------------------|
+| `None` / 빈   | 1.0        | 100g 가정 default fallback                     |
+| `"200g"`      | 2.0        | 200 / 100                                      |
+| `"1kg"`       | 10.0       | 1000 / 100                                     |
+| `"1인분"`     | 2.5        | 한국 외식 1인분 ≈ 250g 추정 → 250 / 100        |
+| `"1.5인분"`   | 3.75       | 1.5 × 250 / 100                                |
+| `"NaNg"` 등   | 1.0        | 비정상 입력 NaN/Inf/parse-fail 시 fallback     |
+
+Korean serving estimate(`_KOREAN_SERVING_GRAMS_ESTIMATE = 250.0`)는 외식·배달 메뉴
+평균 추정. 자사 메뉴 기준 평균 grams가 다르면 외주 인수 시 폴리시 조정 가능 —
+Story 8.4 polish 슬롯에서 정밀 튜닝(예: 카페 베이커리 메뉴는 100-150g 평균).
+
 ## ALLERGEN_ALIAS_MAP 외주 인수 보강 SOP (Story 3.5)
 
 `api/app/domain/fit_score.py:ALLERGEN_ALIAS_MAP`은 한국 외식·배달 메뉴 alias →
-22종 표준 라벨 매핑 baseline(8-12건). 외주 인수 시 클라이언트가 자사 메뉴별
+22종 표준 라벨 매핑 baseline(8-13건). 외주 인수 시 클라이언트가 자사 메뉴별
 alias를 보강해 검출률을 끌어올리는 1차 SOP.
 
-### baseline 매핑 (8-12건)
+### baseline 매핑 (8-13건)
 
-| alias    | 22종 표준 라벨   |
-|----------|------------------|
-| 계란     | 난류(가금류)     |
-| 달걀     | 난류(가금류)     |
-| 오믈렛   | 난류(가금류)     |
-| 마요네즈 | 난류(가금류)     |
-| 치즈     | 우유             |
-| 요구르트 | 우유             |
-| 버터     | 우유             |
-| 쉬림프   | 새우             |
-| 포크     | 돼지고기         |
-| 비프     | 쇠고기           |
-| 치킨     | 닭고기           |
-| 넛       | 호두             |
+| alias              | 22종 표준 라벨   |
+|--------------------|------------------|
+| 계란               | 난류(가금류)     |
+| 달걀               | 난류(가금류)     |
+| 오믈렛             | 난류(가금류)     |
+| 마요네즈           | 난류(가금류)     |
+| 치즈               | 우유             |
+| 요구르트           | 우유             |
+| 버터               | 우유             |
+| 쉬림프             | 새우             |
+| 포크               | 돼지고기         |
+| 비프               | 쇠고기           |
+| 치킨               | 닭고기           |
+| 넛                 | 호두             |
+| 기타알레르기성분   | 기타             |
 
 ### 보강 절차 (PR 게이트, 권장)
 
@@ -180,12 +205,37 @@ alias를 보강해 검출률을 끌어올리는 1차 SOP.
 macOS 클립보드의 NFD-encoded Hangul도 SOT의 NFC 라벨과 안전 매칭(`detect_allergen_violations`
 는 NFC 정규화 후 substring 비교 — Story 1.5 패턴 정합).
 
+### substring false positive 가드 (CR 2026-05-03)
+
+라벨/alias substring 매칭이 *clinically distinct* 한 음식에 false positive로 발화하지
+않도록 다음 3 가드가 `fit_score.py`에 SOT로 등록.
+
+- **`_LABEL_SUBSTRING_EXCLUSIONS`** — 22-라벨 substring 매칭 시 텍스트에서 먼저 제거할
+  *neighbor* 부분 문자열. 예: `{"밀": ("메밀",)}` — 메밀(buckwheat, *Fagopyrum*)을
+  먼저 제거한 뒤 밀(wheat, *Triticum*) 매칭 검사 → 메밀국수가 밀 알레르기를
+  false-trigger 하지 않음. 두 알레르겐은 taxonomy/clinic 모두 별개.
+- **`_ALIAS_TEXT_EXCLUSIONS`** — alias substring 매칭 시 텍스트에서 먼저 제거할
+  부분 문자열. 예: `{"넛": ("도넛", "코코넛")}` — 도넛(donut, no walnut), 코코넛
+  (coconut, *Cocos nucifera* — 호두/Juglans와 별개)이 호두 alias를 false-trigger
+  하지 않음.
+- **`_SKIP_SUBSTRING_LABELS`** — 22-라벨 substring 매칭에서 *완전히 스킵*하는 generic
+  placeholder 라벨. 현재 `{"기타"}` — 식약처 nutrition.category(`기타가공식품` 등)나
+  광범 음식명(`기타치킨` 등)에 fire 하지 않음. `"기타"` 알레르기 등록 사용자는
+  `ALLERGEN_ALIAS_MAP`의 explicit alias(예: `"기타알레르기성분" → "기타"`) 또는
+  자사 메뉴별 추가 alias로 매칭.
+
+신규 가드 entry 추가 시 회귀 테스트(`test_buckwheat_does_not_trigger_wheat_allergy`,
+`test_donut_does_not_trigger_walnut_allergy`, `test_food_category_기타가공식품_does_not_trigger_기타_allergy`
+패턴)를 함께 추가.
+
 ### `"기타"` 알레르기 처리 — generic substring 회피
 
-22종 마지막 항목 `"기타"`는 generic — `"기타치킨"` 같은 음식명은 false positive
-위험. baseline은 substring 우선이라 `"기타알레르기성분"` 같이 명시적 alias로 등록한
-경우만 매칭(false positive 회피). 클라이언트가 `"기타"` 알레르기를 등록한 사용자에게
-서비스할 때는 자기 메뉴별 explicit alias로 보강 권장.
+22종 마지막 항목 `"기타"`는 generic — `"기타치킨"`, `"기타가공식품"` 같은 텍스트는
+false positive 위험. CR 2026-05-03 패치 이후 `_SKIP_SUBSTRING_LABELS = frozenset({"기타"})`
+로 22-라벨 substring 매칭에서 완전히 스킵. `"기타"` 알레르기는 `ALLERGEN_ALIAS_MAP`의
+`"기타알레르기성분" → "기타"` explicit alias 경로로만 fire. 클라이언트가 `"기타"`
+알레르기 사용자에게 서비스 시 자사 메뉴별 explicit alias 추가(예:
+`"<자사 알러젠 표기>" → "기타"`)로 보강 권장.
 
 ### 외주 인수 1차 데모 baseline
 

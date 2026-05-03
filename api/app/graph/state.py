@@ -25,15 +25,24 @@ from typing import Literal, TypedDict
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.domain.fit_score import FitScoreComponents
+from app.domain.fit_score import to_summary_label as to_summary_label  # noqa: PLC0414
 from app.domain.health_profile import ActivityLevel, HealthGoal
+
+# CR D-2: `to_summary_label`은 `app.graph.state`에서도 직접 참조 가능하도록
+# explicit re-export(PEP 484 `as` 구문). Story 3.6 `MealAnalysisSummary` 영속화
+# 시점에 wiring helper로 사용.
 
 
 class FoodItem(BaseModel):
-    """`parse_meal` 노드 출력의 단일 음식 — Story 3.4가 실 LLM parse로 대체."""
+    """`parse_meal` 노드 출력의 단일 음식 — Story 3.4가 실 LLM parse로 대체.
+
+    CR M-2: `name`에 `min_length=1` — LLM/OCR glitch로 빈 문자열 leak 시
+    `aggregate_meal_macros` substring 매칭이 모든 음식과 매칭하는 회귀 차단.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    name: str
+    name: str = Field(min_length=1)
     quantity: str | None = None
     confidence: float = Field(ge=0, le=1)
 

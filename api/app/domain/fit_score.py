@@ -15,6 +15,13 @@
 - DB 호출 X — ``evaluate_fit`` 노드도 DB X (state 읽기만).
 - NFR-S5 마스킹 — 함수 자체는 logging X. caller(``evaluate_fit``)이 PII 마스킹 SOT.
 
+단위 의미 (CR D-1 정렬, 2026-05-03):
+- ``RetrievedFood.nutrition`` 값은 *모두 100g 기준* 식약처 OpenAPI 정합.
+- ``_quantity_multiplier``는 ``quantity`` 문자열을 *grams / 100* 비율로 환산:
+  - ``"200g"`` → 2.0 (200/100), ``"1kg"`` → 10.0 (1000/100),
+  - ``"1인분"`` → 2.5 (한국 외식 1인분 평균 250g 추정 → 250/100),
+  - 미지/None → 1.0 (1인분 default fallback과 동일).
+
 순환 import 회피:
 - 본 모듈이 ``app.graph.state`` 모델(FoodItem/RetrievedFood/UserProfileSnapshot/
   FitEvaluation)을 type 힌트로만 사용 — ``TYPE_CHECKING``으로 import 차단.
@@ -28,6 +35,7 @@ UserProfileSnapshot.sex 부재 (Story 1.5 baseline):
 
 from __future__ import annotations
 
+import math
 import unicodedata
 from typing import TYPE_CHECKING, Literal
 
@@ -41,6 +49,35 @@ from app.domain.kdris import (
     get_macro_targets,
 )
 
+# CR D-1: 한국 외식 1인분 평균 g 추정 — `_quantity_multiplier`가 인분 단위를 100g
+# 베이시스로 환산. 식약처 OpenAPI nutrition은 100g 기준이므로 1인분 = 250g → 2.5×.
+_KOREAN_SERVING_GRAMS_ESTIMATE: float = 250.0
+
+# CR m-7: 모듈 import 시 KOREAN_22_ALLERGENS를 NFC로 미리 정규화 — 소스 파일의
+# NFD 인코딩 미스매치 회귀 차단.
+_KOREAN_22_ALLERGENS_NFC: tuple[str, ...] = tuple(
+    unicodedata.normalize("NFC", a) for a in KOREAN_22_ALLERGENS
+)
+
+# CR B-3: 22-라벨 substring 매칭에서 *제외* 할 라벨 — `기타`는 generic placeholder로
+# 식약처 카테고리 `기타가공식품` 같은 광범 텍스트에 false positive 발화. 본 라벨은
+# `ALLERGEN_ALIAS_MAP`의 explicit alias 경로로만 매칭(아래 `기타알레르기성분`).
+_SKIP_SUBSTRING_LABELS: frozenset[str] = frozenset({"기타"})
+
+# CR B-1: 22-라벨 substring 매칭 시 텍스트에서 먼저 제거할 *neighbor* 부분 문자열.
+# 메밀(buckwheat, Fagopyrum)과 밀(wheat, Triticum)은 taxonomy/clinic 모두 별개 —
+# `밀 in 메밀국수` false positive를 차단해 cross-allergen 오발화를 방지.
+_LABEL_SUBSTRING_EXCLUSIONS: dict[str, tuple[str, ...]] = {
+    "밀": ("메밀",),
+}
+
+# CR B-2: ALLERGEN_ALIAS_MAP substring 매칭 시 텍스트에서 먼저 제거할 부분 문자열.
+# `넛 → 호두` alias가 `도넛`(donut, no walnut), `코코넛`(coconut, *Cocos nucifera* —
+# 호두/Juglans와 별개) 같은 비 호두 단어에 false positive 발화하지 않도록.
+_ALIAS_TEXT_EXCLUSIONS: dict[str, tuple[str, ...]] = {
+    "넛": ("도넛", "코코넛"),
+}
+
 if TYPE_CHECKING:
     from app.graph.state import (
         FitEvaluation,
@@ -51,6 +88,10 @@ if TYPE_CHECKING:
 
 FitLabel = Literal["good", "caution", "needs_adjust", "allergen_violation"]
 FitReason = Literal["ok", "allergen_violation", "incomplete_data"]
+
+# CR D-2: presentation-layer band taxonomy (`MealAnalysisSummary.fit_score_label`
+# 정합). domain band(4종)와 분리된 5단계 그라데이션 — wiring helper `to_summary_label`.
+SummaryFitLabel = Literal["allergen_violation", "low", "moderate", "good", "excellent"]
 
 
 class FitScoreComponents(BaseModel):
@@ -80,8 +121,11 @@ class FitScoreComponents(BaseModel):
         return cls(macro=0, calorie=0, allergen=0, balance=0, coverage_ratio=0.0)
 
 
-# 한국 외식·배달 메뉴 alias → 22종 표준 라벨 baseline (8-12건).
+# 한국 외식·배달 메뉴 alias → 22종 표준 라벨 baseline (8-13건).
 # 외주 인수 시 클라이언트가 자사 메뉴별 보강 — SOP는 ``api/data/README.md``.
+# CR B-3: `기타알레르기성분` → `기타` alias 추가 — 22-라벨 substring 매칭에서
+# `기타`를 제외(generic substring false positive 차단)하면서도 explicit 음식명을
+# 통한 매칭은 유지하기 위함.
 ALLERGEN_ALIAS_MAP: dict[str, str] = {
     "계란": "난류(가금류)",
     "달걀": "난류(가금류)",
@@ -95,6 +139,7 @@ ALLERGEN_ALIAS_MAP: dict[str, str] = {
     "비프": "쇠고기",
     "치킨": "닭고기",
     "넛": "호두",
+    "기타알레르기성분": "기타",
 }
 
 
@@ -113,28 +158,49 @@ class MealMacros(BaseModel):
 
 
 def _quantity_multiplier(quantity: str | None) -> float:
-    """``quantity`` 문자열 → multiplier 휴리스틱.
+    """``quantity`` 문자열 → multiplier 휴리스틱 (CR D-1: 100g 기준 통일).
 
-    - ``None`` 또는 비어있음 → 1.0 (1인분 가정),
-    - ``"200g"`` 같은 ``Ng`` 패턴 → 100g 기준 식약처 영양소 → ``N/100``,
-    - ``"1.5인분"`` 같은 ``N인분`` → ``N``,
+    `RetrievedFood.nutrition`은 모두 100g 베이시스(식약처 OpenAPI 정합) — 본 함수가
+    *grams / 100*로 환산하는 SOT.
+
+    - ``None`` 또는 비어있음 → 1.0 (100g 가정),
+    - ``"1kg"``, ``"0.5kg"`` 같은 ``Nkg`` 패턴 → ``N * 10`` (kg → 100g basis),
+    - ``"200g"`` 같은 ``Ng`` 패턴 → ``N / 100``,
+    - ``"1.5인분"`` 같은 ``N인분`` → ``N * 2.5`` (한국 외식 1인분 ≈ 250g 추정),
     - 그 외 → 1.0 fallback.
+
+    NaN/Inf 전파 차단(CR M-3) — `float()`이 ``"NaN"``/``"Inf"``를 silent 통과하므로
+    명시 isnan/isinf 가드. 음수 multiplier는 0으로 clamp(`max(..., 0.0)`).
     """
     if not quantity:
         return 1.0
     text = quantity.strip()
-    if text.endswith("g") and not text.endswith("kg"):
+    # CR M-4: kg 분기 — `g`보다 먼저 체크(kg도 `g`로 끝나므로).
+    if text.endswith("kg"):
         try:
-            grams = float(text[:-1].strip())
-            return max(grams / 100.0, 0.0)
+            kg = float(text[:-2].strip())
         except ValueError:
             return 1.0
+        if math.isnan(kg) or math.isinf(kg):
+            return 1.0
+        return max(kg * 10.0, 0.0)
+    if text.endswith("g"):
+        try:
+            grams = float(text[:-1].strip())
+        except ValueError:
+            return 1.0
+        if math.isnan(grams) or math.isinf(grams):
+            return 1.0
+        return max(grams / 100.0, 0.0)
     if "인분" in text:
         head = text.split("인분", 1)[0].strip()
         try:
-            return max(float(head), 0.0) if head else 1.0
+            servings = float(head) if head else 1.0
         except ValueError:
             return 1.0
+        if math.isnan(servings) or math.isinf(servings):
+            return 1.0
+        return max(servings * _KOREAN_SERVING_GRAMS_ESTIMATE / 100.0, 0.0)
     return 1.0
 
 
@@ -172,10 +238,15 @@ def aggregate_meal_macros(
     has_veg_fruit = False
 
     for item in parsed_items:
-        item_name = unicodedata.normalize("NFC", item.name)
+        item_name = unicodedata.normalize("NFC", item.name).strip()
+        # CR M-2: 빈 이름은 모든 음식과 substring 매칭 → coverage_ratio 오염 차단.
+        if not item_name:
+            continue
         match: RetrievedFood | None = None
         for food in retrieved_foods:
-            food_name = unicodedata.normalize("NFC", food.name)
+            food_name = unicodedata.normalize("NFC", food.name).strip()
+            if not food_name:
+                continue
             if item_name in food_name or food_name in item_name:
                 match = food
                 break
@@ -263,6 +334,14 @@ def detect_allergen_violations(
 
     NFC 정규화: macOS 클립보드 NFD 호환 (Story 1.5 패턴 정합). user_allergies/
     parsed_items[].name/retrieved_foods[].name 모두 NFC 후 비교.
+
+    CR B-1/B-2/B-3 false positive 가드:
+    - `_LABEL_SUBSTRING_EXCLUSIONS`(예: 메밀 → 밀 차단) — 22-라벨 substring 매칭 시
+      neighbor 부분 문자열을 텍스트에서 먼저 제거.
+    - `_ALIAS_TEXT_EXCLUSIONS`(예: 도넛/코코넛 → 호두 차단) — alias substring 매칭 시
+      텍스트에서 먼저 제거.
+    - `_SKIP_SUBSTRING_LABELS`(예: 기타) — generic placeholder 라벨은 22-라벨
+      substring 매칭에서 스킵, ALLERGEN_ALIAS_MAP의 explicit alias로만 매칭.
     """
     if not user_allergies:
         return set()
@@ -282,13 +361,21 @@ def detect_allergen_violations(
 
     detected: set[str] = set()
     for text in texts:
-        # (1) 22종 직접 substring 매칭.
-        for label in KOREAN_22_ALLERGENS:
-            if label in text:
+        # (1) 22종 직접 substring 매칭 (NFC 정규화된 SOT 사용 — CR m-7).
+        for label in _KOREAN_22_ALLERGENS_NFC:
+            if label in _SKIP_SUBSTRING_LABELS:
+                continue
+            candidate = text
+            for excl in _LABEL_SUBSTRING_EXCLUSIONS.get(label, ()):
+                candidate = candidate.replace(excl, "")
+            if label in candidate:
                 detected.add(label)
         # (2) ALLERGEN_ALIAS_MAP — alias substring → 22종 표준 라벨.
         for alias, standard in ALLERGEN_ALIAS_MAP.items():
-            if alias in text:
+            candidate = text
+            for excl in _ALIAS_TEXT_EXCLUSIONS.get(alias, ()):
+                candidate = candidate.replace(excl, "")
+            if alias in candidate:
                 detected.add(standard)
 
     return detected & normalized_user
@@ -373,13 +460,24 @@ def compute_fit_score(
         )
 
     # (3) 정상 — BMR/TDEE → target meal kcal → 3 컴포넌트 합산.
-    bmr = compute_bmr_mifflin(
-        sex="female",  # AC1 docstring 정합 — UserProfileSnapshot.sex 부재
-        age=profile.age,
-        weight_kg=profile.weight_kg,
-        height_cm=profile.height_cm,
-    )
-    tdee = compute_tdee(bmr=bmr, activity_level=profile.activity_level)
+    # CR m-4: BMR ValueError(예: profile.age=0 leak) → graceful incomplete_data
+    # fallback. wrapper retry 후 NodeError로 빠지지 않게 domain 레이어에서 흡수.
+    try:
+        bmr = compute_bmr_mifflin(
+            sex="female",  # AC1 docstring 정합 — UserProfileSnapshot.sex 부재
+            age=profile.age,
+            weight_kg=profile.weight_kg,
+            height_cm=profile.height_cm,
+        )
+        tdee = compute_tdee(bmr=bmr, activity_level=profile.activity_level)
+    except ValueError:
+        return FitEvaluation(
+            fit_score=0,
+            fit_reason="incomplete_data",
+            fit_label="needs_adjust",
+            reasons=["프로필 입력값 비정상 — BMR 산출 불가"],
+            components=FitScoreComponents.zero(),
+        )
     target_meal_kcal = (tdee + get_calorie_adjustment(profile.health_goal)) / 3.0
     target_macros = get_macro_targets(profile.health_goal)
 
@@ -391,6 +489,9 @@ def compute_fit_score(
 
     total = macro_score + calorie_score + allergen_score + balance_score
 
+    # CR m-5: 중간 점수에서도 칼로리 reason 적시 — `calorie_score < 25`마다 reason
+    # append. neutral fallback은 total ≥ 80일 때만(needs_adjust band가 misleadingly
+    # positive 텍스트와 짝지어지지 않도록).
     reasons: list[str] = []
     macro_reason = _build_macro_reason(meal, target_macros)
     if macro_reason:
@@ -399,10 +500,16 @@ def compute_fit_score(
         reasons.append("칼로리 적정 범위(±15%)")
     elif calorie_score == 0:
         reasons.append("칼로리 권장 범위 ±30% 이탈")
+    elif calorie_score < 25:
+        # 부분 점수 — ±15% 초과 ±30% 미만 구간.
+        deviation_pct = abs(meal.kcal - target_meal_kcal) / target_meal_kcal * 100
+        reasons.append(f"칼로리 권장 범위 ±{round(deviation_pct)}% 이탈")
     if meal.coverage_ratio < 0.5:
         reasons.append("매칭 신뢰도 낮음 — 식사 식별 일부 누락")
-    if not reasons:
+    if not reasons and total >= 80:
         reasons.append("전반적으로 권장 범위에 부합")
+    elif not reasons:
+        reasons.append("권장 범위에 부분 부합")
 
     return FitEvaluation(
         fit_score=total,
@@ -419,12 +526,39 @@ def compute_fit_score(
     )
 
 
+def to_summary_label(fit_label: FitLabel, fit_score: int) -> SummaryFitLabel:
+    """CR D-2: domain `FitLabel` → presentation `SummaryFitLabel` 어댑터.
+
+    `state.py:FitEvaluation.fit_label`(4 band: good/caution/needs_adjust/
+    allergen_violation)을 `meals.py:MealAnalysisSummary.fit_score_label`(5 band:
+    allergen_violation/low/moderate/good/excellent)에 매핑. Story 3.6/4.x에서
+    `MealAnalysisSummary` 영속화 시 본 helper 경유.
+
+    매핑 규칙:
+    - `allergen_violation` → `allergen_violation` (passthrough),
+    - `good` (>= 80) → `excellent`,
+    - `caution` (60-79) → `good`,
+    - `needs_adjust` (< 60) → `moderate` (40-59) / `low` (0-39) — fit_score 보조 분기.
+    """
+    if fit_label == "allergen_violation":
+        return "allergen_violation"
+    if fit_label == "good":
+        return "excellent"
+    if fit_label == "caution":
+        return "good"
+    # needs_adjust: 40-59 → moderate, 0-39 → low.
+    if fit_score >= 40:
+        return "moderate"
+    return "low"
+
+
 __all__ = [
     "ALLERGEN_ALIAS_MAP",
     "FitLabel",
     "FitReason",
     "FitScoreComponents",
     "MealMacros",
+    "SummaryFitLabel",
     "aggregate_meal_macros",
     "band_for_score",
     "compute_balance_score",
@@ -432,4 +566,5 @@ __all__ = [
     "compute_fit_score",
     "compute_macro_score",
     "detect_allergen_violations",
+    "to_summary_label",
 ]
