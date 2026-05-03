@@ -312,6 +312,53 @@ async def test_retrieve_sentinel_with_multi_item_runs_real_search(
     assert out["retrieval"].retrieval_confidence == pytest.approx(0.7)
 
 
+async def test_retrieve_multi_item_rewrite_does_not_overwrite_other_items(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CR(Gemini) fix G1 — multi-item에서 rewrite_attempts > 0 + rewritten_query 시
+    *첫 item만* rewritten_query 사용 + 나머지 item은 원래 name으로 일반 검색 → 정보
+    보존. 이전 버그: 모든 item이 rewritten_query 결과로 덮어써져 첫 매치로 복제.
+    """
+    maker = _build_session_maker()
+    deps = _make_deps(maker, environment="prod")
+
+    rf_rewritten = RetrievedFood(name="연어 포케", food_id=None, score=0.82, nutrition={})
+    rf_second = RetrievedFood(name="짜장면", food_id=None, score=1.0, nutrition={})
+
+    async def _alias(_: Any, name: str) -> str | None:
+        return None  # alias 미스 — 두 번째 item은 exact로 매치.
+
+    async def _exact(_: Any, name: str) -> RetrievedFood | None:
+        return rf_second if name == "짜장면" else None
+
+    async def _embedding(_: Any, query: str) -> list[RetrievedFood]:
+        # rewritten_query("연어 포케 / 참치 포케 / 베지 포케")로 호출되면 rf_rewritten 반환.
+        if "포케" in query:
+            return [rf_rewritten]
+        return []
+
+    monkeypatch.setattr(retrieve_module, "lookup_canonical", _alias)
+    monkeypatch.setattr(retrieve_module, "search_by_name", _exact)
+    monkeypatch.setattr(retrieve_module, "search_by_embedding", _embedding)
+
+    state = _state(
+        items=[
+            FoodItem(name="포케볼", confidence=0.5),  # rewrite 대상
+            FoodItem(name="짜장면", confidence=0.9),  # 원래 잘 매치되는 item
+        ],
+        rewrite_attempts=1,
+        rewritten_query="연어 포케 / 참치 포케 / 베지 포케",
+    )
+    out = await retrieve_nutrition(state, deps=deps)
+
+    # 두 item 모두 매치 + 각각 다른 결과(첫 item은 rewritten_query 결과, 두 번째는 원래 name 검색).
+    assert len(out["retrieval"].retrieved_foods) == 2
+    names = {rf.name for rf in out["retrieval"].retrieved_foods}
+    assert names == {"연어 포케", "짜장면"}, (
+        "multi-item rewrite는 첫 item만 rewritten_query 적용 — 나머지는 원래 name 검색 보존"
+    )
+
+
 async def test_retrieve_after_rewrite_uses_rewritten_query_embedding_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

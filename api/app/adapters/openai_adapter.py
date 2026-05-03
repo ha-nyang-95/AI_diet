@@ -383,16 +383,18 @@ class RewriteVariants(BaseModel):
 
 
 class ClarificationVariants(BaseModel):
-    """`generate_clarification_options` 응답 — 재질문 옵션 1-10건.
+    """`generate_clarification_options` 응답 — 재질문 옵션 1-50건.
 
     CR fix #8 — `max_length=4`(hard cap)이 ``settings.clarification_max_options`` env
-    override 약속(AC11)을 깨는 문제. schema는 *안전 상한*(10)만 두고 *실 truncate*는
-    `request_clarification` 노드의 `settings.clarification_max_options` SOT가 결정.
+    override 약속(AC11)을 깨는 문제. CR(Gemini) fix G2 — 운영자가 10 초과 설정 시
+    ValidationError 가능성을 차단하기 위해 안전 상한을 *운영적으로 도달 불가능한 50*
+    으로 완화. *실 truncate*는 `request_clarification` 노드의
+    ``settings.clarification_max_options`` SOT가 결정.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    options: list[ClarificationOption] = Field(min_length=1, max_length=10)
+    options: list[ClarificationOption] = Field(min_length=1, max_length=50)
 
 
 @retry(

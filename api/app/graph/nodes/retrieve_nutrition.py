@@ -123,15 +123,20 @@ async def retrieve_nutrition(state: MealAnalysisState, *, deps: NodeDeps) -> dic
         return {"retrieval": result}
 
     # (ii)(vi) 실 3단 검색 — 단일 session 컨텍스트 내부.
+    # CR(Gemini) fix G1 — multi-item rewrite 시 모든 item이 동일한 `rewritten_query`로
+    # 검색되어 결과가 첫 매치로 복제되는 버그 차단. `rewrite_query` 노드는 `parsed[0]`
+    # 만 rewrite하므로 *첫 item에만* rewritten_query 적용 + 나머지 item은 원래 name으로
+    # 일반 alias→exact→HNSW 흐름 유지(정보 보존). 다중 음식 per-item rewrite는 후속
+    # 스토리(8.4 polish)에서 rewrite_query 노드 자체가 항목별 변형 생성하도록 확장.
     retrieved_foods: list[RetrievedFood] = []
     paths: list[str] = []
     async with deps.session_maker() as session:
-        for item in parsed:
+        for i, item in enumerate(parsed):
             match, path = await _resolve_one_item(
                 session,
                 item,
                 rewrite_attempts=rewrite_attempts,
-                rewritten_query=rewritten_query,
+                rewritten_query=rewritten_query if i == 0 else None,
             )
             paths.append(path)
             if match is not None:
