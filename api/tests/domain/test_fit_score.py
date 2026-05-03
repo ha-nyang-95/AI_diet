@@ -133,6 +133,43 @@ def test_aggregate_meal_macros_quantity_kg_scales_x10() -> None:
     assert out.kcal == 1300  # 130 * 10
 
 
+def test_aggregate_meal_macros_quantity_uppercase_units_recognized() -> None:
+    """Gemini G-1: case-insensitive — '1KG'/'500G' 대문자 단위도 인식."""
+    items_kg = [FoodItem(name="고구마", quantity="1KG", confidence=0.9)]
+    foods = [_retrieved("고구마", energy_kcal=130)]
+    out_kg = aggregate_meal_macros(items_kg, foods)
+    assert out_kg.kcal == 1300  # 1KG → 10× — lower() 후 kg 분기
+
+    items_g = [FoodItem(name="고구마", quantity="500G", confidence=0.9)]
+    out_g = aggregate_meal_macros(items_g, foods)
+    assert out_g.kcal == 650  # 500G → 5× — lower() 후 g 분기
+
+
+def test_aggregate_meal_macros_exact_match_preferred_over_substring() -> None:
+    """Gemini G-2: '밥' parsed + ['비빔밥','밥'] retrieved 시 exact match '밥' 선택.
+
+    substring 1차 패스만 있던 이전 버전은 retrieved_foods 첫 substring 매칭(비빔밥)을
+    선택해 정확도 저하. exact-match 우선 패스로 결정성 강화.
+    """
+    items = [FoodItem(name="밥", confidence=0.9)]
+    foods = [
+        _retrieved("비빔밥", energy_kcal=500),  # substring으로는 먼저 매칭 가능
+        _retrieved("밥", energy_kcal=130),  # exact match — 우선 선택돼야
+    ]
+    out = aggregate_meal_macros(items, foods)
+    assert out.kcal == 130, f"exact match '밥' 우선 — 비빔밥(500) 선택 회귀: kcal={out.kcal}"
+
+
+def test_aggregate_meal_macros_exact_match_skipped_when_absent_falls_back_to_substring() -> None:
+    """Gemini G-2: exact match 부재 시 substring 패스로 fallback (회귀 가드)."""
+    items = [FoodItem(name="짜장", confidence=0.9)]
+    foods = [_retrieved("짜장면", energy_kcal=600)]
+    out = aggregate_meal_macros(items, foods)
+    # exact match X → substring으로 "짜장 in 짜장면" 매칭 → kcal=600
+    assert out.kcal == 600
+    assert out.coverage_ratio == 1.0
+
+
 def test_aggregate_meal_macros_quantity_nan_g_falls_back_to_1() -> None:
     """CR M-3: quantity='NaNg' → multiplier 1.0 fallback (NaN 전파 차단)."""
     items = [FoodItem(name="짜장면", quantity="NaNg", confidence=0.9)]

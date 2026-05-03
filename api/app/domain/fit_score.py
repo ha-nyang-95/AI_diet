@@ -174,7 +174,9 @@ def _quantity_multiplier(quantity: str | None) -> float:
     """
     if not quantity:
         return 1.0
-    text = quantity.strip()
+    # Gemini G-1: case-insensitive — "1KG"/"500G" 같은 대문자 변형도 인식.
+    # Korean "인분"는 lower 영향 X (한글 invariant).
+    text = quantity.strip().lower()
     # CR M-4: kg 분기 — `g`보다 먼저 체크(kg도 `g`로 끝나므로).
     if text.endswith("kg"):
         try:
@@ -243,13 +245,22 @@ def aggregate_meal_macros(
         if not item_name:
             continue
         match: RetrievedFood | None = None
+        # Gemini G-2: 1차 exact match 우선 — "밥" parsed + ["비빔밥","밥"] retrieved 시
+        # substring 첫 매칭(비빔밥)이 아닌 정확 이름(밥)을 우선 선택해 정확도 향상.
         for food in retrieved_foods:
             food_name = unicodedata.normalize("NFC", food.name).strip()
-            if not food_name:
-                continue
-            if item_name in food_name or food_name in item_name:
+            if food_name and item_name == food_name:
                 match = food
                 break
+        # 2차 fallback — exact match 부재 시 substring 양방향 매칭(기존 동작).
+        if match is None:
+            for food in retrieved_foods:
+                food_name = unicodedata.normalize("NFC", food.name).strip()
+                if not food_name:
+                    continue
+                if item_name in food_name or food_name in item_name:
+                    match = food
+                    break
         if match is None:
             continue
         matched += 1
