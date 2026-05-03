@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from app.graph.state import (
     Citation,
+    ClarificationOption,
     EvaluationDecision,
     FeedbackOutput,
     FitEvaluation,
@@ -64,10 +65,41 @@ def test_retrieval_result_confidence_bounds() -> None:
 
 
 def test_evaluation_decision_route_literal() -> None:
+    """Story 3.4 AC8 — `clarify` 분기 추가로 3-way Literal."""
     EvaluationDecision(route="rewrite", reason="low_confidence_0.30")
     EvaluationDecision(route="continue", reason="confidence_ok")
+    EvaluationDecision(route="clarify", reason="rewrite_limit_reached_low_confidence")
     with pytest.raises(ValidationError):
         EvaluationDecision(route="other", reason="x")  # type: ignore[arg-type]
+
+
+def test_clarification_option_label_value_constraints() -> None:
+    """Story 3.4 AC1 — `ClarificationOption` Pydantic 검증."""
+    opt = ClarificationOption(label="연어 포케", value="연어 포케 1인분")
+    assert opt.label == "연어 포케"
+    assert opt.value == "연어 포케 1인분"
+
+    # 빈 label / value 거부
+    with pytest.raises(ValidationError):
+        ClarificationOption(label="", value="x")
+    with pytest.raises(ValidationError):
+        ClarificationOption(label="x", value="")
+
+    # max_length 초과 거부
+    with pytest.raises(ValidationError):
+        ClarificationOption(label="가" * 51, value="x")
+    with pytest.raises(ValidationError):
+        ClarificationOption(label="x", value="가" * 81)
+
+
+def test_clarification_option_extra_forbid() -> None:
+    """Story 3.4 AC1 — `extra="forbid"` 정합 (drift 회귀 차단)."""
+    with pytest.raises(ValidationError):
+        ClarificationOption(  # type: ignore[call-arg]
+            label="연어 포케",
+            value="연어 포케 1인분",
+            extra_field="rogue",
+        )
 
 
 def test_user_profile_snapshot_enums() -> None:
@@ -156,8 +188,29 @@ def test_meal_analysis_state_partial_dict_total_false() -> None:
         "raw_text": "짜장면 1인분",
         "rewrite_attempts": 0,
         "node_errors": [],
+        "clarification_options": [],
     }
     assert partial["raw_text"] == "짜장면 1인분"
+    assert partial["clarification_options"] == []
+
+
+def test_meal_analysis_state_with_clarification_options() -> None:
+    """Story 3.4 AC1 — `clarification_options` 1+개 필드 정합."""
+    state: MealAnalysisState = {
+        "meal_id": uuid.uuid4(),
+        "user_id": uuid.uuid4(),
+        "raw_text": "포케볼",
+        "rewrite_attempts": 1,
+        "node_errors": [],
+        "needs_clarification": True,
+        "clarification_options": [
+            ClarificationOption(label="연어 포케", value="연어 포케 1인분"),
+            ClarificationOption(label="참치 포케", value="참치 포케 1인분"),
+        ],
+    }
+    assert state["needs_clarification"] is True
+    assert len(state["clarification_options"]) == 2
+    assert state["clarification_options"][0].label == "연어 포케"
 
 
 def test_meal_analysis_state_full_shape() -> None:

@@ -66,12 +66,32 @@ class RetrievalResult(BaseModel):
 
 
 class EvaluationDecision(BaseModel):
-    """`evaluate_retrieval_quality` 노드 *공식 출력* — Self-RAG 분기 라우팅 신호."""
+    """`evaluate_retrieval_quality` 노드 *공식 출력* — Self-RAG 분기 라우팅 신호.
+
+    Story 3.4 — `route` Literal 3-way 확장: `"clarify"` 추가. confidence 미달 +
+    rewrite_attempts >= 1 시 재질문 분기(`request_clarification` 노드).
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    route: Literal["rewrite", "continue"]
+    route: Literal["rewrite", "continue", "clarify"]
     reason: str
+
+
+class ClarificationOption(BaseModel):
+    """Story 3.4 — Self-RAG 재질문 옵션 (FR20 재질문 UX 백엔드 신호).
+
+    `request_clarification` 노드가 1+개 채움. `aresume` 시 사용자가 선택한 옵션의
+    `value`가 `parse_meal` 진입 `raw_text`로 주입(LLM parse + alias 1차 hit 가능성 ↑).
+
+    - `label`: UI 노출 라벨 — 짧은 한국어(예: ``"연어 포케"``).
+    - `value`: `aresume` 시 정제 텍스트(라벨 + 양 추정 — 예: ``"연어 포케 1인분"``).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    label: str = Field(min_length=1, max_length=50)
+    value: str = Field(min_length=1, max_length=80)
 
 
 class UserProfileSnapshot(BaseModel):
@@ -162,4 +182,5 @@ class MealAnalysisState(TypedDict, total=False):
     feedback: FeedbackOutput
     node_errors: list[NodeError]
     needs_clarification: bool
+    clarification_options: list[ClarificationOption]
     evaluation_decision: EvaluationDecision

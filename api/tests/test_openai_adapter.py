@@ -176,3 +176,227 @@ async def test_parse_meal_image_payload_invalid_when_parsed_none(
 
     with pytest.raises(MealOCRPayloadInvalidError):
         await openai_adapter.parse_meal_image("https://cdn.example.com/meals/foo/bar.jpg")
+
+
+# ---------------------------------------------------------------------------
+# Story 3.4 — parse_meal_text + rewrite_food_query + generate_clarification_options
+# ---------------------------------------------------------------------------
+
+
+def _build_parse_text_response(items: list[dict[str, Any]]) -> MagicMock:
+    parsed = openai_adapter.ParsedMeal(
+        items=[openai_adapter.ParsedMealItem.model_validate(item) for item in items]
+    )
+    response = MagicMock()
+    response.choices = [MagicMock()]
+    response.choices[0].message.parsed = parsed
+    response.choices[0].message.refusal = None
+    return response
+
+
+def _build_rewrite_response(variants: list[str]) -> MagicMock:
+    parsed = openai_adapter.RewriteVariants(variants=variants)
+    response = MagicMock()
+    response.choices = [MagicMock()]
+    response.choices[0].message.parsed = parsed
+    response.choices[0].message.refusal = None
+    return response
+
+
+def _build_clarification_response(options: list[dict[str, str]]) -> MagicMock:
+    from app.graph.state import ClarificationOption
+
+    parsed = openai_adapter.ClarificationVariants(
+        options=[ClarificationOption(**o) for o in options]
+    )
+    response = MagicMock()
+    response.choices = [MagicMock()]
+    response.choices[0].message.parsed = parsed
+    response.choices[0].message.refusal = None
+    return response
+
+
+# --- parse_meal_text ---
+
+
+async def test_parse_meal_text_returns_parsed_meal(
+    monkeypatch: pytest.MonkeyPatch,
+    _openai_configured: None,
+) -> None:
+    """Story 3.4 AC2 — 정상 호출 → ParsedMeal 매핑."""
+    response = _build_parse_text_response(
+        [
+            {"name": "짜장면", "quantity": "1인분", "confidence": 0.92},
+            {"name": "군만두", "quantity": "4개", "confidence": 0.88},
+        ]
+    )
+    _install_mock_client(monkeypatch, parse_return=response)
+
+    result = await openai_adapter.parse_meal_text("짜장면 1인분, 군만두 4개")
+    assert len(result.items) == 2
+    assert result.items[0].name == "짜장면"
+
+
+async def test_parse_meal_text_empty_input_skips_api(
+    monkeypatch: pytest.MonkeyPatch,
+    _openai_configured: None,
+) -> None:
+    """Story 3.4 AC2 — 빈 입력은 API 호출 X / cost 0."""
+    mock_parse = _install_mock_client(monkeypatch, parse_return=_build_parse_text_response([]))
+
+    result = await openai_adapter.parse_meal_text("")
+    assert result.items == []
+    assert mock_parse.await_count == 0
+
+    result_ws = await openai_adapter.parse_meal_text("   ")
+    assert result_ws.items == []
+    assert mock_parse.await_count == 0
+
+
+async def test_parse_meal_text_transient_retried(
+    monkeypatch: pytest.MonkeyPatch,
+    _openai_configured: None,
+) -> None:
+    """Story 3.4 AC2 — `httpx.TimeoutException` 1회 → retry → 정상 응답."""
+    success = _build_parse_text_response(
+        [{"name": "비빔밥", "quantity": "1인분", "confidence": 0.95}]
+    )
+    timeout = httpx.TimeoutException("read timeout")
+    mock_parse = _install_mock_client(monkeypatch, parse_side_effect=[timeout, success])
+
+    result = await openai_adapter.parse_meal_text("비빔밥 1인분")
+    assert result.items[0].name == "비빔밥"
+    assert mock_parse.await_count == 2
+
+
+async def test_parse_meal_text_permanent_error_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+    _openai_configured: None,
+) -> None:
+    """Story 3.4 AC2 — 영구 오류(`AuthenticationError`) → 즉시 `MealOCRUnavailableError`."""
+    auth_err = openai.AuthenticationError(
+        message="bad key",
+        response=httpx.Response(401, request=httpx.Request("POST", "https://api.openai.com")),
+        body=None,
+    )
+    mock_parse = _install_mock_client(monkeypatch, parse_side_effect=auth_err)
+
+    with pytest.raises(MealOCRUnavailableError):
+        await openai_adapter.parse_meal_text("짜장면")
+    # retry 무효 — 1회 호출만(영구 오류 즉시 fail).
+    assert mock_parse.await_count == 1
+
+
+async def test_parse_meal_text_payload_invalid_when_parsed_none(
+    monkeypatch: pytest.MonkeyPatch,
+    _openai_configured: None,
+) -> None:
+    """Story 3.4 AC2 — `message.parsed=None` → `MealOCRPayloadInvalidError(502)`."""
+    response = MagicMock()
+    response.choices = [MagicMock()]
+    response.choices[0].message.parsed = None
+    response.choices[0].message.refusal = None
+    _install_mock_client(monkeypatch, parse_return=response)
+
+    with pytest.raises(MealOCRPayloadInvalidError):
+        await openai_adapter.parse_meal_text("짜장면")
+
+
+# --- rewrite_food_query ---
+
+
+async def test_rewrite_food_query_returns_variants(
+    monkeypatch: pytest.MonkeyPatch,
+    _openai_configured: None,
+) -> None:
+    """Story 3.4 AC2 — 정상 호출 → 2-4 변형 응답."""
+    response = _build_rewrite_response(["연어 포케", "참치 포케", "베지 포케"])
+    _install_mock_client(monkeypatch, parse_return=response)
+
+    result = await openai_adapter.rewrite_food_query("포케볼")
+    assert len(result.variants) == 3
+    assert result.variants[0] == "연어 포케"
+
+
+async def test_rewrite_food_query_empty_input_graceful(
+    monkeypatch: pytest.MonkeyPatch,
+    _openai_configured: None,
+) -> None:
+    """Story 3.4 AC2 — 빈 입력 → graceful fallback (API 호출 X)."""
+    mock_parse = _install_mock_client(monkeypatch, parse_return=_build_rewrite_response(["dummy"]))
+
+    result = await openai_adapter.rewrite_food_query("")
+    assert result.variants == ["unknown"]
+    assert mock_parse.await_count == 0
+
+
+async def test_rewrite_food_query_transient_retried(
+    monkeypatch: pytest.MonkeyPatch,
+    _openai_configured: None,
+) -> None:
+    """Story 3.4 AC2 — RateLimit transient → retry."""
+    success = _build_rewrite_response(["짜장면 곱빼기", "짜파게티"])
+    rate_limit = openai.RateLimitError(
+        message="rate limit",
+        response=httpx.Response(429, request=httpx.Request("POST", "https://api.openai.com")),
+        body=None,
+    )
+    mock_parse = _install_mock_client(monkeypatch, parse_side_effect=[rate_limit, success])
+
+    result = await openai_adapter.rewrite_food_query("짜장면")
+    assert mock_parse.await_count == 2
+    assert result.variants[0] == "짜장면 곱빼기"
+
+
+# --- generate_clarification_options ---
+
+
+async def test_generate_clarification_options_returns_options(
+    monkeypatch: pytest.MonkeyPatch,
+    _openai_configured: None,
+) -> None:
+    """Story 3.4 AC2 — 정상 호출 → 2-4 옵션."""
+    response = _build_clarification_response(
+        [
+            {"label": "연어 포케", "value": "연어 포케 1인분"},
+            {"label": "참치 포케", "value": "참치 포케 1인분"},
+            {"label": "채소 포케", "value": "베지 포케 1인분"},
+        ]
+    )
+    _install_mock_client(monkeypatch, parse_return=response)
+
+    result = await openai_adapter.generate_clarification_options("포케볼")
+    assert len(result.options) == 3
+    assert result.options[0].label == "연어 포케"
+    assert result.options[0].value == "연어 포케 1인분"
+
+
+async def test_generate_clarification_options_empty_input_graceful(
+    monkeypatch: pytest.MonkeyPatch,
+    _openai_configured: None,
+) -> None:
+    """Story 3.4 AC2 — 빈 입력 → fallback 1건 강제 (API 호출 X)."""
+    mock_parse = _install_mock_client(
+        monkeypatch,
+        parse_return=_build_clarification_response([{"label": "dummy", "value": "dummy"}]),
+    )
+
+    result = await openai_adapter.generate_clarification_options("")
+    assert len(result.options) == 1
+    assert result.options[0].label == "알 수 없음"
+    assert mock_parse.await_count == 0
+
+
+async def test_generate_clarification_options_payload_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+    _openai_configured: None,
+) -> None:
+    """Story 3.4 AC2 — refusal → MealOCRPayloadInvalidError."""
+    response = MagicMock()
+    response.choices = [MagicMock()]
+    response.choices[0].message.parsed = None
+    response.choices[0].message.refusal = "moderation_blocked"
+    _install_mock_client(monkeypatch, parse_return=response)
+
+    with pytest.raises(MealOCRPayloadInvalidError):
+        await openai_adapter.generate_clarification_options("xxxx")

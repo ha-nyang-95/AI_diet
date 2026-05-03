@@ -28,6 +28,7 @@ from app.graph.nodes import (
     fetch_user_profile,
     generate_feedback,
     parse_meal,
+    request_clarification,
     retrieve_nutrition,
     rewrite_query,
 )
@@ -58,6 +59,7 @@ def compile_pipeline(checkpointer: AsyncPostgresSaver, deps: NodeDeps) -> Any:
         partial(evaluate_retrieval_quality, deps=deps),
     )
     builder.add_node("rewrite_query", partial(rewrite_query, deps=deps))
+    builder.add_node("request_clarification", partial(request_clarification, deps=deps))
     builder.add_node("fetch_user_profile", partial(fetch_user_profile, deps=deps))
     builder.add_node("evaluate_fit", partial(evaluate_fit, deps=deps))
     builder.add_node("generate_feedback", partial(generate_feedback, deps=deps))
@@ -67,21 +69,28 @@ def compile_pipeline(checkpointer: AsyncPostgresSaver, deps: NodeDeps) -> Any:
     builder.add_edge("parse_meal", "retrieve_nutrition")
     builder.add_edge("retrieve_nutrition", "evaluate_retrieval_quality")
 
-    # Self-RAG 분기 — `route_after_evaluate`가 "rewrite_query" 또는 "fetch_user_profile"
-    # 중 하나로 분기. 1회 한도는 `evaluate_retrieval_quality` 노드 자체 결정 로직이 강제
-    # (`rewrite_attempts < 1` 가드).
+    # Self-RAG 3-way 분기 (Story 3.4 AC9): "rewrite_query" / "request_clarification" /
+    # "fetch_user_profile". 1회 한도는 `evaluate_retrieval_quality` 노드 자체 결정 로직이
+    # 강제 — `rewrite_attempts < 1`이면 `"rewrite"`, `>= 1` + low confidence는 `"clarify"`.
     builder.add_conditional_edges(
         "evaluate_retrieval_quality",
         route_after_evaluate,
         {
             "rewrite_query": "rewrite_query",
+            "request_clarification": "request_clarification",
             "fetch_user_profile": "fetch_user_profile",
         },
     )
 
     # `rewrite_query` 후 unconditional `retrieve_nutrition` 재실행 — `evaluate_retrieval_quality`
-    # 가 한 번 더 평가하고 `rewrite_attempts >= 1`이라 강제 `"continue"` 반환.
+    # 가 한 번 더 평가하고 `rewrite_attempts >= 1`이라 `"continue"` 또는 low conf 시
+    # `"clarify"` 반환.
     builder.add_edge("rewrite_query", "retrieve_nutrition")
+
+    # `request_clarification` 후 분석 일시 정지 — END edge. checkpointer가 thread_id별
+    # 격리로 state 영속화 → `analysis_service.aget_state(thread_id)`로 조회 + 사용자 응답
+    # 수신 후 `analysis_service.aresume`이 Command(goto="parse_meal")로 재개.
+    builder.add_edge("request_clarification", END)
 
     # `fetch_user_profile` 실패 시 (user_not_found / profile_incomplete) 강제 종료 —
     # 후속 노드가 user_profile 없이 fit_score 계산 시 의미 X 결과 생성. 그 외 노드

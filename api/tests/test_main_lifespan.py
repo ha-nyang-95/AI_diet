@@ -3,14 +3,47 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterator
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import FastAPI
 from httpx import AsyncClient
 
+from app.adapters.openai_adapter import (
+    ClarificationVariants,
+    ParsedMeal,
+    ParsedMealItem,
+    RewriteVariants,
+)
 from app.core.exceptions import AnalysisCheckpointerError
+from app.graph.state import ClarificationOption
 from app.main import app, lifespan
 from app.services.analysis_service import AnalysisService
+
+
+@pytest.fixture
+def _mock_llm_adapters() -> Iterator[None]:
+    parsed = ParsedMeal(
+        items=[ParsedMealItem(name="__test_low_confidence__", quantity="1인분", confidence=0.9)]
+    )
+    rewrite = RewriteVariants(variants=["v1"])
+    clarify = ClarificationVariants(options=[ClarificationOption(label="옵션", value="옵션 1인분")])
+    with (
+        patch(
+            "app.graph.nodes.parse_meal.parse_meal_text",
+            new=AsyncMock(return_value=parsed),
+        ),
+        patch(
+            "app.graph.nodes.rewrite_query.rewrite_food_query",
+            new=AsyncMock(return_value=rewrite),
+        ),
+        patch(
+            "app.graph.nodes.request_clarification.generate_clarification_options",
+            new=AsyncMock(return_value=clarify),
+        ),
+    ):
+        yield
 
 
 async def test_lifespan_initializes_analysis_resources(client: AsyncClient) -> None:
@@ -22,7 +55,9 @@ async def test_lifespan_initializes_analysis_resources(client: AsyncClient) -> N
     assert isinstance(getattr(app.state, "analysis_service", None), AnalysisService)
 
 
-async def test_lifespan_dispatch_to_analysis_service(client: AsyncClient) -> None:
+async def test_lifespan_dispatch_to_analysis_service(
+    client: AsyncClient, _mock_llm_adapters: None
+) -> None:
     """`app.state.analysis_service.run`이 호출 가능 — `AnalysisService` 등록 정합.
 
     미존재 user → `fetch_user_profile`이 `AnalysisNodeError` → `route_after_node_error`
@@ -33,7 +68,7 @@ async def test_lifespan_dispatch_to_analysis_service(client: AsyncClient) -> Non
     state = await service.run(
         meal_id=uuid.uuid4(),
         user_id=uuid.uuid4(),
-        raw_text="짜장면",
+        raw_text="__test_low_confidence__",  # sentinel — DB lookup 회피, 0.85 boost
     )
     errs = state.get("node_errors", [])
     assert any(e.node_name == "fetch_user_profile" and "user_not_found" in e.message for e in errs)
