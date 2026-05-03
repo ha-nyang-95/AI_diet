@@ -190,21 +190,33 @@ def _rf(score: float) -> RetrievedFood:
 
 def test_compute_retrieval_confidence_empty_list_zero() -> None:
     assert food_search.compute_retrieval_confidence([]) == 0.0
+    assert food_search.compute_retrieval_confidence([_rf(0.9)], expected_count=0) == 0.0
 
 
 def test_compute_retrieval_confidence_single_item_top1() -> None:
-    """single_item=True (디폴트) → top-1 score 그대로."""
+    """expected_count=1 (디폴트) → matches[0].score (top-1)."""
     matches = [_rf(0.9), _rf(0.5), _rf(0.3)]
     assert food_search.compute_retrieval_confidence(matches) == pytest.approx(0.9)
-    assert food_search.compute_retrieval_confidence(matches, single_item=True) == pytest.approx(0.9)
+    assert food_search.compute_retrieval_confidence(matches, expected_count=1) == pytest.approx(0.9)
 
 
 def test_compute_retrieval_confidence_multi_item_min() -> None:
-    """multi-item → 최소값 (보수적)."""
+    """expected_count==len(matches)>1 → 최소값 (보수적)."""
     matches = [_rf(0.9), _rf(0.5), _rf(0.3)]
-    assert food_search.compute_retrieval_confidence(matches, single_item=False) == pytest.approx(
-        0.3
-    )
+    assert food_search.compute_retrieval_confidence(matches, expected_count=3) == pytest.approx(0.3)
+
+
+def test_compute_retrieval_confidence_missing_items_zero() -> None:
+    """CR fix #3 — len(matches) < expected_count → 0.0 (missing implicit 0).
+
+    multi-item meal에서 한 항목이 unmatched면 retrieved_foods 길이가 expected보다 작음
+    → spec "보수적" 약속 준수: missing 항목의 0.0 confidence가 min 결정 → Self-RAG
+    재검색 분기 보장.
+    """
+    matches = [_rf(0.95)]  # 1 matched, 2 expected → 1 missing
+    assert food_search.compute_retrieval_confidence(matches, expected_count=2) == 0.0
+    # 0 matched + N expected
+    assert food_search.compute_retrieval_confidence([], expected_count=2) == 0.0
 
 
 async def test_search_by_embedding_propagates_embedding_failure(

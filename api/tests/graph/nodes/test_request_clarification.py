@@ -138,3 +138,64 @@ async def test_request_clarification_graceful_empty_options_forces_fallback(
     out = await request_clarification(state, deps=deps)
     # max(1, 0) = 1 — 1건 truncate.
     assert len(out["clarification_options"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# CR fix #4 — LLM 영구 실패 시 self-fallback (UI dead state 차단)
+# ---------------------------------------------------------------------------
+
+
+async def test_request_clarification_llm_failure_self_fallback(
+    fake_deps: NodeDeps,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LLM이 영구 실패해도 노드 자체가 `needs_clarification=True` + 1건 옵션 contract
+    를 보장. wrapper fallback이 신호 없는 dead state로 빠지지 않도록 self-guarantee.
+    """
+    from app.core.exceptions import MealOCRUnavailableError
+
+    async def _raise(_: str) -> None:
+        raise MealOCRUnavailableError("LLM permanent failure")
+
+    monkeypatch.setattr(request_module, "generate_clarification_options", _raise)
+
+    state = _state(parsed=[FoodItem(name="포케볼", confidence=0.5)])
+    out = await request_clarification(state, deps=fake_deps)
+
+    assert out["needs_clarification"] is True
+    assert len(out["clarification_options"]) == 1
+    # fallback option은 입력 name을 value로 보존 — UI에서 사용자가 재입력 유도.
+    assert out["clarification_options"][0]["value"] == "포케볼"
+
+
+# ---------------------------------------------------------------------------
+# CR fix #6 — checkpointer round-trip 후 parsed_items가 list[dict] 형태일 때 안전 access
+# ---------------------------------------------------------------------------
+
+
+async def test_request_clarification_handles_dict_form_parsed_items(
+    fake_deps: NodeDeps,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`parsed_items`가 LangGraph checkpointer round-trip 후 list[dict]로 deserialize
+    되는 케이스 — `get_state_field` helper로 양 형태 안전 access (Story 3.3 SOT 정합).
+    """
+    variants = ClarificationVariants(
+        options=[ClarificationOption(label="연어 포케", value="연어 포케 1인분")]
+    )
+    llm_mock = AsyncMock(return_value=variants)
+    monkeypatch.setattr(request_module, "generate_clarification_options", llm_mock)
+
+    # Pydantic instance가 아닌 *dict 형태* parsed_items — type ignore (TypedDict 우회)
+    state: MealAnalysisState = {  # type: ignore[typeddict-item]
+        "meal_id": uuid.uuid4(),
+        "user_id": uuid.uuid4(),
+        "raw_text": "fallback",
+        "parsed_items": [{"name": "포케볼", "quantity": "1인분", "confidence": 0.5}],  # type: ignore[list-item]
+        "rewrite_attempts": 1,
+        "node_errors": [],
+    }
+    out = await request_clarification(state, deps=fake_deps)
+    # AttributeError 없이 정상 처리 + LLM에 "포케볼" 전달.
+    assert out["needs_clarification"] is True
+    assert llm_mock.await_args.args[0] == "포케볼"

@@ -118,47 +118,65 @@ async def test_aresume_resumes_from_parse_meal_with_clarified_text(
     user_factory: UserFactory,
     analysis_service: AnalysisService,
 ) -> None:
-    """Story 3.4 AC10 — clarification 발동 후 aresume → parse_meal 재진입 → 종단 도달.
+    """Story 3.4 AC10 — 실 clarification 시나리오 정합 resume 검증.
 
-    1차 호출: low conf sentinel → clarify → END (idle).
-    2차 호출(aresume): selected_value="짜장면 1인분" → parse_meal 재진입 → 종단 stub 도달.
+    CR fix #7 — 이전 vacuous OR assert(`feedback is not None or needs_clarification`)를
+    명시 contract로 교체. 실제 라우터 시나리오는 (1) ``run`` 호출로 checkpoint에 user_id
+    저장 → (2) clarification → END → (3) ``aresume``으로 사용자 정제 텍스트 주입. 본
+    테스트는 (1)+(3)으로 단축 — checkpoint user_id를 보존한 상태에서 aresume이
+    parse_meal부터 재진입해 종단 stub에 도달함을 검증.
     """
-    _ = await user_factory(profile_completed=True)
+    user = await user_factory(profile_completed=True)
     thread_id = f"thread-{uuid.uuid4()}"
 
     fake_variants = ClarificationVariants(
         options=[ClarificationOption(label="짜장면", value="짜장면 1인분")]
     )
 
-    with (
-        patch(
-            "app.graph.nodes.request_clarification.generate_clarification_options",
-            new=AsyncMock(return_value=fake_variants),
-        ),
+    # (1) 1차 run — checkpoint에 user_id 저장 + sentinel 흐름으로 종단 stub 도달.
+    with patch(
+        "app.graph.nodes.request_clarification.generate_clarification_options",
+        new=AsyncMock(return_value=fake_variants),
     ):
-        # 1차: low conf sentinel — rewrite_attempts=1로 시작해서 sentinel 0.85 boost가
-        # 아닌 sentinel + 0회 0.3 → rewrite → sentinel + 1회 0.85 → continue.
-        # 또는 sentinel + 0회 0.3 → rewrite → 0.85 → continue.
-        # 결과: 종단 도달 (clarification 미발동).
-        # ✅ Self-RAG 실 흐름은 test_self_rag.py에서 검증 — 본 테스트는 aresume 핵심.
-        # 1차에서 clarify를 발동시키려면 retrieve_nutrition을 mock 해야 한다.
+        first_result = await analysis_service.run(
+            meal_id=uuid.uuid4(),
+            user_id=user.id,
+            raw_text="__test_low_confidence__",
+            thread_id=thread_id,
+        )
+        # 1차 흐름 sanity — sentinel 0.3 → rewrite +1 → 0.85 boost → continue → stub.
+        assert first_result["rewrite_attempts"] == 1
 
-        # 단순화: aresume 자체는 thread_id가 비어있어도 새 흐름으로 진입(graceful).
+        # (3) aresume — clean slate reset + force_llm_parse=True로 parse_meal 재진입.
         result = await analysis_service.aresume(
             thread_id=thread_id,
             user_input={"selected_value": "__test_low_confidence__"},
         )
-        # selected_value 정제 텍스트가 raw_text로 주입되어 parse_meal부터 진행.
-        # sentinel — 1회 한도 후 clarify → END. needs_clarification 박힘 또는 종단 stub.
-        assert result.get("feedback") is not None or result.get("needs_clarification") is True
+
+    # 명시 contract — aresume이 Self-RAG 1회 한도 흐름을 다시 거쳐 종단 도달.
+    feedback = result.get("feedback")
+    assert feedback is not None, (
+        "Self-RAG 1회 한도 후 sentinel 0.85 boost → continue → feedback 도달 기대"
+    )
+    assert feedback.used_llm == "stub"  # Story 3.5/3.6가 stub 보존
+    # clarification 발동 X (sentinel boost로 clarify 분기 미진입).
+    assert result.get("needs_clarification") is False
+    # CR fix #1 BLOCKER 회귀 가드 — `force_llm_parse=True`가 정상 주입되어 parse_meal이
+    # LLM 흐름을 거침. clean slate reset 후 정확히 1회 rewrite 발화.
+    assert result.get("rewrite_attempts") == 1
+    # node_errors 없음 — checkpoint의 user_id로 fetch_user_profile 정상 진행.
+    assert result.get("node_errors", []) == []
 
 
 async def test_aresume_clean_slate_resets_state_fields(
     user_factory: UserFactory,
     analysis_service: AnalysisService,
 ) -> None:
-    """Story 3.4 AC10 — aresume이 직전 시도의 state(rewrite_attempts/needs_clarification)를
-    clean slate로 reset 후 parse_meal 진입.
+    """Story 3.4 AC10 — aresume 시작 시 state가 clean slate로 reset 후 parse_meal 진입.
+
+    CR fix #7 — 이전 `in (0, 1, 2)` (모든 가능값 포함) no-op assert를 정확한 값으로 교체.
+    sentinel 입력으로 Self-RAG 1회 한도가 fire → 종단 도달 시 rewrite_attempts == 1
+    (clean slate reset 후 정확히 1회 increment).
     """
     _ = await user_factory(profile_completed=True)
     thread_id = f"thread-clean-{uuid.uuid4()}"
@@ -174,5 +192,14 @@ async def test_aresume_clean_slate_resets_state_fields(
             thread_id=thread_id,
             user_input={"raw_text_clarified": "__test_low_confidence__"},
         )
-        # 새 흐름이므로 rewrite_attempts는 0 또는 1 (1회 재검색 가능).
-        assert result.get("rewrite_attempts", 0) in (0, 1, 2)
+
+    # 정확한 reset 검증: `aresume` 진입 시 rewrite_attempts=0 → sentinel 0.3 → rewrite +1
+    # → sentinel 0.85 boost → continue. 종단 시 정확히 1.
+    assert result.get("rewrite_attempts") == 1
+    assert result.get("needs_clarification") is False
+    assert result.get("clarification_options", []) == []
+    # evaluation_decision 마지막 값 = "continue" (boost 후 종단).
+    decision = result.get("evaluation_decision")
+    assert decision is not None
+    route = decision.route if hasattr(decision, "route") else decision.get("route")
+    assert route == "continue"

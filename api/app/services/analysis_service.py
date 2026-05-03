@@ -97,8 +97,12 @@ class AnalysisService:
         ``user_input`` 는 ``{"raw_text_clarified"|"selected_value": "정제 텍스트"}``.
         둘 다 비어있으면 ``ValueError`` raise — 라우터(Story 3.7)가 422로 변환.
 
-        thread_id 미존재 시 LangGraph가 idle state 인식 + 새 흐름 진입(graceful — Story
-        3.3 ``aget_state`` snapshot None 정합).
+        CR fix #10 — thread_id 미존재 시 LangGraph는 update 필드를 첫 state로 사용해
+        ``goto="parse_meal"``에서 새 흐름 시작(checkpointer가 빈 snapshot 반환 + state
+        부분 dict-merge가 base가 되는 LangGraph SOT). 라우터(Story 3.7)는 일반적으로
+        ``aget_state``로 ``needs_clarification=True`` 확인한 thread_id를 그대로 전달함.
+        CR fix #1 (BLOCKER) — ``force_llm_parse=True`` 주입 → ``parse_meal``이 DB stale
+        ``parsed_items`` 무시하고 사용자 정제 텍스트를 LLM parse(alias 1차 hit 가능성 ↑).
         """
         from langgraph.types import Command
 
@@ -118,6 +122,7 @@ class AnalysisService:
                 "clarification_options": [],
                 "evaluation_decision": None,
                 "rewritten_query": None,
+                "force_llm_parse": True,
             },
             goto="parse_meal",
         )

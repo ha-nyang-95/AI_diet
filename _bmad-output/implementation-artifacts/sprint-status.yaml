@@ -36,7 +36,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-27
-last_updated: 2026-05-03  # Story 3.4 review — DS 완료. retrieve_nutrition 3단(alias→exact→HNSW + multi-item min) + parse_meal DB 우선/LLM fallback + rewrite_query 실 LLM + request_clarification 신규 + evaluate_retrieval_quality 3-way(rewrite/continue/clarify) + analysis_service.aresume Command(update,goto="parse_meal") 강화 + ClarificationOption Pydantic + clarification_options state 필드 + food_retrieval_top_k/clarification_max_options config + korean_foods_100.json 100건(alias 32/exact 31/embedding 25/clarification 12) + eval marker(skip default, RUN_EVAL_TESTS 게이트) + test_food_search_perf.py p95 ≤ 800ms perf marker. ruff/format/mypy 0 에러 + pytest 461 passed/8 skipped(perf+eval+seed)/0 failed + coverage 86.86%(>=70 게이트 통과). 신규 모듈 coverage: normalize.py 100%, search.py 97%, request_clarification 88%+. Story 3.3 sentinel/1회 한도/node_errors 가드 보존(회귀 0건 — Story 3.3 baseline 404 + 30 = 434+ 목표 초과 461). Story 3.5/3.6/3.7/3.8 OUT. branch feat/story-3.4. Status: in-progress → review.
+last_updated: 2026-05-03  # Story 3.4 done — CR 12 patches 통합 (1 BLOCKER + 7 MAJOR + 4 MINOR). force_llm_parse 필드 + aresume update 주입(parse_meal stale DB 무시 — clarification 무한 루프 차단) + parse_meal `if db_items` truthy(빈 리스트 LLM fallback) + compute_retrieval_confidence expected_count 시그니처(missing implicit 0 보수적) + request_clarification 노드 self-fallback(LLM 영구 실패 시 needs_clarification=True 보장 — UI dead state 차단) + sentinel `len(parsed)==1` 가드(multi-item skip 방지) + request_clarification get_state_field(dict roundtrip 안전) + ClarificationVariants max_length 4→10 완화(env override 약속) + korean_foods_100.json 갈비/콜라보 fix(돼지갈비/덮밥) + _format_vector_literal NaN/Inf ValueError + eval test predicted_path warn 측정 + 2개 vacuous test 명시 contract 검증 + 4개 신규 회귀 가드 테스트(force_llm_parse / DB empty / multi-item missing / sentinel multi-item / LLM 실패 self-fallback / dict roundtrip / compute_confidence missing). ruff/format/mypy 0 에러 + pytest 468 passed/8 skipped(perf+eval+seed)/0 failed + coverage 86.87%. Story 3.3 sentinel/1회 한도/node_errors 가드 보존(회귀 0건). Status: review → done.
 project: AI_diet
 project_key: NOKEY
 tracking_system: file-system
@@ -67,7 +67,7 @@ development_status:
   3-1-음식-영양-rag-시드-pgvector: done
   3-2-가이드라인-rag-시드-chunking: done
   3-3-langgraph-6노드-self-rag-saver: done
-  3-4-음식명-정규화-매칭-fallback: review
+  3-4-음식명-정규화-매칭-fallback: done
   3-5-fit-score-알고리즘-알레르기-단락: backlog
   3-6-인용형-피드백-광고-가드-듀얼-llm: backlog
   3-7-모바일-sse-스트리밍-채팅-ui: backlog

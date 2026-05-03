@@ -100,8 +100,10 @@ async def retrieve_nutrition(state: MealAnalysisState, *, deps: NodeDeps) -> dic
         return {"retrieval": result}
 
     # (iv)(v) sentinel 분기 — 첫 item name 기준 (Story 3.3 회귀 가드).
+    # CR fix #5 — `len(parsed) == 1` 가드 추가: multi-item 케이스는 실 검색 흐름으로
+    # 진입(sentinel은 결정성 single-item fixture 전용 — 다중 음식 시 나머지 항목 skip 차단).
     first_name = parsed[0].name
-    if _is_low_confidence_input(first_name, deps.settings.environment):
+    if len(parsed) == 1 and _is_low_confidence_input(first_name, deps.settings.environment):
         if rewrite_attempts == 0:
             # 재검색 진입 시뮬레이션 — confidence 0.3.
             result = RetrievalResult(retrieved_foods=[], retrieval_confidence=0.3)
@@ -135,8 +137,10 @@ async def retrieve_nutrition(state: MealAnalysisState, *, deps: NodeDeps) -> dic
             if match is not None:
                 retrieved_foods.append(match)
 
-    # (vi) confidence aggregator — single 또는 multi-item.
-    confidence = compute_retrieval_confidence(retrieved_foods, single_item=(len(parsed) == 1))
+    # (vi) confidence aggregator — CR fix #3: expected_count=len(parsed) 전달로
+    # missing 매칭(unmatched item)이 implicit 0 confidence로 min에 반영되어 보수적
+    # 라우팅(spec line 70 정합 — 한 항목이라도 신뢰도 낮으면 Self-RAG 재검색 분기).
+    confidence = compute_retrieval_confidence(retrieved_foods, expected_count=len(parsed))
     logger.info(
         "node.retrieve_nutrition.summary",
         items_count=len(retrieved_foods),

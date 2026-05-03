@@ -244,6 +244,74 @@ async def test_retrieve_multi_item_min_confidence(monkeypatch: pytest.MonkeyPatc
 # ---------------------------------------------------------------------------
 
 
+async def test_retrieve_multi_item_missing_match_drops_confidence_to_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CR fix #3 — 2 items 중 1 unmatched(retrieved_foods 길이 < expected_count) →
+    `compute_retrieval_confidence`가 missing 항목의 implicit 0으로 0.0 반환 →
+    Self-RAG 재검색 분기 보장 (보수적).
+    """
+    maker = _build_session_maker()
+    deps = _make_deps(maker, environment="prod")
+
+    monkeypatch.setattr(retrieve_module, "lookup_canonical", AsyncMock(return_value=None))
+    rf_high = RetrievedFood(name="짜장면", food_id=None, score=0.95, nutrition={})
+
+    async def _exact(_: Any, name: str) -> RetrievedFood | None:
+        return rf_high if name == "짜장면" else None
+
+    async def _embedding(_: Any, query: str) -> list[RetrievedFood]:
+        return []  # 두 번째 item은 unmatched
+
+    monkeypatch.setattr(retrieve_module, "search_by_name", _exact)
+    monkeypatch.setattr(retrieve_module, "search_by_embedding", _embedding)
+
+    state = _state(
+        items=[
+            FoodItem(name="짜장면", confidence=0.9),
+            FoodItem(name="모를_음식", confidence=0.5),
+        ]
+    )
+    out = await retrieve_nutrition(state, deps=deps)
+    # 한 항목 unmatched → spec "보수적" 약속 — confidence 0.0 → Self-RAG 재검색.
+    assert len(out["retrieval"].retrieved_foods) == 1
+    assert out["retrieval"].retrieval_confidence == 0.0
+
+
+async def test_retrieve_sentinel_with_multi_item_runs_real_search(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CR fix #5 — sentinel + multi-item: `len(parsed) == 1` 가드로 sentinel skip,
+    실 검색 흐름 진입 → 두 번째 real_food도 처리.
+    """
+    maker = _build_session_maker()
+    deps = _make_deps(maker, environment="test")
+
+    monkeypatch.setattr(retrieve_module, "lookup_canonical", AsyncMock(return_value=None))
+    real = RetrievedFood(name="짜장면", food_id=None, score=1.0, nutrition={})
+
+    async def _exact(_: Any, name: str) -> RetrievedFood | None:
+        return real if name == "짜장면" else None
+
+    monkeypatch.setattr(retrieve_module, "search_by_name", _exact)
+    sentinel_match = RetrievedFood(name="sent_match", food_id=None, score=0.7, nutrition={})
+    monkeypatch.setattr(
+        retrieve_module, "search_by_embedding", AsyncMock(return_value=[sentinel_match])
+    )
+
+    state = _state(
+        items=[
+            FoodItem(name="__test_low_confidence__", confidence=0.5),
+            FoodItem(name="짜장면", confidence=0.9),
+        ]
+    )
+    out = await retrieve_nutrition(state, deps=deps)
+    # sentinel 분기 X — 실 검색 흐름 (multi-item) 진입.
+    assert len(out["retrieval"].retrieved_foods) == 2
+    # multi-item min(0.7, 1.0) = 0.7 (sentinel은 임베딩 fallback로 0.7 매칭).
+    assert out["retrieval"].retrieval_confidence == pytest.approx(0.7)
+
+
 async def test_retrieve_after_rewrite_uses_rewritten_query_embedding_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

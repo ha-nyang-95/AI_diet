@@ -12,6 +12,10 @@ Self-RAG 재검색 후에도 신뢰도 미달 시 진입 — ``generate_clarific
 - (iv) ``{"needs_clarification": True, "clarification_options": [...].model_dump()}`` 반환.
 - (v) graceful 빈 옵션 — fallback ``[ClarificationOption(label="알 수 없음", value=name)]``
   1건 강제 (UI 깨짐 방지).
+- (vi) CR fix #4 — LLM 영구 실패 시 본 노드 *내부에서* fallback option 강제 반환
+  (``needs_clarification=True`` + 1건). wrapper fallback이 ``needs_clarification`` 미설정
+  으로 graph END idle dead state(UI 카드 미렌더링)에 빠지지 않도록 노드 자체가 contract
+  보장. tenacity 1회 retry는 어댑터 자체에 있음 — 본 노드는 *최종 응답 contract* 책임.
 
 NFR-S5 — name/option raw 출력 X. options_count + latency_ms만.
 """
@@ -25,7 +29,7 @@ import structlog
 from app.adapters.openai_adapter import generate_clarification_options
 from app.graph.deps import NodeDeps
 from app.graph.nodes._wrapper import _node_wrapper
-from app.graph.state import ClarificationOption, MealAnalysisState
+from app.graph.state import ClarificationOption, MealAnalysisState, get_state_field
 
 logger = structlog.get_logger(__name__)
 
@@ -40,20 +44,31 @@ async def request_clarification(
     raw_text = state.get("raw_text", "") or ""
 
     # (i) 입력 추출 — parsed 우선, 빈 시 raw_text fallback.
-    name = parsed[0].name if parsed else raw_text.strip()
+    # CR fix #6 — checkpointer round-trip 시 parsed_items가 list[dict]로 deserialize
+    # 가능 → `get_state_field`로 양 형태(Pydantic instance / dict) 안전 access.
+    raw_first = get_state_field(parsed[0], "name", "") if parsed else ""
+    first_name = str(raw_first) if raw_first else ""
+    name = first_name.strip() or raw_text.strip()
     if not name:
         name = "unknown"
 
-    # (ii) LLM 호출
-    variants = await generate_clarification_options(name)
-
-    # (iii) settings 상한 truncate
     max_options = max(1, deps.settings.clarification_max_options)
-    options = variants.options[:max_options]
 
-    # (v) graceful 빈 옵션
+    # (ii)(vi) LLM 호출 + 영구 실패 시 self-fallback (UI dead state 차단).
+    options: list[ClarificationOption]
+    try:
+        variants = await generate_clarification_options(name)
+        options = list(variants.options[:max_options])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "node.request_clarification.llm_failed",
+            error_class=type(exc).__name__,
+        )
+        options = []
+
+    # (v) graceful 빈 옵션 — LLM 빈 응답 또는 LLM 실패 모두 흡수.
     if not options:
-        options = [ClarificationOption(label="알 수 없음", value=name)]
+        options = [ClarificationOption(label="다시 입력", value=name)]
 
     logger.info(
         "node.request_clarification.summary",

@@ -20,6 +20,7 @@ design:
 
 from __future__ import annotations
 
+import math
 import time
 import uuid
 from typing import Final
@@ -43,7 +44,12 @@ def _format_vector_literal(values: list[float]) -> str:
 
     text() bindparam으로 전달 후 SQL ``CAST(:q AS vector)``로 cast — pgvector ORM
     미지원 회피(Story 3.3 정합).
+
+    CR fix #11 — NaN/Inf 입력은 pgvector가 opaque InvalidTextRepresentation으로 reject.
+    명시적 ValueError로 호출자가 graceful 변환할 수 있게 fail-fast.
     """
+    if not all(math.isfinite(v) for v in values):
+        raise ValueError("embedding contains non-finite values (NaN/Inf)")
     return "[" + ",".join(format(v, ".7g") for v in values) + "]"
 
 
@@ -120,7 +126,12 @@ async def search_by_embedding(
     embeddings = await embed_texts([query])
     if not embeddings:
         return []
-    vec_literal = _format_vector_literal(embeddings[0])
+    # CR fix #11 — NaN/Inf 임베딩은 graceful 빈 리스트 (pgvector opaque error 차단).
+    try:
+        vec_literal = _format_vector_literal(embeddings[0])
+    except ValueError:
+        logger.warning("food.search.embedding.invalid_vector", reason="non_finite_values")
+        return []
 
     stmt = text(
         "SELECT id, name, nutrition, "
@@ -155,19 +166,24 @@ async def search_by_embedding(
     return matches
 
 
-def compute_retrieval_confidence(
-    matches: list[RetrievedFood], *, single_item: bool = True
-) -> float:
+def compute_retrieval_confidence(matches: list[RetrievedFood], *, expected_count: int = 1) -> float:
     """`retrieved_foods` 리스트 → 0~1 retrieval confidence aggregator.
 
-    - 빈 리스트 → 0.0.
-    - ``single_item=True``(단일 음식) → top-1 score 그대로.
-    - ``single_item=False``(multi-item meal) → *최소값* 채택. 한 항목이라도 신뢰도 낮으면
-      Self-RAG 재검색 분기로 보수적 라우팅.
+    CR fix #3 — `single_item: bool` 시그니처를 `expected_count: int`로 교체. 다중
+    음식 식사에서 한 항목이 검색에 실패(unmatched)해 ``matches`` 길이가 ``expected_count``
+    보다 작은 경우, missing 항목의 *암묵적 0 confidence*가 min에 포함되도록 보장 →
+    spec "보수적 — 한 항목이라도 신뢰도 낮으면 재검색" 약속을 만족.
+
+    - 빈 ``matches`` 또는 ``expected_count <= 0`` → 0.0.
+    - ``len(matches) < expected_count`` → 0.0 (missing 항목이 implicit 0으로 min 결정).
+    - ``expected_count == 1`` → ``matches[0].score`` (단일 음식 — top-1 신뢰도).
+    - ``expected_count > 1`` → ``min(m.score for m in matches)`` (multi-item 보수적).
     """
-    if not matches:
+    if not matches or expected_count <= 0:
         return 0.0
-    if single_item:
+    if len(matches) < expected_count:
+        return 0.0
+    if expected_count == 1:
         return matches[0].score
     return min(m.score for m in matches)
 

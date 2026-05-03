@@ -184,3 +184,7 @@ class MealAnalysisState(TypedDict, total=False):
     needs_clarification: bool
     clarification_options: list[ClarificationOption]
     evaluation_decision: EvaluationDecision
+    # Story 3.4 CR fix #1 (BLOCKER) — `aresume`이 True 주입 → `parse_meal` 노드가 DB
+    # `meals.parsed_items` 우선 분기를 skip하고 LLM fallback 직진(사용자 정제 텍스트
+    # 반영). 신규 분석은 미설정(False/missing).
+    force_llm_parse: bool

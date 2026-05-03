@@ -214,3 +214,81 @@ async def test_parse_meal_invalid_jsonb_falls_back(
     out = await parse_meal(state, deps=deps)
     assert "node_errors" in out
     assert out["node_errors"][0].node_name == "parse_meal"
+
+
+# ---------------------------------------------------------------------------
+# CR fix #1 (BLOCKER) — `force_llm_parse=True` 시 DB skip + LLM 강제 호출
+# ---------------------------------------------------------------------------
+
+
+async def test_parse_meal_force_llm_parse_skips_db_uses_llm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`aresume`이 주입한 `force_llm_parse=True`는 DB stale `parsed_items`를 무시하고
+    `parse_meal_text(raw_text)` 강제 호출. clarification 후 사용자 정제 텍스트가 alias
+    1차 hit 가능성으로 흡수.
+    """
+    # DB row에는 stale parsed_items가 시드되어 있음.
+    row = MagicMock()
+    row.parsed_items = [{"name": "포케볼", "quantity": "1인분", "confidence": 0.4}]
+    maker = _build_session_maker_with_first(row)
+    deps = _make_deps(maker)
+
+    from app.adapters.openai_adapter import ParsedMeal, ParsedMealItem
+
+    parsed = ParsedMeal(items=[ParsedMealItem(name="연어 포케", quantity="1인분", confidence=0.95)])
+    llm_mock = AsyncMock(return_value=parsed)
+    monkeypatch.setattr(parse_meal_module, "parse_meal_text", llm_mock)
+
+    state: MealAnalysisState = {
+        "meal_id": uuid.uuid4(),
+        "user_id": uuid.uuid4(),
+        "raw_text": "연어 포케 1인분",  # 사용자 clarified text
+        "rewrite_attempts": 0,
+        "node_errors": [],
+        "force_llm_parse": True,
+    }
+    out = await parse_meal(state, deps=deps)
+
+    # LLM 강제 호출 + 사용자 텍스트 사용 — DB stale items 무시.
+    assert llm_mock.await_count == 1
+    assert llm_mock.await_args.args[0] == "연어 포케 1인분"
+    items = out["parsed_items"]
+    assert len(items) == 1
+    assert items[0].name == "연어 포케"  # DB의 "포케볼" 아님
+
+
+# ---------------------------------------------------------------------------
+# CR fix #2 — DB row의 빈 parsed_items=[] 도 LLM fallback 진입 (truthy 검사)
+# ---------------------------------------------------------------------------
+
+
+async def test_parse_meal_db_empty_list_falls_back_to_llm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DB `parsed_items = []` (OCR 0건 영속화)인데 사용자가 raw_text 보강한 시나리오:
+    빈 리스트는 truthy False → LLM fallback 진입. 이전 `is not None` 가드는 빈 리스트
+    를 권위로 인식해 LLM 호출이 영구 skip되어 retrieval 빈 결과 + 불필요한 clarification
+    카드를 발동시켰음.
+    """
+    row = MagicMock()
+    row.parsed_items = []  # OCR 0건 영속화 케이스
+    maker = _build_session_maker_with_first(row)
+    deps = _make_deps(maker)
+
+    from app.adapters.openai_adapter import ParsedMeal, ParsedMealItem
+
+    parsed = ParsedMeal(items=[ParsedMealItem(name="짜장면", quantity="1인분", confidence=0.9)])
+    llm_mock = AsyncMock(return_value=parsed)
+    monkeypatch.setattr(parse_meal_module, "parse_meal_text", llm_mock)
+
+    state: MealAnalysisState = {
+        "meal_id": uuid.uuid4(),
+        "user_id": uuid.uuid4(),
+        "raw_text": "짜장면 1인분",
+        "rewrite_attempts": 0,
+        "node_errors": [],
+    }
+    out = await parse_meal(state, deps=deps)
+    assert llm_mock.await_count == 1
+    assert out["parsed_items"][0].name == "짜장면"

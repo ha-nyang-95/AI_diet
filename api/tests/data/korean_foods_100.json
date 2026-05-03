@@ -13,7 +13,7 @@
   {"input": "돌솥비빔밥", "expected_canonical": "비빔밥", "expected_path": "alias", "category": "밥류"},
   {"input": "공기밥", "expected_canonical": "쌀밥", "expected_path": "alias", "category": "밥류"},
   {"input": "흰밥", "expected_canonical": "쌀밥", "expected_path": "alias", "category": "밥류"},
-  {"input": "갈비", "expected_canonical": "갈비탕", "expected_path": "alias", "category": "탕"},
+  {"input": "돼지갈비", "expected_canonical": "돼지갈비", "expected_path": "alias", "category": "고기"},
   {"input": "해초국", "expected_canonical": "미역국", "expected_path": "alias", "category": "국"},
   {"input": "돼지 삼겹", "expected_canonical": "삼겹살", "expected_path": "alias", "category": "고기"},
   {"input": "양념 치킨", "expected_canonical": "양념치킨", "expected_path": "alias", "category": "고기"},
@@ -98,7 +98,7 @@
   {"input": "백반", "expected_canonical": "백반", "expected_path": "clarification", "category": "기타"},
   {"input": "주먹밥", "expected_canonical": "주먹밥", "expected_path": "clarification", "category": "밥류"},
   {"input": "샐러드볼", "expected_canonical": "샐러드", "expected_path": "clarification", "category": "샐러드"},
-  {"input": "콜라보", "expected_canonical": "콤보메뉴", "expected_path": "clarification", "category": "기타"},
+  {"input": "덮밥", "expected_canonical": "덮밥", "expected_path": "clarification", "category": "밥류"},
   {"input": "스파게티", "expected_canonical": "스파게티", "expected_path": "clarification", "category": "양식"},
   {"input": "파스타", "expected_canonical": "파스타", "expected_path": "clarification", "category": "양식"},
   {"input": "피자 한판", "expected_canonical": "피자", "expected_path": "clarification", "category": "양식"}

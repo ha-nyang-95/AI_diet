@@ -1,6 +1,6 @@
 # Story 3.4: 음식명 정규화 매칭 + 임베딩 fallback + Self-RAG 재질문
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -389,3 +389,36 @@ claude-opus-4-7[1m]
 | 날짜 | 작성자 | 메모 |
 |------|--------|------|
 | 2026-05-03 | Amelia (DS) | Story 3.4 13개 AC + 13개 Task 완료. ruff/format/mypy 0 에러 + pytest 461 passed/8 skipped/0 failed + coverage 86.86%. Status: ready-for-dev → review. |
+| 2026-05-03 | Amelia (CR) | 3-layer 적대적 코드 리뷰 (Blind Hunter + Edge Case Hunter + Acceptance Auditor) 완료. 12 patch (1 blocker / 7 major / 4 minor) + 2 defer + 25 dismissed. 핵심 결함: aresume + parse_meal stale DB 재사용 (clarification 무한 루프). 상세는 ### Review Findings 참조. |
+| 2026-05-03 | Amelia (CR) | 12 patch 일괄 적용 완료. force_llm_parse state 필드 + parse_meal 분기 + aresume update 주입(BLOCKER 회귀 가드 테스트 포함) + compute_retrieval_confidence expected_count 시그니처 + request_clarification self-fallback + sentinel multi-item 가드 + dict roundtrip 안전 access + ClarificationVariants schema 완화 + 데이터셋 fix + NaN/Inf 가드 + predicted_path 측정 + 2 vacuous test 명시 검증. ruff/format/mypy 0 에러 + pytest 468 passed/8 skipped/0 failed + coverage 86.87%. Status: review → done. |
+
+### Review Findings
+
+- [x] [Review][Patch] **[BLOCKER] aresume → parse_meal stale DB parsed_items 재사용으로 사용자 정제 텍스트 무시** [`api/app/graph/nodes/parse_meal.py:57-66` + `api/app/services/analysis_service.py:110-122`] — `aresume`이 `parsed_items=None`으로 reset해도 `meal_id`는 그대로 → `parse_meal`이 `_load_parsed_items_from_db`로 DB row의 stale `parsed_items` JSONB를 우선 읽음 → `state["raw_text"]`(clarified) 무시 → 같은 음식명으로 retrieve_nutrition 재실패 → 동일 clarification 무한 루프. **Fix:** `aresume`이 `meal_id` 또한 None으로 reset OR `parse_meal`이 resume 마커(`state.get("rewrite_attempts")` reset 흔적 또는 별도 flag) 감지 시 DB skip하고 LLM fallback 직진. (source: blind+edge)
+
+- [x] [Review][Patch] **[MAJOR] parse_meal이 DB row의 빈 `parsed_items=[]`를 권위로 인식 → LLM fallback 영구 skip** [`api/app/graph/nodes/parse_meal.py:60`] — `if db_items is not None:` 가드는 빈 리스트도 `is not None`이라 통과 → LLM 호출 안 됨. 사진 OCR이 0건 반환했는데 사용자가 텍스트로 보강한 시나리오에서 retrieval 빈 결과 + clarification 카드 발동. **Fix:** `if db_items:` (truthy 검사) — 빈 리스트는 LLM fallback 진입. (source: edge)
+
+- [x] [Review][Patch] **[MAJOR] retrieve_nutrition multi-item 에서 unmatched item이 confidence 계산에서 silently 누락 — spec "보수적" 약속 위반** [`api/app/graph/nodes/retrieve_nutrition.py:124-139` + `api/app/rag/food/search.py:158-172`] — `retrieved_foods`는 매칭된 항목만 append. 2 items 중 1 unmatched 시 `compute_retrieval_confidence(retrieved_foods, single_item=False)`는 1개 score의 min = 그 score. 누락된 item의 0 confidence가 invisible → 한 항목이 unmatched여도 Self-RAG 재검색이 트리거되지 않음. **Fix:** `_resolve_one_item`이 `None` 반환 시 `RetrievedFood(score=0.0, ...)` placeholder 또는 `compute_retrieval_confidence(retrieved_foods, expected_count=len(parsed))` 시그니처 변경하여 missing은 0.0으로 계산. (source: blind+edge+auditor AC6)
+
+- [x] [Review][Patch] **[MAJOR] request_clarification 영구 LLM 실패 시 graph가 silent dead state — UI에 clarification 신호 없음** [`api/app/graph/nodes/request_clarification.py:33-67` + `api/app/graph/nodes/_wrapper.py:96-114`] — LLM 영구 실패(Pydantic 두 번 실패, AuthenticationError 등) → wrapper fallback `{"node_errors": [...]}`만 반환 → `needs_clarification` 미설정 + `clarification_options` 비어있음 → 라우터가 clarification 카드 못 띄움, 사용자는 분석 진행 표시 없는 멈춘 화면 봄. **Fix:** `request_clarification` 본문에 try/except로 자체 fallback (`needs_clarification=True` + `[ClarificationOption(label="다시 시도", value=name)]`) 보장 — wrapper fallback 도달 전. (source: edge)
+
+- [x] [Review][Patch] **[MAJOR] retrieve_nutrition sentinel + multi-item 첫 item 매칭 시 나머지 item 모두 skip** [`api/app/graph/nodes/retrieve_nutrition.py:103-121`] — `parsed_items=[sentinel, real_food]`일 때 `_is_low_confidence_input(parsed[0].name)` True → 즉시 return + 두 번째 real_food는 검색 안됨. 테스트 결정성 fixture가 multi-item 회귀로 잘못 적용될 위험. **Fix:** sentinel 분기 진입 조건에 `len(parsed) == 1` 가드 추가. (source: edge)
+
+- [x] [Review][Patch] **[MAJOR] request_clarification에서 `parsed[0].name` 직접 접근 — checkpointer round-trip 후 dict 형태면 AttributeError** [`api/app/graph/nodes/request_clarification.py:43`] — Story 3.3 spec이 dict/Pydantic 양 형태 핸들링용 `get_state_field` helper 도입했으나(`state.py:131-143`) 본 신규 노드는 직접 `.name` 접근. 체크포인터 round-trip 시 list[dict]로 deserialize되면 crash. **Fix:** `from app.graph.state import get_state_field` import + `get_state_field(parsed[0], "name", "")` 사용. (source: blind)
+
+- [x] [Review][Patch] **[MAJOR] test_aresume 두 케이스 vacuous assert — clarify 흐름 실제 전이 미검증** [`api/tests/services/test_analysis_service.py:153,178`] — line 153 `feedback is not None or needs_clarification is True` — 두 분기 모두 true 가능 (특히 sentinel 0.85 boost로 종단 도달 시 feedback 항상 채워짐) → 항상 pass. line 178 `rewrite_attempts in (0, 1, 2)` — 1회 한도 가드로 나올 수 있는 모든 값 포함 → no-op. **Fix:** (a) clarification 발동을 명시 mock(`retrieve_nutrition`을 sentinel 우회로 강제 low-confidence 2회) → END idle, (b) `aresume` 후 `parsed_items[0].name == clarified` 또는 `feedback`이 sentinel → 정상 stub 흐름임 명시 검증, (c) `rewrite_attempts == 0` 정확 일치 검증 (clean slate 검증). (source: blind)
+
+- [x] [Review][Patch] **[MAJOR] ClarificationVariants `max_length=4` Pydantic schema가 hardcoded — `settings.clarification_max_options` env override가 4 초과 시 LLM 응답 거부** [`api/app/adapters/openai_adapter.py` ClarificationVariants 정의] — AC11이 env override 가능 약속하나 schema 자체에 hard cap → 운영자가 5+ 설정해도 LLM 응답 invalid → graceful fallback 1건으로 강제. **Fix:** ClarificationVariants의 `max_length` 제약을 *상수*가 아닌 caller-side truncate로 일임 (Pydantic constraint 제거 또는 max_length=10 등 여유 cap) + AC9 노드의 `max_options` truncate가 SOT. (source: auditor AC2/AC9 + blind #20)
+
+- [x] [Review][Patch] **[MINOR] korean_foods_100.json `"갈비" → "갈비탕"` 잘못된 canonical 매핑** [`api/tests/data/korean_foods_100.json:16`] — "갈비"는 standalone 음식(갈비구이/갈비찜), "갈비탕"은 별개. T3 KPI 정확도 측정 시 영구 mismatch. 추가로 line 101 `"콜라보" → "콤보메뉴"`(콜라보=collaboration, 음식 아님) 검토 필요. **Fix:** 갈비 행을 `"input": "갈비", "expected_canonical": "갈비"` 또는 alias 분포 보존을 위한 다른 한국어 변형으로 교체 + 콜라보 행 재검토. (source: blind+auditor)
+
+- [x] [Review][Patch] **[MINOR] aresume docstring "thread_id 미존재 시 graceful" 주장 미검증 (vacuous test로 가려짐)** [`api/app/services/analysis_service.py:100-101`] — LangGraph `Command(update=..., goto=...)`이 prior checkpoint 없는 thread_id에서 어떻게 동작하는지 명시 검증 없음. 현 테스트(vacuous)는 호출 미crash만 확인. **Fix:** (a) docstring을 "fresh thread_id 진입 시 LangGraph가 새 흐름으로 시작"로 명확화 OR (b) fresh thread_id에 대한 명시 통합 테스트 추가(state init 검증). (source: edge #15)
+
+- [x] [Review][Patch] **[MINOR] _format_vector_literal NaN/Inf 입력 시 pgvector cast 실패 — opaque error** [`api/app/rag/food/search.py:41-47`] — `format(float('nan'), '.7g')` → `"nan"` literal → PG가 InvalidTextRepresentation으로 reject + 에러 메시지가 disabling. OpenAI embedding이 NaN 반환할 가능성은 낮으나 transport corruption 시 노출. **Fix:** `math.isfinite(v)` 검증 후 `ValueError` raise 또는 `[]` 반환으로 명시적 graceful. (source: blind+edge)
+
+- [x] [Review][Patch] **[MINOR] eval test predicted_path 측정 누락 — spec AC12 "분포 정확도 별도 측정" 누락** [`api/tests/test_korean_foods_eval.py:74-91`] — `path_distribution[row["expected_path"]]` 누적은 *expected* 분포(dataset 자체 통계) — *predicted_path*는 산출 안됨. AC12 spec line 131 "predicted_path 정확도 별도 측정(분포 일치 검증) — warn"가 dead code. **Fix:** `_resolve_one_item`이 path 분류 반환하도록 노출하거나 retrieve_nutrition output에 path 추가하여 predicted vs expected 비교 + 90% 미달 시 warn(fail X). (source: auditor AC12)
+
+- [x] [Review][Defer] **[MINOR] parse_meal `_load_parsed_items_from_db` per-call session — 후속 retrieve_nutrition 세션과 batching 미실현 (perf overhead 2x connection churn)** [`api/app/graph/nodes/parse_meal.py:32-49`] — deferred, 본 스토리 NFR-P4 ≤ 3s 게이트 통과 + Story 8.4 polish 슬롯 영역. (source: blind #11)
+
+- [x] [Review][Defer] **[NIT] `_mock_llm_adapters` fixture 4 파일에 중복** [`tests/services/test_analysis_service.py` + `tests/graph/test_pipeline.py` + `tests/graph/test_self_rag.py` + `tests/test_main_lifespan.py`] — deferred, conftest.py 추출 리팩터는 Story 3.6/3.7 LLM 어댑터 추가 시 동시 처리. (source: blind #28 + edge #17)
+

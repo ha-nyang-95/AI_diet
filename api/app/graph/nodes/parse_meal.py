@@ -53,11 +53,16 @@ async def _load_parsed_items_from_db(deps: NodeDeps, meal_id: uuid.UUID) -> list
 async def parse_meal(state: MealAnalysisState, *, deps: NodeDeps) -> dict[str, Any]:
     raw = state.get("raw_text", "") or ""
     meal_id = state.get("meal_id")
+    # CR fix #1 (BLOCKER) — `aresume`이 True 주입 시 DB stale `parsed_items`를 무시하고
+    # 사용자 정제 텍스트로 LLM parse 강제. neuw 분석은 False/missing이라 영향 없음.
+    force_llm = bool(state.get("force_llm_parse"))
 
-    # (i) DB 우선 읽기 — meals.parsed_items 영속화 재사용.
-    if meal_id is not None:
+    # (i) DB 우선 읽기 — meals.parsed_items 영속화 재사용. force_llm 시 skip.
+    if meal_id is not None and not force_llm:
         db_items = await _load_parsed_items_from_db(deps, meal_id)
-        if db_items is not None:
+        # CR fix #2 — truthy 검사 (빈 리스트 `[]`도 None과 동일하게 LLM fallback 진입,
+        # OCR 0건 + 사용자 텍스트 보강 시나리오 정합).
+        if db_items:
             logger.info(
                 "node.parse_meal.source",
                 source="db",
