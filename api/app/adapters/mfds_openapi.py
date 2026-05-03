@@ -268,15 +268,21 @@ def _is_quota_exceeded(response: httpx.Response, body: dict[str, Any] | None) ->
     if not isinstance(body, dict):
         return False
     # quota 코드: "22" (LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR).
-    result_code = (
-        body.get("header", {}).get("resultCode") if isinstance(body.get("header"), dict) else None
-    )
+    # CR(Gemini) — `dict.get(k, {})`의 default는 키 missing 시만 적용. 값이 명시적 `None`
+    # 으로 오면 `None`이 반환되어 다음 `.get()`에서 AttributeError. 각 단계마다 isinstance
+    # 체크로 명시적 dict 가드.
+    result_code: str | None = None
+    header = body.get("header")
+    if isinstance(header, dict):
+        result_code = header.get("resultCode")
+
     if result_code is None:
-        result_code = (
-            body.get("response", {}).get("header", {}).get("resultCode")
-            if isinstance(body.get("response"), dict)
-            else None
-        )
+        resp = body.get("response")
+        if isinstance(resp, dict):
+            inner_header = resp.get("header")
+            if isinstance(inner_header, dict):
+                result_code = inner_header.get("resultCode")
+
     if result_code is None:
         result_code = body.get("resultCode")
     return result_code in {"22", "LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR"}
