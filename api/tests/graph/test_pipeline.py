@@ -100,8 +100,13 @@ async def test_pipeline_high_confidence_no_rewrite(
             config={"configurable": {"thread_id": thread_id}},
         )
         assert result["rewrite_attempts"] == 1  # 증가 X
-        assert result["feedback"].text == "(분석 준비 중)"
-        assert result["feedback"].used_llm == "stub"
+        # Story 3.6 — generate_feedback 노드는 가이드라인 chunks 부재 시 safe fallback
+        # ("## 평가\n한국 1차 출처 가이드라인을 찾지 못해 ..." + "## 다음 행동") 반환
+        # used_llm="stub". 본 통합 테스트는 guideline 시드 없이 호출되므로 stub fallback 정합.
+        feedback = result["feedback"]
+        assert feedback["used_llm"] == "stub"
+        assert "## 평가" in feedback["text"]
+        assert "## 다음 행동" in feedback["text"]
         # Story 3.5 — 실 결정성 알고리즘. checkpointer round-trip 후 dict 형태.
         fe = result["fit_evaluation"]
         assert fe["fit_reason"] == "ok"
@@ -139,8 +144,10 @@ async def test_pipeline_low_confidence_triggers_self_rag(
         assert result["rewrite_attempts"] == 1
         # boost 후 confidence 0.85
         assert result["retrieval"].retrieval_confidence == 0.85
-        # 종단 noun
-        assert result["feedback"].text == "(분석 준비 중)"
+        # Story 3.6 — guideline chunks 부재 시 safe fallback (used_llm="stub").
+        feedback = result["feedback"]
+        assert feedback["used_llm"] == "stub"
+        assert "## 평가" in feedback["text"]
         # Story 3.5 — 실 결정성 알고리즘 — sentinel 흐름은 알레르기 X + nutrition 미포함.
         fe = result["fit_evaluation"]
         assert fe["fit_reason"] == "ok"

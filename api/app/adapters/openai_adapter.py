@@ -51,10 +51,12 @@ from tenacity import (
 from app.core.config import settings
 from app.core.exceptions import (
     FoodSeedAdapterError,
+    LLMRouterPayloadInvalidError,
+    LLMRouterUnavailableError,
     MealOCRPayloadInvalidError,
     MealOCRUnavailableError,
 )
-from app.graph.state import ClarificationOption
+from app.graph.state import ClarificationOption, FeedbackLLMOutput
 
 logger = structlog.get_logger(__name__)
 
@@ -160,7 +162,11 @@ def _reset_client_for_tests() -> None:
 
 
 _TRANSIENT_RETRY_TYPES: Final[tuple[type[BaseException], ...]] = (
-    httpx.HTTPError,
+    # CR MJ-8 — ``httpx.HTTPError`` 부모 클래스는 ``HTTPStatusError`` (4xx 영구 응답)도
+    # 포함해 quota 낭비 회귀가 가능. 명시적 *네트워크/타임아웃/프로토콜* subset만 열거.
+    httpx.TimeoutException,
+    httpx.NetworkError,  # ConnectError / ReadError / WriteError / CloseError 부모
+    httpx.RemoteProtocolError,
     openai.APIConnectionError,
     openai.APITimeoutError,
     openai.RateLimitError,
@@ -168,7 +174,8 @@ _TRANSIENT_RETRY_TYPES: Final[tuple[type[BaseException], ...]] = (
 )
 """Transient 오류만 retry — ``openai.APIError`` 전체를 catch하면 ``AuthenticationError``
 / ``BadRequestError`` 같은 *영구 오류 서브클래스*도 retry 대상이 되어 cost 낭비 + 영구
-오류 mask. CR P1 fix(2026-04-30) — 명시적 transient subset만 열거."""
+오류 mask. CR P1 fix(2026-04-30) — 명시적 transient subset만 열거. CR MJ-8 갱신
+(2026-05-04) — ``httpx.HTTPError`` 부모 → 네트워크/타임아웃 subset으로 좁힘."""
 
 
 @retry(
@@ -607,6 +614,116 @@ async def generate_clarification_options(query: str) -> ClarificationVariants:
         "openai.generate_clarification_options",
         options_count=len(parsed.options),
         model=PARSE_MODEL,
+        latency_ms=latency_ms,
+    )
+    return parsed
+
+
+# ---------------------------------------------------------------------------
+# Story 3.6 — 듀얼 LLM router 메인 LLM (call_openai_feedback)
+# ---------------------------------------------------------------------------
+
+
+_FEEDBACK_TEMPERATURE: Final[float] = 0.3
+"""coaching 톤 자연스러움 ↔ 인용 정확성 균형 — 0.0은 robotic, 0.7+은 환각 ↑."""
+
+
+_FEEDBACK_MAX_TOKENS: Final[int] = 1024
+"""인용 + ## 평가 + ## 다음 행동 섹션 수용 — Anthropic 어댑터와 동일."""
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=4),
+    retry=retry_if_exception_type(_TRANSIENT_RETRY_TYPES),
+    reraise=True,
+)
+async def _call_feedback_openai(system: str, user: str) -> tuple[FeedbackLLMOutput, int]:
+    """OpenAI structured output 호출 + tenacity 3회 retry — *transient*만 retry.
+
+    Story 3.6 AC8 — `_call_vision`/`_call_parse_meal_text`(2회 retry decorator)와 *분리*:
+    본 함수는 3회 retry(피드백 단계가 흐름 마지막 — 일시 장애 인내치 ↑).
+
+    Returns ``(parsed, total_tokens)`` — caller가 NFR-S5 정합 1줄 로그에 token_count 포함.
+    """
+    client = _get_client()
+    response = await client.beta.chat.completions.parse(
+        model=settings.llm_main_model,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        response_format=FeedbackLLMOutput,
+        temperature=_FEEDBACK_TEMPERATURE,
+        max_tokens=_FEEDBACK_MAX_TOKENS,
+    )
+    if not response.choices:
+        raise LLMRouterPayloadInvalidError("openai.feedback.no_choices")
+    message = response.choices[0].message
+    refusal = getattr(message, "refusal", None)
+    if refusal:
+        raise LLMRouterPayloadInvalidError(f"openai.feedback.refusal ({refusal})")
+    parsed = message.parsed
+    if parsed is None:
+        raise LLMRouterPayloadInvalidError("openai.feedback.parsed_missing")
+    total_tokens = response.usage.total_tokens if response.usage else 0
+    return parsed, total_tokens
+
+
+async def call_openai_feedback(
+    *, system: str, user: str, response_format: type[BaseModel]
+) -> FeedbackLLMOutput:
+    """`generate_feedback` 노드 메인 LLM 호출 — `gpt-4o-mini` structured output.
+
+    `response_format` 파라미터는 SDK ``response_format=FeedbackLLMOutput``과 1:1 매핑
+    제약. 현재는 ``FeedbackLLMOutput``만 사용 — 향후 다중 schema 도입 시 dispatch 추가
+    여지(현재 시점 OUT — Story 3.8 LangSmith eval 결과로 결정).
+
+    오류 매핑(CR D1+MJ-12 — adapter boundary에서 typed 변환):
+    - tenacity 3회 transient 최종 실패 (``reraise=True``라 raw exception 그대로) —
+      caller(router)가 ``_OPENAI_TRANSIENT`` 안에서 catch.
+    - ``LLMRouterPayloadInvalidError`` (no_choices / refusal / parsed_missing /
+      ValidationError / BadRequestError / NotFoundError / UnprocessableEntity) —
+      caller(router)에서 catch.
+    - ``LLMRouterUnavailableError`` (api_key 미설정 / AuthenticationError /
+      PermissionDeniedError) — caller(router)에서 catch.
+
+    NFR-S5 — system / user / parsed 본문 raw 출력 X. model + latency_ms + total_tokens만
+    (CR mn-26 — token_count 추가).
+    """
+    if response_format is not FeedbackLLMOutput:
+        # 현재는 단일 schema만 지원 — 다중 schema 도입 시 dispatch 확장.
+        raise LLMRouterUnavailableError(
+            f"openai.feedback.unsupported_response_format ({response_format.__name__})"
+        )
+
+    start = time.monotonic()
+    try:
+        parsed, total_tokens = await _call_feedback_openai(system, user)
+    except MealOCRUnavailableError as exc:
+        # CR MJ-12 — `_get_client()`의 cross-domain 예외를 router의 typed 예외로 변환.
+        raise LLMRouterUnavailableError("openai.feedback.client_init_failed") from exc
+    except (openai.AuthenticationError, openai.PermissionDeniedError) as exc:
+        # CR D1 — 영구 인증/권한 오류 → router가 Anthropic fallback 발동하도록 typed 변환.
+        raise LLMRouterUnavailableError(f"openai.feedback.{type(exc).__name__}") from exc
+    except (
+        openai.BadRequestError,
+        openai.NotFoundError,
+        openai.UnprocessableEntityError,
+    ) as exc:
+        # CR D1 — 요청 페이로드/모델 영구 오류 → fallback 발동.
+        raise LLMRouterPayloadInvalidError(f"openai.feedback.{type(exc).__name__}") from exc
+    except ValidationError as exc:
+        # SDK 자동 Pydantic 역직렬화 시 schema 위반 — 영구 오류.
+        raise LLMRouterPayloadInvalidError(f"openai.feedback.validation_failed ({exc})") from exc
+    except LLMRouterPayloadInvalidError:
+        raise
+
+    latency_ms = int((time.monotonic() - start) * 1000)
+    logger.info(
+        "openai.call_openai_feedback",
+        model=settings.llm_main_model,
+        total_tokens=total_tokens,
         latency_ms=latency_ms,
     )
     return parsed

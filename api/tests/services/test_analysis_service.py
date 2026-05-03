@@ -79,8 +79,11 @@ async def test_run_returns_state_with_stub_feedback(
         user_id=user.id,
         raw_text="__test_low_confidence__",  # sentinel — DB lookup 회피, 0.85 boost
     )
-    assert state["feedback"].used_llm == "stub"
-    assert state["feedback"].text == "(분석 준비 중)"
+    # Story 3.6 — generate_feedback도 model_dump dict 반환. guideline 시드 없으므로
+    # used_llm="stub" + safe fallback 텍스트(`## 평가` + `## 다음 행동`).
+    feedback = state["feedback"]
+    assert feedback["used_llm"] == "stub"
+    assert "## 평가" in feedback["text"]
     # Story 3.5 — 실 결정성 알고리즘 출력 + components 분해. dict 형태(model_dump).
     fe = state["fit_evaluation"]
     assert fe["fit_reason"] == "ok"
@@ -162,7 +165,8 @@ async def test_aresume_resumes_from_parse_meal_with_clarified_text(
     assert feedback is not None, (
         "Self-RAG 1회 한도 후 sentinel 0.85 boost → continue → feedback 도달 기대"
     )
-    assert feedback.used_llm == "stub"  # Story 3.5/3.6가 stub 보존
+    # Story 3.6 — generate_feedback model_dump dict 반환. guideline 시드 없음 → stub fallback.
+    assert feedback["used_llm"] == "stub"
     # clarification 발동 X (sentinel boost로 clarify 분기 미진입).
     assert result.get("needs_clarification") is False
     # CR fix #1 BLOCKER 회귀 가드 — `force_llm_parse=True`가 정상 주입되어 parse_meal이

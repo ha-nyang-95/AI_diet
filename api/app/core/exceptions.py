@@ -545,3 +545,62 @@ class AnalysisRewriteLimitExceededError(AnalysisGraphError):
     status: ClassVar[int] = 422
     code: ClassVar[str] = "analysis.rewrite.limit_exceeded"
     title: ClassVar[str] = "Self-RAG Rewrite Limit Exceeded"
+
+
+# --- LLM Router 계층 (Story 3.6 — 듀얼 LLM router + Redis cache) ---
+
+
+class LLMRouterError(BalanceNoteError):
+    """Story 3.6 듀얼 LLM router 도메인 예외 base.
+
+    ``MealOCRUnavailableError`` 카탈로그 패턴 정합 — 직접 raise 회피(서브클래스만 사용
+    권장 — base 직접 raise는 status/code/title default를 leak). router 함수
+    (`app.adapters.llm_router.route_feedback`)와 어댑터 함수(`call_openai_feedback`/
+    `call_claude_feedback`)에서 raise. ``generate_feedback`` 노드는 ``LLMRouterExhaustedError``
+    catch + safe fallback 텍스트 반환 — 노드 레벨에서 전파 X(AC9 정합 — _node_wrapper
+    fallback edge 미진입).
+    """
+
+    status: ClassVar[int] = 503
+    code: ClassVar[str] = "llm_router.error"
+    title: ClassVar[str] = "LLM Router Error"
+
+
+class LLMRouterUnavailableError(LLMRouterError):
+    """API key 미설정 / SDK 초기화 실패 — fail-fast(retry 무효 + cost 0 정합).
+
+    ``ANTHROPIC_API_KEY`` 또는 ``OPENAI_API_KEY`` 미설정 시 ``_get_client`` 진입에서
+    즉시 raise. router는 본 예외 catch 후 다른 LLM으로 fallback(영구 오류 분류).
+    """
+
+    status: ClassVar[int] = 503
+    code: ClassVar[str] = "llm_router.unavailable"
+    title: ClassVar[str] = "LLM Router Unavailable"
+
+
+class LLMRouterPayloadInvalidError(LLMRouterError):
+    """LLM structured output schema 위반 / JSON 파싱 실패 / Pydantic ValidationError.
+
+    OpenAI ``parse``는 schema 강제하나 *방어로* — Anthropic은 prompt-driven JSON으로
+    파싱 실패 가능성 ↑(SDK 지원 약함). 502 Bad Gateway는 RFC 9110 정합(*upstream
+    invalid response*).
+    """
+
+    status: ClassVar[int] = 502
+    code: ClassVar[str] = "llm_router.payload_invalid"
+    title: ClassVar[str] = "LLM Router Payload Invalid"
+
+
+class LLMRouterExhaustedError(LLMRouterError):
+    """양쪽 LLM(OpenAI primary + Anthropic fallback) 모두 실패 — 최종 단락.
+
+    ``route_feedback`` 함수가 raise — *router 내부 sanity 가드 전용*. ``generate_feedback``
+    노드는 본 예외 catch 후 safe fallback ``FeedbackOutput(text="AI 서비스 일시 장애 ...",
+    used_llm="stub")`` 반환(AC9 — 노드 정상 종료, _node_wrapper fallback edge 미진입).
+    Sentry ``capture_message("dual_llm_router.exhausted", level="error")``는 router 함수
+    내부에서 호출(breadcrumb은 각 LLM 실패별 ``capture_exception`` 별도).
+    """
+
+    status: ClassVar[int] = 503
+    code: ClassVar[str] = "llm_router.exhausted"
+    title: ClassVar[str] = "LLM Router Exhausted"
