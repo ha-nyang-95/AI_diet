@@ -102,7 +102,11 @@ async def test_pipeline_high_confidence_no_rewrite(
         assert result["rewrite_attempts"] == 1  # 증가 X
         assert result["feedback"].text == "(분석 준비 중)"
         assert result["feedback"].used_llm == "stub"
-        assert result["fit_evaluation"].fit_score == 50
+        # Story 3.5 — 실 결정성 알고리즘. checkpointer round-trip 후 dict 형태.
+        fe = result["fit_evaluation"]
+        assert fe["fit_reason"] == "ok"
+        assert fe["fit_label"] in {"good", "caution", "needs_adjust"}
+        assert 0 <= fe["fit_score"] <= 100
         assert result["user_profile"].user_id == user.id
     finally:
         await dispose_checkpointer(pool)
@@ -137,7 +141,10 @@ async def test_pipeline_low_confidence_triggers_self_rag(
         assert result["retrieval"].retrieval_confidence == 0.85
         # 종단 noun
         assert result["feedback"].text == "(분석 준비 중)"
-        assert result["fit_evaluation"].fit_score == 50
+        # Story 3.5 — 실 결정성 알고리즘 — sentinel 흐름은 알레르기 X + nutrition 미포함.
+        fe = result["fit_evaluation"]
+        assert fe["fit_reason"] == "ok"
+        assert 0 <= fe["fit_score"] <= 100
     finally:
         await dispose_checkpointer(pool)
 

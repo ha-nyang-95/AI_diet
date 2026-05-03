@@ -13,6 +13,7 @@ from app.graph.state import (
     EvaluationDecision,
     FeedbackOutput,
     FitEvaluation,
+    FitScoreComponents,
     FoodItem,
     MealAnalysisState,
     NodeError,
@@ -142,6 +143,56 @@ def test_fit_evaluation_score_bounds() -> None:
         FitEvaluation(fit_score=-1, reasons=[])
     with pytest.raises(ValidationError):
         FitEvaluation(fit_score=101, reasons=[])
+
+
+def test_fit_evaluation_default_compatibility_with_legacy_constructor() -> None:
+    """Story 3.5 — legacy 2 필드 constructor도 default 적용 후 정상 (Story 3.3 stub 호환)."""
+    fe = FitEvaluation(fit_score=85, reasons=["..."])
+    assert fe.fit_reason == "ok"
+    assert fe.fit_label == "needs_adjust"
+    assert fe.components == FitScoreComponents.zero()
+
+
+def test_fit_evaluation_full_constructor_with_components() -> None:
+    fe = FitEvaluation(
+        fit_score=0,
+        reasons=["알레르기 위반: 우유"],
+        fit_reason="allergen_violation",
+        fit_label="allergen_violation",
+        components=FitScoreComponents.allergen_violation(),
+    )
+    assert fe.fit_reason == "allergen_violation"
+    assert fe.fit_label == "allergen_violation"
+    assert fe.components.coverage_ratio == 0.0
+
+
+def test_fit_evaluation_invalid_fit_reason_rejected() -> None:
+    with pytest.raises(ValidationError):
+        FitEvaluation(
+            fit_score=50,
+            reasons=[],
+            fit_reason="invalid",  # type: ignore[arg-type]
+        )
+
+
+def test_fit_evaluation_invalid_fit_label_rejected() -> None:
+    with pytest.raises(ValidationError):
+        FitEvaluation(
+            fit_score=50,
+            reasons=[],
+            fit_label="other",  # type: ignore[arg-type]
+        )
+
+
+def test_fit_evaluation_components_macro_over_40_rejected() -> None:
+    with pytest.raises(ValidationError):
+        FitEvaluation(
+            fit_score=50,
+            reasons=[],
+            components=FitScoreComponents(
+                macro=41, calorie=0, allergen=0, balance=0, coverage_ratio=0
+            ),
+        )
 
 
 def test_feedback_output_default_used_llm() -> None:

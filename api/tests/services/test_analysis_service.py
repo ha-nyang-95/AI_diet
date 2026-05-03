@@ -81,7 +81,11 @@ async def test_run_returns_state_with_stub_feedback(
     )
     assert state["feedback"].used_llm == "stub"
     assert state["feedback"].text == "(분석 준비 중)"
-    assert state["fit_evaluation"].fit_score == 50
+    # Story 3.5 — 실 결정성 알고리즘 출력 + components 분해. dict 형태(model_dump).
+    fe = state["fit_evaluation"]
+    assert fe["fit_reason"] == "ok"
+    assert 0 <= fe["fit_score"] <= 100
+    assert fe["components"]["allergen"] == 20  # 위반 X → 만점
 
 
 async def test_run_default_thread_id_uses_meal_prefix(
