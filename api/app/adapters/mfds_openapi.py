@@ -54,24 +54,26 @@ from app.core.exceptions import (
 
 logger = structlog.get_logger(__name__)
 
-# 식약처 식품영양성분 DB OpenAPI base URL (공공데이터포털 데이터셋 15127578).
-# DS 검증 의무 — `https://www.data.go.kr/data/15127578/openapi.do` 페이지 OpenAPI
-# 문서 확인 후 *최종 endpoint 확정*. 공공데이터포털은 신/구 표준 혼재.
-# 확인일자: 2026-04-30 (1차 추정 — 운영 부팅 시 재검증 권장).
-MFDS_API_BASE_URL: Final[str] = "https://api.data.go.kr/openapi/tn_pubr_public_nutri_food_info_api"
-MFDS_PAGE_KEY: Final[str] = "page"  # 신 표준 (구 표준은 "pageNo")
-MFDS_SIZE_KEY: Final[str] = "perPage"  # 신 표준 (구 표준은 "numOfRows")
+# 식약처 식품영양성분 DB OpenAPI v2 base URL.
+# 검증일자: 2026-05-03 — data.go.kr 활용신청 상세보기 "End Point" 필드 + sub-path
+# `/getFoodNtrCpntDbInq02`. 식품의약품안전처_식품영양성분DB정보 (1471000 = 식약처
+# 부처 코드, FoodNtrCpntDbInfo02 = 영양성분DB v2).
+MFDS_API_BASE_URL: Final[str] = (
+    "https://apis.data.go.kr/1471000/FoodNtrCpntDbInfo02/getFoodNtrCpntDbInq02"
+)
+MFDS_PAGE_KEY: Final[str] = "pageNo"  # 1471000/FoodNtrCpntDbInfo02는 구 표준 사용.
+MFDS_SIZE_KEY: Final[str] = "numOfRows"  # 구 표준 (신 표준 페이지네이션 미지원).
 MFDS_AUTH_KEY: Final[str] = "serviceKey"
 MFDS_DEFAULT_PAGE_SIZE: Final[int] = 100
-MFDS_RESPONSE_TYPE_KEY: Final[str] = "returnType"
+MFDS_RESPONSE_TYPE_KEY: Final[str] = "type"  # 본 endpoint는 `type=json` (구 표준).
 MFDS_RESPONSE_TYPE_JSON: Final[str] = "json"
 MFDS_TIMEOUT_SECONDS: Final[float] = 30.0
 
-# 식약처 OpenAPI 응답 키 → 식약처 표준 키 매핑 (DS 검증 의무 — 추정값).
+# 식약처 OpenAPI 응답 키 → 식약처 표준 키 매핑 (검증일자 2026-05-03, 실 응답 sample 기반).
 # 원본 키(`AMT_NUM*`)는 식약처 변동 위험으로 어댑터 내부 격리.
 MFDS_RAW_KEY_MAP: Final[dict[str, str]] = {
     "FOOD_NM_KR": "name",
-    "FOOD_GROUP_NM": "category",
+    "FOOD_CAT1_NM": "category",  # 1차 식품군 (밥류/면류/...) — 화이트리스트 비교 입력.
     "AMT_NUM1": "energy_kcal",
     "AMT_NUM3": "carbohydrate_g",
     "AMT_NUM4": "protein_g",
@@ -237,7 +239,7 @@ def _raw_to_standard(item: dict[str, Any]) -> FoodNutritionRaw | None:
         "name": str(name).strip(),
         "source_id": str(source_id).strip(),
         "source": "MFDS_FCDB",
-        "category": item.get("FOOD_GROUP_NM") or item.get("category"),
+        "category": item.get("FOOD_CAT1_NM") or item.get("FOOD_GROUP_NM") or item.get("category"),
         "energy_kcal": _to_float_or_none(item.get("AMT_NUM1") or item.get("energy_kcal")),
         "carbohydrate_g": _to_float_or_none(item.get("AMT_NUM3") or item.get("carbohydrate_g")),
         "protein_g": _to_float_or_none(item.get("AMT_NUM4") or item.get("protein_g")),
@@ -254,16 +256,35 @@ def _raw_to_standard(item: dict[str, Any]) -> FoodNutritionRaw | None:
 
 
 def _is_quota_exceeded(response: httpx.Response, body: dict[str, Any] | None) -> bool:
-    """공공데이터포털 quota error 분기 — HTTP 429 또는 응답 본문 ``resultCode`` quota 코드."""
+    """공공데이터포털 quota error 분기 — HTTP 429 또는 응답 본문 ``resultCode`` quota 코드.
+
+    Envelope 패턴 지원:
+    - 1471000/FoodNtrCpntDbInfo02: `{"header": {"resultCode": "..."}}` (top-level)
+    - 신 표준: `{"response": {"header": {"resultCode": "..."}}}`
+    - 단순: `{"resultCode": "..."}`
+    """
     if response.status_code == 429:
         return True
-    if body is None:
+    if not isinstance(body, dict):
         return False
-    # 공공데이터포털 표준 에러 envelope: `{"response": {"header": {"resultCode": "..."}}}`
-    # 또는 단순 `{"resultCode": "..."}`. quota 코드: "22"
-    # (LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR).
-    header = body.get("response", {}).get("header", {}) if isinstance(body, dict) else {}
-    result_code = header.get("resultCode") or body.get("resultCode")
+    # quota 코드: "22" (LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR).
+    # CR(Gemini) — `dict.get(k, {})`의 default는 키 missing 시만 적용. 값이 명시적 `None`
+    # 으로 오면 `None`이 반환되어 다음 `.get()`에서 AttributeError. 각 단계마다 isinstance
+    # 체크로 명시적 dict 가드.
+    result_code: str | None = None
+    header = body.get("header")
+    if isinstance(header, dict):
+        result_code = header.get("resultCode")
+
+    if result_code is None:
+        resp = body.get("response")
+        if isinstance(resp, dict):
+            inner_header = resp.get("header")
+            if isinstance(inner_header, dict):
+                result_code = inner_header.get("resultCode")
+
+    if result_code is None:
+        result_code = body.get("resultCode")
     return result_code in {"22", "LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR"}
 
 
@@ -280,10 +301,12 @@ def _filter_dict_items(raw: list[Any]) -> list[dict[str, Any]]:
 
 
 def _extract_items(body: dict[str, Any]) -> list[dict[str, Any]]:
-    """공공데이터포털 표준 응답 envelope에서 items 배열 추출.
+    """공공데이터포털 응답 envelope에서 items 배열 추출.
 
-    표준: `{"response": {"body": {"items": [...]}}}` 또는 `{"data": [...]}` 또는 `{"items": [...]}`.
-    `data` / `items`가 단일 dict로 오는 single-result envelope도 list로 wrap.
+    지원 envelope 패턴:
+    - 1471000/FoodNtrCpntDbInfo02: `{"header": {...}, "body": {"items": [...]}}` (top-level body)
+    - 신 표준: `{"response": {"body": {"items": [...]}}}` 또는 `{"data": [...]}`
+    - 단순: `{"items": [...]}` 또는 single-result(`data`/`items`가 dict)도 list로 wrap.
     """
     data_value = body.get("data")
     if isinstance(data_value, list):
@@ -291,6 +314,14 @@ def _extract_items(body: dict[str, Any]) -> list[dict[str, Any]]:
     if isinstance(data_value, dict):
         # single-result envelope — list로 wrap.
         return [data_value]
+    # 1471000 endpoint: top-level `body.items` (response 래퍼 없음)
+    top_body = body.get("body")
+    if isinstance(top_body, dict):
+        top_items = top_body.get("items")
+        if isinstance(top_items, list):
+            return _filter_dict_items(top_items)
+        if isinstance(top_items, dict):
+            return [top_items]
     response_block = body.get("response", {})
     body_block = response_block.get("body", {}) if isinstance(response_block, dict) else {}
     items = body_block.get("items") if isinstance(body_block, dict) else None

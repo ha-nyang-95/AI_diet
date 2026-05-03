@@ -158,3 +158,33 @@ async def test_fetch_food_items_missing_nutrition_keys(monkeypatch: pytest.Monke
     assert result[0].carbohydrate_g is None
     assert result[0].protein_g is None
     assert result[0].sodium_mg is None
+
+
+def test_is_quota_exceeded_handles_null_intermediate_fields() -> None:
+    """CR(Gemini) G1 회귀 가드 — `dict.get(k, {})`의 default는 키 missing 시만 적용.
+
+    공공데이터포털 응답에서 중간 계층 필드(`response`/`header`)가 명시적 ``null``로
+    오면 `.get(k, {})`이 None을 반환 → 다음 `.get()` 호출에서 AttributeError 크래시.
+    각 단계 isinstance 가드로 안전 처리 검증.
+    """
+    fake_response = httpx.Response(200)
+
+    # null 처리 — 모두 graceful False.
+    assert mfds_openapi._is_quota_exceeded(fake_response, None) is False
+    assert mfds_openapi._is_quota_exceeded(fake_response, {}) is False
+    assert mfds_openapi._is_quota_exceeded(fake_response, {"header": None}) is False
+    assert mfds_openapi._is_quota_exceeded(fake_response, {"response": None}) is False
+    assert mfds_openapi._is_quota_exceeded(fake_response, {"response": {"header": None}}) is False
+    assert mfds_openapi._is_quota_exceeded(fake_response, {"resultCode": None}) is False
+
+    # 정상 quota detection — 3가지 envelope 패턴 모두.
+    assert mfds_openapi._is_quota_exceeded(fake_response, {"header": {"resultCode": "22"}}) is True
+    assert (
+        mfds_openapi._is_quota_exceeded(
+            fake_response, {"response": {"header": {"resultCode": "22"}}}
+        )
+        is True
+    )
+    assert mfds_openapi._is_quota_exceeded(fake_response, {"resultCode": "22"}) is True
+    # 정상 코드 — quota 아님.
+    assert mfds_openapi._is_quota_exceeded(fake_response, {"header": {"resultCode": "00"}}) is False
