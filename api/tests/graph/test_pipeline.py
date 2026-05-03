@@ -1,18 +1,61 @@
-"""Story 3.3 — `compile_pipeline` 컴파일 + 종단 테스트 (AC5)."""
+"""Story 3.3 + 3.4 — `compile_pipeline` 컴파일 + 종단 테스트 (AC5).
+
+Story 3.4 변경: parse_meal/retrieve_nutrition/rewrite_query/request_clarification이
+실 비즈니스 로직으로 채워짐 → LLM/임베딩 어댑터 mock 필수. sentinel(``__test_low_confidence__``)
+입력을 사용해 retrieve_nutrition의 결정성 분기로 진입(LLM 호출 없는 경로).
+"""
 
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterator
+from unittest.mock import AsyncMock, patch
 
+import pytest
+
+from app.adapters.openai_adapter import (
+    ClarificationVariants,
+    ParsedMeal,
+    ParsedMealItem,
+    RewriteVariants,
+)
 from app.core.config import settings
 from app.graph.checkpointer import build_checkpointer, dispose_checkpointer
 from app.graph.deps import NodeDeps
 from app.graph.pipeline import compile_pipeline
+from app.graph.state import ClarificationOption
 from tests.conftest import UserFactory
 
 
+@pytest.fixture
+def _mock_llm_adapters() -> Iterator[None]:
+    """Story 3.4 — parse_meal_text/rewrite_food_query/generate_clarification_options
+    어댑터 deterministic mock(OPENAI_API_KEY 부재 환경 호환).
+    """
+    parsed = ParsedMeal(
+        items=[ParsedMealItem(name="__test_low_confidence__", quantity="1인분", confidence=0.9)]
+    )
+    rewrite = RewriteVariants(variants=["__test_low_confidence___v1"])
+    clarify = ClarificationVariants(options=[ClarificationOption(label="옵션", value="옵션 1인분")])
+    with (
+        patch(
+            "app.graph.nodes.parse_meal.parse_meal_text",
+            new=AsyncMock(return_value=parsed),
+        ),
+        patch(
+            "app.graph.nodes.rewrite_query.rewrite_food_query",
+            new=AsyncMock(return_value=rewrite),
+        ),
+        patch(
+            "app.graph.nodes.request_clarification.generate_clarification_options",
+            new=AsyncMock(return_value=clarify),
+        ),
+    ):
+        yield
+
+
 async def test_compile_pipeline_no_exception(db_deps: NodeDeps) -> None:
-    """컴파일 정상 — Mermaid spec에 7 노드 모두 포함."""
+    """컴파일 정상 — Mermaid spec에 8 노드 모두 포함 (Story 3.4 — request_clarification 추가)."""
     checkpointer, pool = await build_checkpointer(settings.database_url)
     try:
         graph = compile_pipeline(checkpointer, db_deps)
@@ -22,6 +65,7 @@ async def test_compile_pipeline_no_exception(db_deps: NodeDeps) -> None:
             "retrieve_nutrition",
             "evaluate_retrieval_quality",
             "rewrite_query",
+            "request_clarification",
             "fetch_user_profile",
             "evaluate_fit",
             "generate_feedback",
@@ -34,25 +78,28 @@ async def test_compile_pipeline_no_exception(db_deps: NodeDeps) -> None:
 async def test_pipeline_high_confidence_no_rewrite(
     user_factory: UserFactory,
     db_deps: NodeDeps,
+    _mock_llm_adapters: None,
 ) -> None:
-    """high-confidence — `rewrite_query` 미발동, `rewrite_attempts == 0`."""
+    """high-confidence(sentinel + rewrite_attempts=1 시뮬레이션) — `rewrite_query` 미발동."""
     user = await user_factory(profile_completed=True)
     checkpointer, pool = await build_checkpointer(settings.database_url)
     try:
         graph = compile_pipeline(checkpointer, db_deps)
         thread_id = f"test-thread-{uuid.uuid4()}"
+        # sentinel + rewrite_attempts=1 → 0.85 boost → confidence_ok → continue
         result = await graph.ainvoke(
             {
                 "meal_id": uuid.uuid4(),
                 "user_id": user.id,
-                "raw_text": "짜장면",
-                "rewrite_attempts": 0,
+                "raw_text": "__test_low_confidence__",
+                "rewrite_attempts": 1,  # 이미 재검색 후 — sentinel boost 진입
                 "node_errors": [],
                 "needs_clarification": False,
+                "clarification_options": [],
             },
             config={"configurable": {"thread_id": thread_id}},
         )
-        assert result["rewrite_attempts"] == 0
+        assert result["rewrite_attempts"] == 1  # 증가 X
         assert result["feedback"].text == "(분석 준비 중)"
         assert result["feedback"].used_llm == "stub"
         assert result["fit_evaluation"].fit_score == 50
@@ -64,8 +111,9 @@ async def test_pipeline_high_confidence_no_rewrite(
 async def test_pipeline_low_confidence_triggers_self_rag(
     user_factory: UserFactory,
     db_deps: NodeDeps,
+    _mock_llm_adapters: None,
 ) -> None:
-    """low-confidence → Self-RAG 1회 재검색 후 신뢰도 boost → `"continue"` 분기."""
+    """low-confidence sentinel → Self-RAG 1회 재검색 → 신뢰도 boost 0.85 → continue 분기."""
     user = await user_factory(profile_completed=True)
     checkpointer, pool = await build_checkpointer(settings.database_url)
     try:
@@ -79,6 +127,7 @@ async def test_pipeline_low_confidence_triggers_self_rag(
                 "rewrite_attempts": 0,
                 "node_errors": [],
                 "needs_clarification": False,
+                "clarification_options": [],
             },
             config={"configurable": {"thread_id": thread_id}},
         )
@@ -95,10 +144,9 @@ async def test_pipeline_low_confidence_triggers_self_rag(
 
 async def test_pipeline_user_not_found_terminates_at_fetch_user_profile(
     db_deps: NodeDeps,
+    _mock_llm_adapters: None,
 ) -> None:
-    """user 미존재 → `fetch_user_profile`에서 `AnalysisNodeError` → wrapper가 NodeError 누적
-    → `route_after_node_error`가 `"end"` 분기 → 후속 노드 미진행 (치명적 케이스 종료).
-    """
+    """user 미존재 → `fetch_user_profile`에서 `AnalysisNodeError` → 치명적 종료."""
     checkpointer, pool = await build_checkpointer(settings.database_url)
     try:
         graph = compile_pipeline(checkpointer, db_deps)
@@ -107,20 +155,19 @@ async def test_pipeline_user_not_found_terminates_at_fetch_user_profile(
             {
                 "meal_id": uuid.uuid4(),
                 "user_id": uuid.uuid4(),  # 미존재
-                "raw_text": "짜장면",
-                "rewrite_attempts": 0,
+                "raw_text": "__test_low_confidence__",
+                "rewrite_attempts": 1,  # high confidence boost branch — fetch_user_profile 도달
                 "node_errors": [],
                 "needs_clarification": False,
+                "clarification_options": [],
             },
             config={"configurable": {"thread_id": thread_id}},
         )
-        # NodeError 누적
         errs = result.get("node_errors", [])
         assert len(errs) >= 1
         assert any(
             e.node_name == "fetch_user_profile" and "user_not_found" in e.message for e in errs
         )
-        # 치명적 종료 — 후속 노드 미진행
         assert result.get("user_profile") is None
         assert result.get("fit_evaluation") is None
         assert result.get("feedback") is None
@@ -131,6 +178,7 @@ async def test_pipeline_user_not_found_terminates_at_fetch_user_profile(
 async def test_pipeline_persists_to_checkpointer(
     user_factory: UserFactory,
     db_deps: NodeDeps,
+    _mock_llm_adapters: None,
 ) -> None:
     """`AsyncPostgresSaver` 영속화 — 같은 thread_id로 `aget_state` 시 state 보존."""
     user = await user_factory(profile_completed=True)
@@ -143,10 +191,11 @@ async def test_pipeline_persists_to_checkpointer(
             {
                 "meal_id": uuid.uuid4(),
                 "user_id": user.id,
-                "raw_text": "짜장면",
-                "rewrite_attempts": 0,
+                "raw_text": "__test_low_confidence__",
+                "rewrite_attempts": 1,
                 "node_errors": [],
                 "needs_clarification": False,
+                "clarification_options": [],
             },
             config=config,
         )

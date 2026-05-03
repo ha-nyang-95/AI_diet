@@ -94,6 +94,7 @@ addopts = "--cov=app --cov-report=term --cov-fail-under=70"
 testpaths = ["tests"]
 markers = [
     "perf: Story 3.3 NFR-P4/P5 + T1 KPI — RUN_PERF_TESTS=1 opt-in (skip default)",
+    "eval: Story 3.4 T3 KPI 한식 100건 정확도 ≥ 90% — RUN_EVAL_TESTS=1 opt-in (skip default)",
 ]
 
 [tool.coverage.run]

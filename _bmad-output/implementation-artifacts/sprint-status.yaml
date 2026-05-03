@@ -1,4 +1,5 @@
 # generated: 2026-04-27
+# last_updated: 2026-05-02 (Story 3.4 ready-for-dev — `retrieve_nutrition` 3단(alias→exact→HNSW) + `parse_meal` DB 우선/LLM fallback + `rewrite_query` 실 LLM + `request_clarification` 신규 + Self-RAG clarify 3-way 분기 + `analysis_service.aresume` Command 패턴 + ClarificationOption + korean_foods_100.json + eval marker. Story 3.3 회귀 0건. Branch feat/story-3.4. Status: backlog → ready-for-dev.)
 # last_updated: 2026-05-01 (Story 3.3 ready-for-dev — LangGraph 6노드 + Self-RAG 분기(rewrite_attempts < 1 1회 한도, 무한 루프 차단) + AsyncPostgresSaver(lg_checkpoints schema 격리, Alembic 외 lib .setup()) + per-node tenacity retry(stop_after_attempt 2 + wait_exponential 1-4) + Pydantic IO 모델 6세트(MealAnalysisState TypedDict + ParseMealOutput/RetrievalResult/EvaluationDecision/UserProfileSnapshot/FitEvaluation/FeedbackOutput) + Sentry transaction(op=analysis.pipeline) + 노드별 child span(op=langgraph.node) + analysis_service 진입점(run/aget_state/aresume) + AnalysisGraphError 4 서브클래스(NodeError/CheckpointerError/StateValidationError/RewriteLimitExceededError) + psycopg[binary,pool]>=3.2 직접 의존성 승격(transitive→직접) + langgraph-checkpoint-postgres>=3.0 강화 + lifespan 4 자원(checkpointer/pool/graph/analysis_service) graceful 분기 + perf 골격(@pytest.mark.perf NFR-P4 ≤3s + NFR-P5 +2s + T1 100회 ≤2%) skip 디폴트. 6노드 중 evaluate_retrieval_quality만 *실 결정 로직*(Self-RAG 핵심) + fetch_user_profile은 *실 DB 조회* — 나머지 5 노드는 결정성 stub(Story 3.4-3.6 책임 영역). PIPA 게이트/Rate limit/SSE/LangSmith/실 LLM은 모두 OUT — 후속 스토리. branch feat/story-3.3 분기 완료. Status: backlog → ready-for-dev.)
 # project: AI_diet
 # project_key: NOKEY
@@ -35,7 +36,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-27
-last_updated: 2026-05-02  # Story 3.3 CR 완료 — 18 patches + 1 decision(option A) + 11 defer + 7 dismiss. Self-RAG 무한 루프 가드(`evaluate_retrieval_quality`가 node_errors 내 rewrite_query 실패 카운트), `evaluation_decision .model_dump()` AC3 정합, `fetch_user_profile` soft-delete 필터, lifespan generic Exception graceful catch, `_ensure_schema` autocommit + `psycopg.sql.Identifier`, `retrieve_nutrition` low_confidence sentinel(prod 안전), `compile_pipeline` deps.settings + LANGGRAPH_DEBUG env gate, `route_after_evaluate` unknown route warn + dict access, `dispose_checkpointer` exc_info + closed guard, `_to_psycopg_dsn` ValueError → AnalysisCheckpointerError, `aget_state` None snapshot, AC11 graceful-failure 테스트 2건, `_RETRY_TYPES` httpx 좁힘, lifespan import top-level, AC1 spec evaluation_decision 명시, Citation 빈 리스트 명시 테스트. DECISION_A: `route_after_node_error`를 fetch_user_profile 후 wire(치명적 종료 강제). 404 passed / 5 skipped / 0 failed / coverage 86% / mypy strict 0 errors / ruff clean. Status: review → done.
+last_updated: 2026-05-03  # Story 3.4 done — CR 12 patches 통합 (1 BLOCKER + 7 MAJOR + 4 MINOR). force_llm_parse 필드 + aresume update 주입(parse_meal stale DB 무시 — clarification 무한 루프 차단) + parse_meal `if db_items` truthy(빈 리스트 LLM fallback) + compute_retrieval_confidence expected_count 시그니처(missing implicit 0 보수적) + request_clarification 노드 self-fallback(LLM 영구 실패 시 needs_clarification=True 보장 — UI dead state 차단) + sentinel `len(parsed)==1` 가드(multi-item skip 방지) + request_clarification get_state_field(dict roundtrip 안전) + ClarificationVariants max_length 4→10 완화(env override 약속) + korean_foods_100.json 갈비/콜라보 fix(돼지갈비/덮밥) + _format_vector_literal NaN/Inf ValueError + eval test predicted_path warn 측정 + 2개 vacuous test 명시 contract 검증 + 4개 신규 회귀 가드 테스트(force_llm_parse / DB empty / multi-item missing / sentinel multi-item / LLM 실패 self-fallback / dict roundtrip / compute_confidence missing). ruff/format/mypy 0 에러 + pytest 468 passed/8 skipped(perf+eval+seed)/0 failed + coverage 86.87%. Story 3.3 sentinel/1회 한도/node_errors 가드 보존(회귀 0건). Status: review → done.
 project: AI_diet
 project_key: NOKEY
 tracking_system: file-system
@@ -66,7 +67,7 @@ development_status:
   3-1-음식-영양-rag-시드-pgvector: done
   3-2-가이드라인-rag-시드-chunking: done
   3-3-langgraph-6노드-self-rag-saver: done
-  3-4-음식명-정규화-매칭-fallback: backlog
+  3-4-음식명-정규화-매칭-fallback: done
   3-5-fit-score-알고리즘-알레르기-단락: backlog
   3-6-인용형-피드백-광고-가드-듀얼-llm: backlog
   3-7-모바일-sse-스트리밍-채팅-ui: backlog

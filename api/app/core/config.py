@@ -80,6 +80,14 @@ class Settings(BaseSettings):
     # LangGraph `compile(debug=...)` 토글 — dev에서만 True 권장(SSE 디버깅 정합).
     langgraph_debug: bool = False
 
+    # --- Food RAG (Story 3.4) ---
+    # ``search_by_embedding`` HNSW top-K 상한 — NFR-P6 ≤ 200ms 정합 + cost 보호. 환경
+    # 변수 ``FOOD_RETRIEVAL_TOP_K`` override 가능 (NFR-O3 식약처 데이터 지속 갱신 정합).
+    food_retrieval_top_k: int = 3
+    # ``request_clarification`` 노드의 옵션 상한 — UI 카드 4건 안 (NFR-A1 정합). 환경
+    # 변수 ``CLARIFICATION_MAX_OPTIONS`` override 가능.
+    clarification_max_options: int = 4
+
     # --- JWT (사용자 / 관리자 분리) ---
     jwt_user_secret: str = "dev-user-secret-please-rotate"
     jwt_admin_secret: str = "dev-admin-secret-please-rotate"

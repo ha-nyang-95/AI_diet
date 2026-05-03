@@ -86,18 +86,52 @@ class AnalysisService:
         thread_id: str,
         user_input: dict[str, Any],
     ) -> MealAnalysisState:
-        """needs_clarification 후 사용자 응답을 받아 재개 — 인터페이스만 박음.
+        """Story 3.4 — needs_clarification 후 사용자 응답을 받아 재개 (AC10).
 
-        Story 3.4가 `parse_meal` 갱신 분기 + 실 분기 라우팅 강화 + 진짜 LangGraph
-        resume semantics(`Command(resume=...)` / `ainvoke(None, ...)`) 도입. 본
-        스토리는 `await self.graph.ainvoke(user_input, config=...)` thin pass-through.
+        ``Command(update=..., goto="parse_meal")`` 패턴 — 정제 텍스트를 ``raw_text``로
+        주입하고 직전 시도의 state(parsed_items / retrieval / rewrite_attempts /
+        node_errors / needs_clarification / clarification_options / evaluation_decision)
+        를 *clean slate* 으로 reset. ``parse_meal``부터 새 흐름 진입(이번엔 사용자 정제
+        텍스트 → LLM parse + alias 1차 hit 가능성 ↑).
+
+        ``user_input`` 는 ``{"raw_text_clarified"|"selected_value": "정제 텍스트"}``.
+        둘 다 비어있으면 ``ValueError`` raise — 라우터(Story 3.7)가 422로 변환.
+
+        CR fix #10 — thread_id 미존재 시 LangGraph는 update 필드를 첫 state로 사용해
+        ``goto="parse_meal"``에서 새 흐름 시작(checkpointer가 빈 snapshot 반환 + state
+        부분 dict-merge가 base가 되는 LangGraph SOT). 라우터(Story 3.7)는 일반적으로
+        ``aget_state``로 ``needs_clarification=True`` 확인한 thread_id를 그대로 전달함.
+        CR fix #1 (BLOCKER) — ``force_llm_parse=True`` 주입 → ``parse_meal``이 DB stale
+        ``parsed_items`` 무시하고 사용자 정제 텍스트를 LLM parse(alias 1차 hit 가능성 ↑).
         """
+        from langgraph.types import Command
+
+        clarified = user_input.get("raw_text_clarified") or user_input.get("selected_value")
+        if not clarified or not str(clarified).strip():
+            raise ValueError("aresume requires raw_text_clarified or selected_value (non-empty)")
+
         config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
+        cmd: Command[Any] = Command(
+            update={
+                "raw_text": str(clarified),
+                "parsed_items": None,
+                "retrieval": None,
+                "rewrite_attempts": 0,
+                "node_errors": [],
+                "needs_clarification": False,
+                "clarification_options": [],
+                "evaluation_decision": None,
+                "rewritten_query": None,
+                "force_llm_parse": True,
+            },
+            goto="parse_meal",
+        )
+
         with sentry_sdk.start_transaction(
             op="analysis.pipeline",
             name="meal_analysis_resume",
         ):
-            final_state = await self.graph.ainvoke(user_input, config=config)
+            final_state = await self.graph.ainvoke(cmd, config=config)
         return cast(MealAnalysisState, final_state)
 
 

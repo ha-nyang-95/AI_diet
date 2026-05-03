@@ -35,6 +35,16 @@ def test_route_after_evaluate_continue_dict() -> None:
     assert route_after_evaluate(state) == "fetch_user_profile"
 
 
+def test_route_after_evaluate_clarify_dict() -> None:
+    """Story 3.4 AC8 — `clarify` 분기 → `request_clarification` 매핑."""
+    state = _state(
+        evaluation_decision=EvaluationDecision(
+            route="clarify", reason="rewrite_limit_reached_low_confidence_0.30"
+        ).model_dump(),
+    )
+    assert route_after_evaluate(state) == "request_clarification"
+
+
 def test_route_after_evaluate_pydantic_instance_defensive() -> None:
     """defensive — 만약 노드가 instance를 흘리더라도 `_extract_route`가 처리."""
     state = _state(

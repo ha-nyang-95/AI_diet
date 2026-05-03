@@ -34,19 +34,25 @@ def _extract_route(decision: object) -> str:
 
 def route_after_evaluate(
     state: MealAnalysisState,
-) -> Literal["rewrite_query", "fetch_user_profile"]:
-    """`evaluate_retrieval_quality` 출력의 `route` 필드 분기.
+) -> Literal["rewrite_query", "fetch_user_profile", "request_clarification"]:
+    """`evaluate_retrieval_quality` 출력의 `route` 필드 분기 — 3-way (Story 3.4 AC8).
 
-    `state["evaluation_decision"]` 부재 또는 알 수 없는 route 값 시 디폴트
-    `"continue"` (fail-soft) → `fetch_user_profile`로 분기. 알 수 없는 값은
-    `route.unknown` warn 로그 — 디버깅 용이성.
+    - ``"rewrite"`` → ``rewrite_query`` (재검색 1회 시도),
+    - ``"clarify"`` → ``request_clarification`` (재검색 후 재질문 — Story 3.4 신규),
+    - ``"continue"`` 또는 알 수 없는 값 → ``fetch_user_profile`` (fail-soft).
+
+    알 수 없는 값은 ``route.unknown`` warn 로그 — 디버깅 용이성.
     """
     decision = state.get("evaluation_decision")
     route = _extract_route(decision)
-    if route not in {"rewrite", "continue"}:
+    if route not in {"rewrite", "continue", "clarify"}:
         log.warning("route.unknown", route=route)
         route = "continue"
-    return "rewrite_query" if route == "rewrite" else "fetch_user_profile"
+    if route == "rewrite":
+        return "rewrite_query"
+    if route == "clarify":
+        return "request_clarification"
+    return "fetch_user_profile"
 
 
 def route_after_node_error(state: MealAnalysisState) -> Literal["next", "end"]:

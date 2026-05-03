@@ -40,7 +40,7 @@ import httpx
 import openai
 import structlog
 from openai import AsyncOpenAI
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from tenacity import (
     retry,
     retry_if_exception_type,
@@ -54,6 +54,7 @@ from app.core.exceptions import (
     MealOCRPayloadInvalidError,
     MealOCRUnavailableError,
 )
+from app.graph.state import ClarificationOption
 
 logger = structlog.get_logger(__name__)
 
@@ -340,3 +341,272 @@ async def embed_texts(
         latency_ms=latency_ms,
     )
     return embeddings
+
+
+# ---------------------------------------------------------------------------
+# Story 3.4 — 텍스트 LLM 함수 3종 (parse_meal_text + rewrite_food_query +
+# generate_clarification_options)
+# ---------------------------------------------------------------------------
+
+# `gpt-4o-mini` — architecture line 509 정합 (메인 텍스트 LLM). Vision은 `gpt-4o`,
+# 텍스트 parse/rewrite/clarify는 `gpt-4o-mini` (cost 1/15).
+PARSE_MODEL: Final[str] = "gpt-4o-mini"
+
+PARSE_SYSTEM_PROMPT: Final[str] = (
+    "한국어 식단 텍스트에서 음식 항목을 추출하세요. "
+    "각 항목 name(한국어 표준 음식명), quantity(자유 텍스트 — '1인분'/'200g'/null), "
+    "confidence(0~1)를 반환하세요. "
+    "음식이 아닌 텍스트(인사말/감정 등)는 빈 items 배열을 반환하세요. "
+    "name에 콤마(,) 포함 금지 — 항목 boundary 모호 회피."
+)
+
+REWRITE_SYSTEM_PROMPT: Final[str] = (
+    "한국어 음식명이 모호한 경우 가능한 변형 2-4건을 생성하세요. "
+    "예: '포케볼' → ['연어 포케', '참치 포케', '베지 포케']. "
+    "단순 동의어가 아닌 *세부 항목 분기* 형태로 생성하세요. "
+    "변형은 한국어 표준 음식명으로, 짧고 명확하게."
+)
+
+CLARIFICATION_SYSTEM_PROMPT: Final[str] = (
+    "사용자에게 '어떤 ◯◯인가요?' 형태로 물을 옵션 2-4건을 생성하세요. "
+    "각 옵션의 label은 짧은 한국어(≤50자), value는 라벨 + 양 추정(예: '연어 포케 1인분', ≤80자). "
+    "최대 4건. 변형은 *세부 항목 분기* 형태."
+)
+
+
+class RewriteVariants(BaseModel):
+    """`rewrite_food_query` 응답 — 한국어 음식명 변형 2-4건."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    variants: list[str] = Field(min_length=1, max_length=4)
+
+
+class ClarificationVariants(BaseModel):
+    """`generate_clarification_options` 응답 — 재질문 옵션 1-50건.
+
+    CR fix #8 — `max_length=4`(hard cap)이 ``settings.clarification_max_options`` env
+    override 약속(AC11)을 깨는 문제. CR(Gemini) fix G2 — 운영자가 10 초과 설정 시
+    ValidationError 가능성을 차단하기 위해 안전 상한을 *운영적으로 도달 불가능한 50*
+    으로 완화. *실 truncate*는 `request_clarification` 노드의
+    ``settings.clarification_max_options`` SOT가 결정.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    options: list[ClarificationOption] = Field(min_length=1, max_length=50)
+
+
+@retry(
+    stop=stop_after_attempt(2),
+    wait=wait_exponential(multiplier=1, min=1, max=4),
+    retry=retry_if_exception_type(_TRANSIENT_RETRY_TYPES),
+    reraise=True,
+)
+async def _call_parse_meal_text(text_input: str) -> ParsedMeal:
+    """식단 텍스트 → ParsedMeal 호출 + tenacity 1회 retry."""
+    client = _get_client()
+    response = await client.beta.chat.completions.parse(
+        model=PARSE_MODEL,
+        messages=[
+            {"role": "system", "content": PARSE_SYSTEM_PROMPT},
+            {"role": "user", "content": text_input},
+        ],
+        response_format=ParsedMeal,
+        temperature=0.0,
+        max_tokens=VISION_MAX_TOKENS,
+    )
+    if not response.choices:
+        raise MealOCRPayloadInvalidError("parse_meal_text response: no choices returned")
+    message = response.choices[0].message
+    refusal = getattr(message, "refusal", None)
+    if refusal:
+        raise MealOCRPayloadInvalidError(f"parse_meal_text response: model refusal ({refusal})")
+    parsed = message.parsed
+    if parsed is None:
+        raise MealOCRPayloadInvalidError("parse_meal_text response: parsed payload missing")
+    return parsed
+
+
+async def parse_meal_text(text: str) -> ParsedMeal:
+    """식단 텍스트 → ``ParsedMeal`` (items list).
+
+    빈 입력(``text.strip() == ""``)은 즉시 ``ParsedMeal(items=[])`` 반환 — API 호출 X
+    / cost 0. 그 외는 ``gpt-4o-mini`` structured output 호출 + tenacity 1회 retry.
+
+    오류 매핑(Vision OCR 패턴 정합):
+    - transient 후 → ``MealOCRUnavailableError(503)``,
+    - schema 위반 → ``MealOCRPayloadInvalidError(502)``.
+
+    NFR-S5 — text raw 출력 X. items_count + latency만.
+    """
+    if not text.strip():
+        return ParsedMeal(items=[])
+
+    start = time.monotonic()
+    try:
+        parsed = await _call_parse_meal_text(text)
+    except (httpx.HTTPError, openai.APIError, openai.RateLimitError) as exc:
+        raise MealOCRUnavailableError(
+            f"parse_meal_text transient failure after retry: {type(exc).__name__}"
+        ) from exc
+    except ValidationError as exc:
+        raise MealOCRPayloadInvalidError(
+            f"parse_meal_text response: schema validation failed ({exc})"
+        ) from exc
+    except MealOCRPayloadInvalidError:
+        raise
+
+    latency_ms = int((time.monotonic() - start) * 1000)
+    logger.info(
+        "openai.parse_meal_text",
+        items_count=len(parsed.items),
+        model=PARSE_MODEL,
+        latency_ms=latency_ms,
+    )
+    return parsed
+
+
+@retry(
+    stop=stop_after_attempt(2),
+    wait=wait_exponential(multiplier=1, min=1, max=4),
+    retry=retry_if_exception_type(_TRANSIENT_RETRY_TYPES),
+    reraise=True,
+)
+async def _call_rewrite_food_query(query: str) -> RewriteVariants:
+    """음식명 변형 생성 호출 + tenacity 1회 retry."""
+    client = _get_client()
+    response = await client.beta.chat.completions.parse(
+        model=PARSE_MODEL,
+        messages=[
+            {"role": "system", "content": REWRITE_SYSTEM_PROMPT},
+            {"role": "user", "content": query},
+        ],
+        response_format=RewriteVariants,
+        temperature=0.0,
+        max_tokens=VISION_MAX_TOKENS,
+    )
+    if not response.choices:
+        raise MealOCRPayloadInvalidError("rewrite_food_query response: no choices returned")
+    message = response.choices[0].message
+    refusal = getattr(message, "refusal", None)
+    if refusal:
+        raise MealOCRPayloadInvalidError(f"rewrite_food_query response: model refusal ({refusal})")
+    parsed = message.parsed
+    if parsed is None:
+        raise MealOCRPayloadInvalidError("rewrite_food_query response: parsed payload missing")
+    return parsed
+
+
+async def rewrite_food_query(query: str) -> RewriteVariants:
+    """모호한 음식명 → ``RewriteVariants`` (변형 2-4건).
+
+    빈 입력 시 graceful fallback ``RewriteVariants(variants=[query or "unknown"])``
+    반환 — 호출자(`rewrite_query` 노드)가 빈 응답 cost 낭비 차단.
+
+    NFR-S5 — query raw 출력 X. variants_count + latency만.
+    """
+    fallback_query = query.strip() or "unknown"
+    if not query.strip():
+        # 빈 입력 — API 호출 X / cost 0. 호출자 graceful 처리 신호.
+        return RewriteVariants(variants=[fallback_query])
+
+    start = time.monotonic()
+    try:
+        parsed = await _call_rewrite_food_query(query)
+    except (httpx.HTTPError, openai.APIError, openai.RateLimitError) as exc:
+        raise MealOCRUnavailableError(
+            f"rewrite_food_query transient failure after retry: {type(exc).__name__}"
+        ) from exc
+    except ValidationError as exc:
+        raise MealOCRPayloadInvalidError(
+            f"rewrite_food_query response: schema validation failed ({exc})"
+        ) from exc
+    except MealOCRPayloadInvalidError:
+        raise
+
+    latency_ms = int((time.monotonic() - start) * 1000)
+    logger.info(
+        "openai.rewrite_food_query",
+        variants_count=len(parsed.variants),
+        model=PARSE_MODEL,
+        latency_ms=latency_ms,
+    )
+    return parsed
+
+
+@retry(
+    stop=stop_after_attempt(2),
+    wait=wait_exponential(multiplier=1, min=1, max=4),
+    retry=retry_if_exception_type(_TRANSIENT_RETRY_TYPES),
+    reraise=True,
+)
+async def _call_generate_clarification_options(query: str) -> ClarificationVariants:
+    """재질문 옵션 생성 호출 + tenacity 1회 retry."""
+    client = _get_client()
+    response = await client.beta.chat.completions.parse(
+        model=PARSE_MODEL,
+        messages=[
+            {"role": "system", "content": CLARIFICATION_SYSTEM_PROMPT},
+            {"role": "user", "content": query},
+        ],
+        response_format=ClarificationVariants,
+        temperature=0.0,
+        max_tokens=VISION_MAX_TOKENS,
+    )
+    if not response.choices:
+        raise MealOCRPayloadInvalidError(
+            "generate_clarification_options response: no choices returned"
+        )
+    message = response.choices[0].message
+    refusal = getattr(message, "refusal", None)
+    if refusal:
+        raise MealOCRPayloadInvalidError(
+            f"generate_clarification_options response: model refusal ({refusal})"
+        )
+    parsed = message.parsed
+    if parsed is None:
+        raise MealOCRPayloadInvalidError(
+            "generate_clarification_options response: parsed payload missing"
+        )
+    return parsed
+
+
+async def generate_clarification_options(query: str) -> ClarificationVariants:
+    """모호한 음식명 → 재질문 ``ClarificationOption`` 옵션 2-4건.
+
+    빈 입력 시 fallback ``[ClarificationOption(label="알 수 없음", value=query or "")]``
+    1건 강제 — 호출자(`request_clarification` 노드)가 UI 깨짐 회피.
+
+    상한 ``settings.clarification_max_options`` 적용은 *호출자 책임* — 본 함수는 LLM
+    응답 그대로(2-4건). 호출자가 settings 상한으로 ``options[:max_options]`` truncate.
+
+    NFR-S5 — query raw 출력 X. options_count + latency만.
+    """
+    if not query.strip():
+        return ClarificationVariants(
+            options=[ClarificationOption(label="알 수 없음", value=query or "unknown")]
+        )
+
+    start = time.monotonic()
+    try:
+        parsed = await _call_generate_clarification_options(query)
+    except (httpx.HTTPError, openai.APIError, openai.RateLimitError) as exc:
+        raise MealOCRUnavailableError(
+            f"generate_clarification_options transient failure after retry: {type(exc).__name__}"
+        ) from exc
+    except ValidationError as exc:
+        raise MealOCRPayloadInvalidError(
+            f"generate_clarification_options response: schema validation failed ({exc})"
+        ) from exc
+    except MealOCRPayloadInvalidError:
+        raise
+
+    latency_ms = int((time.monotonic() - start) * 1000)
+    logger.info(
+        "openai.generate_clarification_options",
+        options_count=len(parsed.options),
+        model=PARSE_MODEL,
+        latency_ms=latency_ms,
+    )
+    return parsed
