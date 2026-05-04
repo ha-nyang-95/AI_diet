@@ -2,6 +2,12 @@
 
 리뷰·구현 과정에서 식별되었으나 다음 스토리·시점으로 미룬 항목 모음.
 
+## Deferred from: code review of 3-7-모바일-sse-스트리밍-채팅-ui (2026-05-04)
+
+- **DF110 — True LLM-token streaming(OpenAI/Anthropic stream API 직접 wiring)** — 현재는 buffered 결과 → `chunk_text_for_streaming(24자/30ms)` pseudo-streaming. 사유: Story 3.6 citation/ad-guard post-processing이 *full text 후* 실행 패턴 — 진짜 token stream으로 변경 시 후처리 회귀 발생. **재검토 시점**: Story 8.4 polish — stream + 종단 1회 re-validate 또는 buffered + chunked replay 패턴 도입(후처리 회귀 0 보존 전략과 함께).
+- **DF111 — Rate limit X-Forwarded-For trusted proxy 인식** — `slowapi.util.get_remote_address`가 raw `request.client.host` 폴백, 프록시 뒤에선 단일 IP로 전체 트래픽 1 bucket 공유. 사유: 운영 인프라 결정(ALB/Cloudflare 등) 직전이라 proxy chain 미정 — 어느 IP를 trust할지가 deploy 환경 종속. **재검토 시점**: Story 8.4 polish 운영 인프라 확정 시점 — `TrustedHostMiddleware` + `forwarded_allow_ips` 설정.
+- **DF115 — T5 KPI 자동화(끊김 ≤ 1/50회) — perf marker `@pytest.mark.perf`** — Task 9.1 명시 케이스이나 본 스토리 perf marker 골격 부재. 사유: spec AC5 본문에 *"T5 KPI 측정은 Story 3.8 LangSmith eval 흐름에서 자동화"* 명시 — Story 3.8 LangSmith dataset 인프라 종속. **재검토 시점**: Story 3.8 — opt-in `RUN_PERF_TESTS=1` + `EventSource.onerror` 카운터 + dataset 통계.
+
 ## Deferred from: code review of 3-6-인용형-피드백-광고-가드-듀얼-llm (2026-05-04)
 
 - **DF100 — `_USED_LLM_OPENAI = "gpt-4o-mini"` hardcoded(`settings.llm_main_model`과 분리)** — `api/app/adapters/llm_router.py:286-287`. env override로 model 변경 시 telemetry attribution이 실제 호출 모델과 mismatch. 사유: `FeedbackOutput.used_llm: Literal["gpt-4o-mini","claude","stub"]` 강제 — 단순 settings 파생은 Literal 위반. **재검토 시점**: Story 3.8 LangSmith — Literal 확장(model id별) 또는 별도 attribution 채널 분리.

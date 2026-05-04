@@ -27,14 +27,17 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import ForeignKey, Index, Text, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import DateTime
 
 from app.db.base import Base
+
+if TYPE_CHECKING:  # pragma: no cover
+    from app.db.models.meal_analysis import MealAnalysis
 
 
 class Meal(Base):
@@ -76,6 +79,16 @@ class Meal(Base):
     # ``__table_args__`` 등재 — NULL 제외 unique로 회귀 0건. ``MealResponse``에 노출 X
     # (클라이언트 입력 echo 회피).
     idempotency_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Story 3.7 — meal_analyses 1:1 (UNIQUE on meal_id). lazy="raise_on_sql"으로 implicit
+    # lazy load 차단 — list_meals 같은 N건 쿼리는 명시 ``selectinload(Meal.analysis)`` 필수
+    # (N+1 가드). 단건 fetch 경로는 명시 join/selectinload으로 채움.
+    analysis: Mapped[MealAnalysis | None] = relationship(
+        "MealAnalysis",
+        back_populates="meal",
+        uselist=False,
+        lazy="raise_on_sql",
+    )
 
     __table_args__ = (
         # Story 2.4 daily list 쿼리(`WHERE user_id = ? AND deleted_at IS NULL ORDER BY

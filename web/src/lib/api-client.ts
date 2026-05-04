@@ -376,6 +376,84 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/analysis/stream": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Stream Analysis
+         * @description ``POST /v1/analysis/stream`` — SSE 분석 스트림.
+         *
+         *     흐름: 3 게이트 통과 → meal 소유권 검증 → analysis_service 가용성 확인 → SSE generator
+         *     진입(progress → service.run → token chunk → citation → UPSERT → done).
+         *
+         *     rate limit ``10/minute`` per-IP은 ``Depends(enforce_langgraph_rate_limit)``으로 wire.
+         */
+        post: operations["stream_analysis_v1_analysis_stream_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/analysis/clarify": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resume Clarification
+         * @description ``POST /v1/analysis/clarify`` — Story 3.4 needs_clarification resume (SSE 응답).
+         *
+         *     동일 ChatStreaming UI 재사용 위해 SSE 응답. ``analysis_service.aresume(thread_id,
+         *     user_input={"selected_value": ...})`` 호출(Story 3.4 SOT). aresume 내부
+         *     ``force_llm_parse=True`` 자동 주입.
+         */
+        post: operations["resume_clarification_v1_analysis_clarify_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/analysis/{meal_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Poll Analysis
+         * @description ``GET /v1/analysis/{meal_id}`` — polling fallback (status discriminator envelope).
+         *
+         *     응답 분기:
+         *     - state.feedback 존재 → 200 + ``{"status": "done", "result": {...}}``
+         *     - state.needs_clarification → 200 + ``{"status": "needs_clarification", "options": [...]}``
+         *     - state.node_errors → 200 + ``{"status": "error", "problem": {...RFC 7807}}``
+         *     - state empty + meal 존재 → 202 + ``{"status": "in_progress", "phase": "queued"}``
+         *
+         *     *PIPA 자동화 의사결정 동의는 미요구* — polling = 단순 *조회*. PIPA Art.35 정보주체
+         *     권리 정합(deps.py:182-187 SOT). 정상 분석 *호출*만 자동화 의사결정 동의 강제.
+         */
+        get: operations["poll_analysis_v1_analysis__meal_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/healthz": {
         parameters: {
             query?: never;
@@ -435,6 +513,34 @@ export interface components {
             admin_access_token: string | null;
             /** Expires In Seconds */
             expires_in_seconds: number;
+        };
+        /**
+         * AnalysisClarifyRequest
+         * @description ``POST /v1/analysis/clarify`` body — Story 3.4 ``ClarificationOption.value`` 정합.
+         *
+         *     ``selected_value``는 ``min_length=1`` + ``max_length=80``(Story 3.4 SOT). Pydantic이
+         *     1차 게이트, ``aresume`` 호출 시점에 빈 값 catch(``AnalysisClarifyValidationError``)는
+         *     *adapter-level defensive double-gate*.
+         */
+        AnalysisClarifyRequest: {
+            /**
+             * Meal Id
+             * Format: uuid
+             */
+            meal_id: string;
+            /** Selected Value */
+            selected_value: string;
+        };
+        /**
+         * AnalysisStreamRequest
+         * @description ``POST /v1/analysis/stream`` body — extra="forbid"로 silent unknown 차단.
+         */
+        AnalysisStreamRequest: {
+            /**
+             * Meal Id
+             * Format: uuid
+             */
+            meal_id: string;
         };
         /**
          * AutomatedDecisionGrantRequest
@@ -1641,6 +1747,204 @@ export interface operations {
                 content?: never;
             };
             /** @description Image OCR or R2 service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    stream_analysis_v1_analysis_stream_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                Authorization?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                bn_access?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AnalysisStreamRequest"];
+            };
+        };
+        responses: {
+            /** @description SSE 스트림 응답 (text/event-stream) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description PIPA basic 또는 automated_decision consent 미통과 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description meal 미존재 / 비소유 / soft-deleted (analysis.meal.not_found) */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description rate limit 초과 (analysis.rate_limit.exceeded) */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description checkpointer 미가동 (analysis.checkpointer.unavailable) */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    resume_clarification_v1_analysis_clarify_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                Authorization?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                bn_access?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AnalysisClarifyRequest"];
+            };
+        };
+        responses: {
+            /** @description SSE 스트림 응답 (clarify resume) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description PIPA consent 미통과 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description meal 미존재 / 비소유 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description selected_value 빈 값 또는 형식 위반 (analysis.clarify.invalid) */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description rate limit 초과 */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description checkpointer 미가동 */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    poll_analysis_v1_analysis__meal_id__get: {
+        parameters: {
+            query?: never;
+            header?: {
+                Authorization?: string | null;
+            };
+            path: {
+                meal_id: string;
+            };
+            cookie?: {
+                bn_access?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 분석 상태 envelope (status: done|needs_clarification|error) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description 분석 진행 중 (status: in_progress) + Retry-After hint */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description PIPA basic consent 미통과 (automated_decision은 미요구) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description meal 미존재 / 비소유 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description polling rate limit 초과 (analysis.rate_limit.exceeded) */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description checkpointer 미가동 */
             503: {
                 headers: {
                     [name: string]: unknown;

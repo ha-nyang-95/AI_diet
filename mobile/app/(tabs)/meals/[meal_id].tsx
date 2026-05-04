@@ -10,7 +10,7 @@
  */
 import { Image } from 'expo-image';
 import { Stack, router, useLocalSearchParams } from 'expo-router';
-import { useCallback, useMemo } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -22,6 +22,7 @@ import {
 } from 'react-native';
 import { useQueryClient } from '@tanstack/react-query';
 
+import ChatStreaming from '@/features/meals/ChatStreaming';
 import { addDays, todayKst } from '@/features/meals/dateUtils';
 import {
   MealSubmitError,
@@ -96,6 +97,9 @@ export default function MealDetailScreen() {
   // index.tsx와 동일 hook 재사용으로 disable 분기 일관성.
   const { isOnline, isInternetReachable } = useOnlineStatus();
   const isOffline = !isOnline || isInternetReachable === false;
+  // Story 3.7 — "AI 분석 시작" CTA → ChatStreaming 마운트 trigger. 한 번 시작하면
+  // unmount되어도 redo는 reset()이 책임(`<ChatStreaming/>` 내부 hook).
+  const [analysisStarted, setAnalysisStarted] = useState<boolean>(false);
 
   // 7일 윈도우 fetch + client-side filter (단건 endpoint 도입 회피 — yagni).
   // CR Gemini #2 (HIGH) — useMemo([])로 1회 고정 시 자정 cross stale + 내일 catch-up
@@ -282,7 +286,7 @@ export default function MealDetailScreen() {
         </View>
       ) : null}
 
-      {/* AI 분석 섹션 */}
+      {/* AI 분석 섹션 — Story 3.7 D5 IN: meal_analyses JOIN 결과 즉시 표시 */}
       {summary !== null ? (
         <>
           <MacrosBlock macros={summary.macros} />
@@ -305,23 +309,37 @@ export default function MealDetailScreen() {
             </View>
           </View>
         </>
-      ) : (
-        <View style={styles.placeholderBlock}>
-          <Text style={styles.placeholderText}>
-            AI 분석은 Epic 3 통합 후 표시됩니다
-          </Text>
+      ) : analysisStarted ? (
+        // Story 3.7 — ChatStreaming SSE UI inline 마운트 (CTA 탭 후).
+        <View style={styles.chatStreamingBlock}>
+          <ChatStreaming
+            mealId={meal.id}
+            isOnline={!isOffline}
+            onAnalysisDone={() => {
+              void queryClient.invalidateQueries({ queryKey: ['meals'] });
+            }}
+          />
         </View>
+      ) : (
+        // Story 3.7 — "AI 분석 시작" CTA. 오프라인 시 disabled 가드.
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={
+            isOffline ? 'AI 분석 시작 — 오프라인' : 'AI 분석 시작'
+          }
+          accessibilityState={{ disabled: isOffline }}
+          disabled={isOffline}
+          onPress={() => {
+            if (isOffline) return;
+            setAnalysisStarted(true);
+          }}
+          style={[styles.askButton, isOffline && styles.askButtonDisabled]}
+        >
+          <Text style={styles.askButtonText}>
+            {isOffline ? 'AI 분석 시작 (오프라인 — 온라인 시 가능)' : 'AI 분석 시작'}
+          </Text>
+        </Pressable>
       )}
-
-      {/* AI에게 질문하기 (Story 3.7 진입점 prep) */}
-      <View
-        style={[styles.askButton, styles.askButtonDisabled]}
-        accessibilityRole="button"
-        accessibilityLabel="AI에게 질문하기 — Epic 3 통합 후 활성화"
-      >
-        <Text style={styles.askButtonText}>AI에게 질문하기</Text>
-        <Text style={styles.askButtonHint}>Epic 3 통합 후 활성화</Text>
-      </View>
 
       {/* 액션 버튼 — CR Gemini #3 정합: 오프라인 시 visual disabled (NFR-R4 read-only). */}
       <View style={styles.actionRow}>
@@ -472,29 +490,33 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     lineHeight: 20,
   },
-  askButton: {
-    backgroundColor: '#fff',
+  chatStreamingBlock: {
+    minHeight: 240,
+    backgroundColor: '#f9fafb',
     borderRadius: 8,
     borderWidth: 1,
     borderColor: '#e0e0e0',
-    padding: 16,
-    gap: 4,
+    overflow: 'hidden',
+  },
+  askButton: {
+    backgroundColor: '#1a73e8',
+    borderRadius: 8,
+    paddingHorizontal: 20,
+    paddingVertical: 14,
+    alignItems: 'center',
   },
   askButtonDisabled: {
-    opacity: 0.5,
+    backgroundColor: '#a4c2f4',
+    opacity: 0.7,
   },
   askButtonText: {
     fontSize: 16,
-    color: '#666',
-    fontWeight: '600',
+    color: '#fff',
+    fontWeight: '700',
     lineHeight: 22,
-  },
-  askButtonHint: {
-    fontSize: 13,
-    color: '#888',
-    lineHeight: 18,
     flexShrink: 1,
     flexWrap: 'wrap',
+    textAlign: 'center',
   },
   actionRow: {
     flexDirection: 'row',

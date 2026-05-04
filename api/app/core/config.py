@@ -104,6 +104,18 @@ class Settings(BaseSettings):
     # ~189s에 달함. ``asyncio.wait_for`` outer deadline로 차단(p95 mobile 4s 정합).
     llm_router_total_budget_seconds: int = 25
 
+    # --- Analysis SSE / polling (Story 3.7) ---
+    # SSE 본문 token chunking — 한국어 코칭 톤 평균 200-400자 + 24자 / 30ms로
+    # 5-10초 자연 streaming UX(epic line 679 정합). True LLM-token streaming은
+    # Story 8.4 polish.
+    analysis_token_chunk_chars: int = 24
+    analysis_token_chunk_interval_ms: int = 30
+    # SSE 끊김 시 polling 강등 흐름의 클라이언트 interval. 서버는 ``Retry-After``
+    # 헤더 hint(ceil)로 노출. architecture line 322 정합.
+    analysis_polling_interval_seconds: float = 1.5
+    # polling 최대 시도 횟수 — 30회 × 1.5초 ≈ 45초 cap(LLM 25s outer + 안전 여유).
+    analysis_polling_max_attempts: int = 30
+
     # --- JWT (사용자 / 관리자 분리) ---
     jwt_user_secret: str = "dev-user-secret-please-rotate"
     jwt_admin_secret: str = "dev-admin-secret-please-rotate"

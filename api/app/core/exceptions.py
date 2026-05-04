@@ -547,6 +547,69 @@ class AnalysisRewriteLimitExceededError(AnalysisGraphError):
     title: ClassVar[str] = "Self-RAG Rewrite Limit Exceeded"
 
 
+# --- Analysis SSE 라우터 계층 (Story 3.7 — POST /v1/analysis/stream + polling + clarify) ---
+
+
+class AnalysisStreamError(BalanceNoteError):
+    """Story 3.7 — analysis SSE/polling/clarify 라우터 도메인 예외 base.
+
+    ``AnalysisGraphError``는 *그래프/노드 레이어* 예외(`analysis.graph.*`/`analysis.node.*`),
+    본 계층은 *라우터 진입 직전 게이트* 예외(`analysis.meal.*`/`analysis.checkpointer.*`/
+    `analysis.clarify.*`). Story 3.6 카탈로그 패턴 정합 — 직접 raise 회피(서브클래스만 사용).
+    """
+
+    status: ClassVar[int] = 500
+    code: ClassVar[str] = "analysis.stream.error"
+    title: ClassVar[str] = "Analysis Stream Error"
+
+
+class AnalysisMealNotFoundError(AnalysisStreamError):
+    """meals row 미존재 / 소유권 미일치 / soft-deleted 모두 동일 응답(404 일원화 —
+    enumeration 차단). ``MealNotFoundError``와 *분리* — 분석 라우터의 RFC 7807 ``code``
+    카탈로그 정합(`analysis.meal.not_found`)을 위해 별도 클래스.
+    """
+
+    status: ClassVar[int] = 404
+    code: ClassVar[str] = "analysis.meal.not_found"
+    title: ClassVar[str] = "Meal not found"
+
+
+class AnalysisCheckpointerUnavailableError(AnalysisStreamError):
+    """``app.state.analysis_service is None`` 분기 — Story 3.3 lifespan D10 graceful 정합.
+
+    checkpointer setup 실패 시 라우터는 fail-closed 503(분석 시작 불가) 안내. cleanup
+    재시도(restart)로 회복.
+    """
+
+    status: ClassVar[int] = 503
+    code: ClassVar[str] = "analysis.checkpointer.unavailable"
+    title: ClassVar[str] = "Analysis service unavailable"
+
+
+class AnalysisClarifyValidationError(AnalysisStreamError):
+    """``aresume`` ValueError catch — 빈 selected_value 또는 비-string 입력. Pydantic
+    `min_length=1` + `max_length=80`이 1차 게이트, 본 예외는 *adapter-level defensive
+    double-gate*(Story 3.4 SOT 정합).
+    """
+
+    status: ClassVar[int] = 422
+    code: ClassVar[str] = "analysis.clarify.invalid"
+    title: ClassVar[str] = "Clarification value invalid"
+
+
+class AnalysisRateLimitExceededError(AnalysisStreamError):
+    """LangGraph 분석 라우터 per-IP 10/minute 초과 (RATE_LIMIT_LANGGRAPH 정합).
+
+    slowapi 표준 ``RateLimitExceeded``와 *분리* — 분석 라우터 RFC 7807 ``code`` 카탈로그
+    정합(``analysis.rate_limit.exceeded``)을 위해 별도 클래스. Redis 분산 카운터(주된
+    경로) 또는 메모리 fallback(test/dev) 양쪽에서 단일 raise.
+    """
+
+    status: ClassVar[int] = 429
+    code: ClassVar[str] = "analysis.rate_limit.exceeded"
+    title: ClassVar[str] = "Analysis rate limit exceeded"
+
+
 # --- LLM Router 계층 (Story 3.6 — 듀얼 LLM router + Redis cache) ---
 
 

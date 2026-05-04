@@ -27,6 +27,7 @@ from slowapi.util import get_remote_address
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.api.v1 import analysis as analysis_router
 from app.api.v1 import auth as auth_router
 from app.api.v1 import consents as consents_router
 from app.api.v1 import legal as legal_router
@@ -284,6 +285,7 @@ app.include_router(consents_router.router, prefix="/v1/users/me/consents", tags=
 app.include_router(legal_router.router, prefix="/v1/legal", tags=["legal"])
 app.include_router(meals_router.router, prefix="/v1/meals", tags=["meals"])
 app.include_router(meals_images_router.router, prefix="/v1/meals/images", tags=["meals", "images"])
+app.include_router(analysis_router.router, prefix="/v1/analysis", tags=["analysis"])
 
 
 @app.get("/healthz")

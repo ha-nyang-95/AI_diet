@@ -67,6 +67,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from sqlalchemy import func, insert, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.adapters import r2 as r2_adapter
 from app.adapters.openai_adapter import ParsedMealItem
@@ -82,6 +83,7 @@ from app.core.exceptions import (
     MealQueryValidationError,
 )
 from app.db.models.meal import Meal
+from app.db.models.meal_analysis import MealAnalysis
 from app.db.models.user import User
 
 # Story 2.4 — `GET /v1/meals` 날짜 필터 KST 강제 (W50 해소, D1 결정 — option B). KST
@@ -400,6 +402,32 @@ class MealListResponse(BaseModel):
     next_cursor: str | None = None
 
 
+def _build_analysis_summary(analysis: MealAnalysis | None) -> MealAnalysisSummary | None:
+    """``MealAnalysis`` ORM → ``MealAnalysisSummary`` Pydantic 변환 (Story 3.7 AC18).
+
+    None 입력은 None 반환 — meal_analyses row 미존재(최초 분석 대기) 정합. ORM의
+    ``Numeric`` 컬럼은 ``Decimal`` 반환 — Pydantic ``MealMacros``는 float이라 명시 변환.
+    """
+    if analysis is None:
+        return None
+    macros = MealMacros(
+        carbohydrate_g=float(analysis.carbohydrate_g),
+        protein_g=float(analysis.protein_g),
+        fat_g=float(analysis.fat_g),
+        energy_kcal=float(analysis.energy_kcal),
+    )
+    # 5-band Literal 검증은 MealAnalysisSummary._validate_score_label_consistency가 강제.
+    # ORM 컬럼은 str이라 model_validate를 거쳐 Literal narrowing.
+    return MealAnalysisSummary.model_validate(
+        {
+            "fit_score": analysis.fit_score,
+            "fit_score_label": analysis.fit_score_label,
+            "macros": macros,
+            "feedback_summary": analysis.feedback_summary,
+        }
+    )
+
+
 def _meal_to_response(meal: Meal) -> MealResponse:
     """ORM → 응답 모델 변환 단일 지점 (Story 1.5 ``_build_profile_response`` 패턴).
 
@@ -411,6 +439,11 @@ def _meal_to_response(meal: Meal) -> MealResponse:
     (Pydantic ``model_validate``). NULL은 ``None`` 그대로 forward. CR P2 fix
     (2026-04-30): per-item validate를 try/except로 격리 — 단일 손상 row가 GET 전체
     500 만들지 않도록 corrupt 항목 drop + warn 로그.
+
+    Story 3.7 (D5 IN): ``analysis_summary``는 ``meal.analysis`` relationship에서
+    derive — 호출 측이 ``selectinload(Meal.analysis)``로 N+1 회피 SOT 책임. relationship
+    ``lazy="raise_on_sql"``이라 미명시 access 시 즉시 SAWarning/InvalidRequestError —
+    회귀 즉시 노출.
     """
     image_url = r2_adapter.resolve_public_url(meal.image_key) if meal.image_key else None
     parsed_items: list[ParsedMealItem] | None
@@ -438,8 +471,8 @@ def _meal_to_response(meal: Meal) -> MealResponse:
         image_key=meal.image_key,
         image_url=image_url,
         parsed_items=parsed_items,
-        # Story 2.4 — Epic 3 forward-compat 슬롯. ``meal_analyses`` JOIN은 Story 3.3 책임.
-        analysis_summary=None,
+        # Story 3.7 D5 IN — meal.analysis relationship에서 derive(호출 측 selectinload 책임).
+        analysis_summary=_build_analysis_summary(meal.analysis),
     )
 
 
@@ -615,6 +648,14 @@ async def create_meal(
 
     # Story 2.5 — race-free SELECT-then-INSERT-then-CATCH-then-SELECT (W46 흡수).
     meal, was_replay = await _create_meal_idempotent_or_replay(db, values, idempotency_key)
+    # CR Wave 1 D5 — replay 시 기존 meal에 이미 ``meal_analyses`` row가 있을 수 있어
+    # 이전 ``set_committed_value(meal, "analysis", None)`` 패턴은 *기존 분석 보유 meal*에
+    # 대해 응답 거짓 (analysis_summary=null) 반환. ``selectinload``로 relationship을
+    # 명시 로드해 진실 응답 보장.
+    refreshed = await db.execute(
+        select(Meal).options(selectinload(Meal.analysis)).where(Meal.id == meal.id)
+    )
+    meal = refreshed.scalar_one()
     response_body = _meal_to_response(meal)
     await db.commit()
 
@@ -681,7 +722,15 @@ async def list_meals(
     if to_date is not None and to_date >= date.max:
         raise MealQueryValidationError("to_date out of range")
 
-    stmt = select(Meal).where(Meal.user_id == user.id, Meal.deleted_at.is_(None))
+    # Story 3.7 D5 IN — meal_analyses 1:1 join은 selectinload으로 N+1 회피(separate
+    # ``IN (...)`` 쿼리 1회). ``Meal.analysis`` relationship의 ``lazy="raise_on_sql"``과
+    # 정합 — 본 옵션 미지정 시 ``_meal_to_response`` 내 ``meal.analysis`` access가 즉시
+    # InvalidRequestError(개발 시 N+1 가드).
+    stmt = (
+        select(Meal)
+        .options(selectinload(Meal.analysis))
+        .where(Meal.user_id == user.id, Meal.deleted_at.is_(None))
+    )
     # Story 2.4 (W50 해소, D1) — KST 자정 boundary로 명시 변환. asyncpg는 tz-aware
     # datetime을 그대로 timestamptz로 전달, 비교는 UTC로 정규화 (Postgres 표준).
     if from_date is not None:
@@ -801,6 +850,13 @@ async def update_meal(
     updated = result.scalar_one_or_none()
     if updated is None:
         raise MealNotFoundError("meal not found")
+    # CR Wave 1 D5 — UPDATE...RETURNING은 relationship 미로드. 이전 set_committed_value
+    # None 셋팅은 *기존 분석 보유 meal*의 PATCH 응답을 거짓으로 만듦 (analysis_summary
+    # =null). selectinload로 relationship을 명시 로드해 진실 응답 보장.
+    refreshed = await db.execute(
+        select(Meal).options(selectinload(Meal.analysis)).where(Meal.id == updated.id)
+    )
+    updated = refreshed.scalar_one()
     response = _meal_to_response(updated)
     await db.commit()
     logger.info(

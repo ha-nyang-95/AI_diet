@@ -98,10 +98,13 @@ async def _truncate_user_tables() -> AsyncIterator[None]:
             # cascade되지만, 명시 prepend로 가독성 + 후속 모델 추가 시 truncate 누락 회피.
             # Story 3.6 — knowledge_chunks도 per-test 격리(test_guideline_search.py 시드가
             # test_analysis_service.py 흐름에 leak → generate_feedback 실 LLM 호출 회귀 차단).
+            # Story 3.7 — meal_analyses 신규(D5 IN). meals.id ON DELETE CASCADE라
+            # users TRUNCATE CASCADE로 자동 cascade되지만, 명시 prepend로 가독성 +
+            # per-test 격리 강화(다음 테스트로 row leak 차단).
             await conn.execute(
                 text(
-                    "TRUNCATE meals, consents, refresh_tokens, users, knowledge_chunks "
-                    "RESTART IDENTITY CASCADE"
+                    "TRUNCATE meal_analyses, meals, consents, refresh_tokens, users, "
+                    "knowledge_chunks RESTART IDENTITY CASCADE"
                 )
             )
     finally:
