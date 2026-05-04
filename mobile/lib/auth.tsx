@@ -83,7 +83,12 @@ export const queryClient = new QueryClient({
   },
 });
 
-const API_BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL ?? 'http://localhost:8000';
+// Story 3.7 — react-native-sse 등 인터셉터를 우회하는 클라이언트가 직접 사용할 수
+// 있도록 API_BASE_URL을 export. 단, 모든 일반 호출은 ``authFetch`` 사용 권장(401 refresh
+// 자동 처리). SSE는 react-native-sse가 EventSource open 시 단일 호출이라 ``authFetch``
+// 흐름과 분리 — 만료 토큰은 SSE open 실패 → 모바일 hook이 authFetch 비-SSE refresh trigger.
+export const API_BASE_URL =
+  process.env.EXPO_PUBLIC_API_BASE_URL ?? 'http://localhost:8000';
 const REFRESH_PATH = '/v1/auth/refresh';
 
 interface RefreshResponse {

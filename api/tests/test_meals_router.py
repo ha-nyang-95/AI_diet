@@ -531,6 +531,147 @@ async def test_list_meals_response_includes_analysis_summary_null(
     assert meals[0]["analysis_summary"] is None
 
 
+# Story 3.7 D5 IN — meal_analyses JOIN populated 분기 (AC18) ----------------------
+
+
+async def _create_meal_analysis_for(
+    meal: Meal,
+    *,
+    fit_score: int = 75,
+    fit_score_label: str = "good",
+    fit_reason: str = "ok",
+    feedback_summary: str = "단백질이 부족해요. 닭가슴살 추가 권장.",
+) -> None:
+    """test DB에 meal_analyses row 직접 INSERT — Story 3.7 AC18 fixture."""
+    from app.db.models.meal_analysis import MealAnalysis
+
+    session_maker: async_sessionmaker[AsyncSession] = app.state.session_maker
+    async with session_maker() as session:
+        analysis = MealAnalysis(
+            meal_id=meal.id,
+            user_id=meal.user_id,
+            fit_score=fit_score,
+            fit_score_label=fit_score_label,
+            fit_reason=fit_reason,
+            carbohydrate_g=80.0,
+            protein_g=25.0,
+            fat_g=15.0,
+            energy_kcal=580,
+            feedback_text="## 평가\n" + feedback_summary,
+            feedback_summary=feedback_summary,
+            citations=[],
+            used_llm="gpt-4o-mini",
+        )
+        session.add(analysis)
+        await session.commit()
+
+
+async def test_list_meals_analysis_summary_populated_when_row_exists(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """Story 3.7 — meal_analyses row 존재 시 analysis_summary populated."""
+    user = await user_factory()
+    await consent_factory(user)
+    meal = await _create_meal_for(user, raw_text="분석된 식단")
+    await _create_meal_analysis_for(meal, fit_score=75, fit_score_label="good")
+
+    response = await client.get("/v1/meals", headers=auth_headers(user))
+    assert response.status_code == 200
+    meals = response.json()["meals"]
+    assert len(meals) == 1
+    summary = meals[0]["analysis_summary"]
+    assert summary is not None
+    assert summary["fit_score"] == 75
+    assert summary["fit_score_label"] == "good"
+    assert summary["macros"]["carbohydrate_g"] == 80.0
+    assert summary["feedback_summary"].startswith("단백질이 부족")
+
+
+async def test_list_meals_analysis_summary_allergen_violation_zero_score(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """Story 3.7 — 알레르기 위반 케이스 fit_score=0 + label='allergen_violation' 정합."""
+    user = await user_factory()
+    await consent_factory(user)
+    meal = await _create_meal_for(user, raw_text="알레르기 식단")
+    await _create_meal_analysis_for(
+        meal,
+        fit_score=0,
+        fit_score_label="allergen_violation",
+        fit_reason="allergen_violation",
+        feedback_summary="알레르기 위반 — 새우 회피 필요",
+    )
+
+    response = await client.get("/v1/meals", headers=auth_headers(user))
+    summary = response.json()["meals"][0]["analysis_summary"]
+    assert summary["fit_score"] == 0
+    assert summary["fit_score_label"] == "allergen_violation"
+
+
+async def test_list_meals_mixed_meals_only_some_with_analysis(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """Story 3.7 — 다중 meal 일부만 analysis 보유 → 정확히 매핑(N+1 가드 + null/populated 혼합)."""
+    user = await user_factory()
+    await consent_factory(user)
+    meal_with = await _create_meal_for(user, raw_text="분석 완료 식단")
+    meal_without = await _create_meal_for(user, raw_text="분석 안 한 식단")
+    await _create_meal_analysis_for(meal_with, fit_score=50, fit_score_label="moderate")
+    _ = meal_without  # 분석 없음 — null 응답 검증.
+
+    response = await client.get("/v1/meals", headers=auth_headers(user))
+    assert response.status_code == 200
+    meals_resp = response.json()["meals"]
+    assert len(meals_resp) == 2
+    # meal_with는 populated, meal_without은 null.
+    by_id = {m["id"]: m for m in meals_resp}
+    assert by_id[str(meal_with.id)]["analysis_summary"]["fit_score"] == 50
+    assert by_id[str(meal_without.id)]["analysis_summary"] is None
+
+
+# CR Wave 1 #15 — AC18 spec "신규 ≥ 4" 충족 위한 4번째 신규 케이스.
+
+
+async def test_list_meals_5band_label_mapping_excellent_to_low(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """Story 3.7 — 5-band fit_score_label 매핑 정합(excellent/good/moderate/low)."""
+    user = await user_factory()
+    await consent_factory(user)
+
+    band_cases = [
+        ("excellent", 95),
+        ("good", 75),
+        ("moderate", 55),
+        ("low", 25),
+    ]
+    expected_by_meal: dict[str, tuple[str, int]] = {}
+    for label, score in band_cases:
+        meal = await _create_meal_for(user, raw_text=f"식단 {label}")
+        await _create_meal_analysis_for(meal, fit_score=score, fit_score_label=label)
+        expected_by_meal[str(meal.id)] = (label, score)
+
+    response = await client.get("/v1/meals", headers=auth_headers(user))
+    assert response.status_code == 200
+    meals_resp = response.json()["meals"]
+    assert len(meals_resp) == 4
+
+    by_id = {m["id"]: m for m in meals_resp}
+    for meal_id, (expected_label, expected_score) in expected_by_meal.items():
+        summary = by_id[meal_id]["analysis_summary"]
+        assert summary is not None
+        assert summary["fit_score_label"] == expected_label
+        assert summary["fit_score"] == expected_score
+
+
 async def test_get_meals_from_after_to_returns_400(
     client: AsyncClient,
     user_factory: UserFactory,
