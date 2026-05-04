@@ -163,6 +163,40 @@ class FeedbackOutput(BaseModel):
     used_llm: Literal["gpt-4o-mini", "claude", "stub"] = "stub"
 
 
+class KnowledgeChunkContext(BaseModel):
+    """Story 3.6 — 가이드라인 검색 결과 + LLM 시스템 프롬프트 주입 컨텍스트.
+
+    `KnowledgeChunk` ORM의 6개 컬럼을 LLM 인용 패턴 *(출처: 기관명, 문서명, 연도)* +
+    chunk 본문 압축으로 정규화. ``chunk_text``는 token 비용 보호로 사전 truncate
+    (예: 300자 cap — `search_guideline_chunks`가 실 truncate 책임).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: str
+    doc_title: str
+    published_year: int | None = None
+    chunk_text: str
+    authority_grade: str
+
+
+class FeedbackLLMOutput(BaseModel):
+    """Story 3.6 — LLM 응답 내부 모델 (router → generate_feedback 노드 변환 입력).
+
+    `FeedbackOutput`(외부 노출 모델 — SSE → 모바일)과 *분리*: LLM은 `text` 본문 +
+    `cited_chunk_indices`(주입된 chunks 0-based 인덱스)만 반환. 노드가 indices →
+    실 `Citation` 리스트로 매핑(자유 인용 금지 검증).
+
+    CR mn-27 — ``frozen=True``로 immutable 강제(LLM 응답 후 파이프라인 변형 방지 +
+    cache 직렬화 안전).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    text: str = Field(min_length=1)
+    cited_chunk_indices: list[int] = Field(default_factory=list)
+
+
 class NodeError(BaseModel):
     """노드 retry 후 fallback 진입 컨텍스트 — Sentry breadcrumb 정합."""
 

@@ -2,6 +2,15 @@
 
 리뷰·구현 과정에서 식별되었으나 다음 스토리·시점으로 미룬 항목 모음.
 
+## Deferred from: code review of 3-6-인용형-피드백-광고-가드-듀얼-llm (2026-05-04)
+
+- **DF100 — `_USED_LLM_OPENAI = "gpt-4o-mini"` hardcoded(`settings.llm_main_model`과 분리)** — `api/app/adapters/llm_router.py:286-287`. env override로 model 변경 시 telemetry attribution이 실제 호출 모델과 mismatch. 사유: `FeedbackOutput.used_llm: Literal["gpt-4o-mini","claude","stub"]` 강제 — 단순 settings 파생은 Literal 위반. **재검토 시점**: Story 3.8 LangSmith — Literal 확장(model id별) 또는 별도 attribution 채널 분리.
+- **DF101 — `LLMRouterPayloadInvalidError`가 content-policy refusal과 schema-invalid 미구분** — `api/app/adapters/llm_router.py:169-186`. 사용자 입력이 정책상 refuse면 OpenAI + Anthropic 양쪽 quota burn. 사유: 본 스토리 cost monitor 미도입 + content-policy 빈도 측정 부재. **재검토 시점**: Story 8.4 polish — `LLMRouterContentRefusedError` 서브클래스 분리, fallback 차단.
+- **DF102 — cache deserialize 실패가 Sentry 미캡처(structlog warning만)** — `api/app/adapters/llm_router.py:81-94`. cache poisoning 같은 silent 회귀 알림 부재. 사유: 본 스토리는 anchor 1지점만 — observability 정교화는 후속. **재검토 시점**: Story 8.4 polish — `sentry_sdk.capture_message(..., level="warning")` 추가.
+- **DF103 — `temperature=0.3` / `max_tokens=1024` magic dup (openai/anthropic adapters)** — `api/app/adapters/openai_adapter.py`, `api/app/adapters/anthropic_adapter.py`. 두 adapter에 독립 const, 향후 튜닝 시 drift 위험. 사유: settings에 hoist 시 LLM별 별도 필드 필요(스펙 미명시). **재검토 시점**: Story 8.4 polish — `settings.llm_temperature`/`settings.llm_max_tokens` 도입.
+- **DF104 — 인용 패턴 fullwidth colon `(출처：` / leading whitespace `( 출처:` 등 변형 미수용** — `api/app/domain/ad_expression_guard.py:_CITATION_PATTERN`, `api/app/graph/nodes/_feedback_postprocess.py:_CITATION_PATTERN`. 한국어 LLM 출력에서 빈도 낮음으로 판단. 사유: 실측 부재 — Story 3.8 eval에서 발생률 측정 후 결정. **재검토 시점**: Story 3.8 LangSmith eval.
+- **DF105 — 광고 가드 false-positive 차단 테스트(`예방접종`/`처방전`/`완화병동`/`진단서`) — B1 decision 후 일괄 추가** — `api/tests/domain/test_ad_expression_guard.py`. 사유: regex 처리 방향(decision_needed B1) 확정 전 테스트 작성은 wasted work. **재검토 시점**: B1 decision 직후 동일 PR에 추가.
+
 ## Deferred from: code review of 3-5-fit-score-알고리즘-알레르기-단락 (2026-05-03)
 
 - **df-1 hardcoded `sex="female"` for all users** — `api/app/domain/fit_score.py:compute_fit_score` BMR 호출이 `sex="female"`로 고정. 남성 사용자 BMR 166 kcal 과소산정 → meal target ~76-105 kcal 과소 → calorie_score systematic 편향. **재검토 시점**: Story 8.4 polish — `UserProfileSnapshot.sex` 필드 추가 + Story 1.5 alembic 마이그레이션 + fetch_user_profile 갱신 (스펙 line 26 명시 OUT).
