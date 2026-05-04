@@ -17,7 +17,12 @@ dependencies = [
     # Story 3.8 — 0.7.31 보안 패치(GHSA-rr7j-v2q5-chgv: redaction pipeline `events`
     # 배열 누락 — token-level streaming raw token leak 차단). 본 SDK는 LangSmith
     # client(`Client.init`) + 마스킹 hook(`hide_inputs`/`hide_outputs`) 직접 의존.
-    "langsmith>=0.7.31",
+    # CR P1 — 상한 ``<0.9`` 추가: ``init_langsmith()``이 ``langsmith.run_trees._CLIENT`` /
+    # ``langsmith._internal._context._GLOBAL_CLIENT`` private 모듈 변수를 직접 주입(
+    # native @traceable이 default unmasked Client를 만들어 마스킹 hook 우회 회귀 차단).
+    # 0.9.x 미래 minor bump가 변수를 rename/제거하면 lifespan에서 ImportError/AttributeError
+    # → DN-5 fail-closed로 fallback. 상한은 silent 회귀 방지용 가드(uv lock 회전 시점에 검토).
+    "langsmith>=0.7.31,<0.9",
     # --- DB / ORM ---
     "sqlalchemy[asyncio]>=2.0.49",
     "alembic>=1.14",

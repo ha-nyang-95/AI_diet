@@ -1,17 +1,21 @@
 """Story 3.8 — `app.core.observability` 마스킹 hook + init 단위 검증 (AC1, AC2, AC7).
 
 NFR-S5 마스킹 룰셋이 Sentry SOT(``app.core.sentry._MASKED_KEYS``)와 합집합인지 +
-LangGraph state 신규 키(``weight_kg`` / ``allergies`` / ``feedback`` 등)가 빠짐없이
+LangGraph state 신규 키(``weight_kg`` / ``allergies`` / ``feedback_text`` 등)가 빠짐없이
 redact 되는지를 모두 가드. ``mask_run_inputs`` / ``mask_run_outputs``는 *원본 dict
 미수정* + None/빈 dict graceful 처리 + list of dict 재귀 순회를 강제한다.
 
 또한 ``init_langsmith()``의 3 분기(disabled / misconfigured / 정상 init)를 monkeypatch
 + structlog ``capture_logs`` 로 검증.
+
+CR P4/P8/P17 추가: cycle 가드 / depth limit / tuple 처리 / env cleanup / feedback
+선택적 마스킹(citations/macros/fit_score 통과 + text만 마스킹).
 """
 
 from __future__ import annotations
 
 import copy
+import os
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -24,6 +28,7 @@ from app.core.config import settings as _settings
 from app.core.observability import (
     _LANGSMITH_MASKED_KEYS,
     _MASK_PLACEHOLDER,
+    _MAX_MASK_DEPTH,
     get_langsmith_client,
     init_langsmith,
     mask_run_inputs,
@@ -45,6 +50,19 @@ def _reset_structlog_for_capture_logs() -> None:
     """
     structlog.reset_defaults()
     observability_module.log = structlog.get_logger(observability_module.__name__)
+
+
+@pytest.fixture(autouse=True)
+def _reset_observability_module_state() -> None:
+    """CR P8 — ``init_langsmith()``이 ``os.environ``에 추가한 키를 후속 테스트로
+    leak시키지 않도록 매 테스트 종료 시 ``reset_langsmith_for_tests()``로 cleanup.
+
+    monkeypatch는 ``setenv``만 자동 복구하지 production 코드의 직접 ``os.environ``
+    수정은 미복구. 본 fixture가 명시 cleanup → 후속 테스트에서 ``settings``는
+    monkeypatch로 처리하지만 *real env*는 깨끗한 상태 보장.
+    """
+    yield
+    reset_langsmith_for_tests()
 
 
 def test_mask_run_inputs_redacts_top_level_raw_text() -> None:
@@ -112,23 +130,33 @@ def test_mask_run_inputs_redacts_parsed_items_array() -> None:
     assert out["meal_id"] == "uuid-1234"
 
 
-def test_mask_run_inputs_redacts_feedback_dict() -> None:
-    """``feedback`` 키 전체 dict redact — Dev Notes #3 D2 정합.
+def test_mask_run_inputs_redacts_feedback_text_only_keeping_citations_and_macros() -> None:
+    """CR DN-2 / P17 — ``feedback`` dict 전체 redact 폐지. ``feedback.text``만 마스킹,
+    ``citations`` / ``macros`` / ``fit_score``는 보드 노출 OK.
 
-    ``feedback.text`` nested 필드를 부모 path 추적 없이 보호하기 위해 ``feedback``
-    키 자체를 ``_LANGSMITH_MASKED_KEYS`` 등재. citation/macro 카드는 LangSmith
-    보드에서 노출 손실되지만 영업 데모는 노드 latency·cost 중심이라 trade-off OK.
+    종전(Story 3.8 DS): ``feedback`` 키 전체를 ``"***"``로 치환 — citation/macro
+    카드 영업 데모 시연 불가. CR DN-2 옵션 b: ``feedback`` 제거 + ``text`` 키
+    추가로 자연어 본문만 차단. 영업 보드에서 citation 인용 + macro 정량 표시
+    살아있음(NFR-O4 영업 가시성 + NFR-S5 PII 보호 양립).
     """
     out = mask_run_inputs(
         {
             "feedback": {
                 "text": "한국 식단 평가 본문...",
-                "citations": [{"doc_id": "kdri-2020-1"}],
-                "macros": {"protein_g": 30},
+                "citations": [{"doc_id": "kdri-2020-1", "quote": "단백질 권장량"}],
+                "macros": {"protein_g": 30, "carb_g": 100},
+                "fit_score": 65,
             }
         }
     )
-    assert out == {"feedback": _MASK_PLACEHOLDER}
+    assert out == {
+        "feedback": {
+            "text": _MASK_PLACEHOLDER,
+            "citations": [{"doc_id": "kdri-2020-1", "quote": "단백질 권장량"}],
+            "macros": {"protein_g": 30, "carb_g": 100},
+            "fit_score": 65,
+        }
+    }
 
 
 def test_mask_run_inputs_passes_non_pii_fields() -> None:
@@ -173,7 +201,7 @@ def test_mask_run_inputs_handles_none_input() -> None:
     assert mask_run_inputs(None) == {}
 
 
-def test_mask_run_inputs_handles_list_of_dicts_recursively() -> None:
+def test_mask_run_inputs_redacts_messages_array_top_level() -> None:
     """``messages`` 키 dict 매칭 — 상위 redact(Sentry SOT 합집합 정합).
 
     LLM 호출 boundary 패턴(content / messages / system / user_prompt)은 sentry
@@ -188,6 +216,90 @@ def test_mask_run_inputs_handles_list_of_dicts_recursively() -> None:
         }
     )
     assert out == {"messages": _MASK_PLACEHOLDER}
+
+
+def test_mask_run_inputs_recurses_into_lists_under_non_masked_parent() -> None:
+    """CR P9 — 진짜 list-of-dicts 재귀 가드.
+
+    부모 키가 ``_LANGSMITH_MASKED_KEYS``에 *없는* 케이스에서 하위 dict의 masked
+    키가 정상 redact되는지 검증. 종전 ``test_mask_run_inputs_handles_list_of_dicts_recursively``
+    는 ``messages`` 키가 mask set에 있어 *list 순회 자체가 발생하지 않는*(top-level
+    redact만 발동) 가짜 가드였음. 본 케이스는 list 재귀 path를 실제로 exercise.
+    """
+    out = mask_run_inputs(
+        {
+            "items": [
+                {"raw_text": "secret-1", "id": 1},
+                {"raw_text": "secret-2", "id": 2},
+            ]
+        }
+    )
+    assert out == {
+        "items": [
+            {"raw_text": _MASK_PLACEHOLDER, "id": 1},
+            {"raw_text": _MASK_PLACEHOLDER, "id": 2},
+        ]
+    }
+
+
+def test_mask_run_inputs_handles_top_level_list() -> None:
+    """CR P3 — top-level이 list여도 재귀 마스킹 (SDK 변경 안전망).
+
+    LangSmith hide_inputs 콜백은 dict만 넘긴다는 계약이지만 SDK 내부 변경에
+    대비해 list/tuple top-level도 redact 처리(종전 ``return inputs`` passthrough
+    는 PII 통과 위험이 있어 회귀로 잡았음).
+    """
+    out = mask_run_inputs([{"raw_text": "x"}, {"meal_id": "y"}])
+    assert out == [{"raw_text": _MASK_PLACEHOLDER}, {"meal_id": "y"}]
+
+
+def test_mask_run_inputs_guards_self_referential_cycle() -> None:
+    """CR P4 — self-referential dict가 RecursionError를 발생시키지 않고 placeholder
+    치환으로 graceful 처리. LangSmith hide_inputs 핫패스에서 예외 raise는 trace drop.
+    """
+    cyclic: dict[str, Any] = {"meal_id": "uuid-1"}
+    cyclic["self"] = cyclic  # 자기 참조 cycle
+    out = mask_run_inputs(cyclic)
+    assert out["meal_id"] == "uuid-1"
+    # cycle marker는 placeholder로 치환 — 무한 재귀 차단 단언.
+    assert out["self"] == _MASK_PLACEHOLDER
+
+
+def test_mask_run_inputs_guards_excessive_depth() -> None:
+    """CR P4 — 깊이 ``_MAX_MASK_DEPTH`` 초과 nested dict는 placeholder + WARNING
+    이벤트 emit. RecursionError 차단 + silent regress 방지(operator log 가시성).
+    """
+    nested: dict[str, Any] = {"v": "leaf"}
+    for _ in range(_MAX_MASK_DEPTH + 5):
+        nested = {"layer": nested}
+    with capture_logs() as cap:
+        out = mask_run_inputs(nested)
+    # 어느 시점부터는 placeholder로 끊김 — 깊은 leaf까지 도달하지 않음.
+    assert _MASK_PLACEHOLDER in str(out)
+    depth_events = [e for e in cap if e.get("event") == "observability.mask.depth_exceeded"]
+    assert depth_events, f"missing depth_exceeded event: {cap}"
+
+
+def test_mask_run_inputs_handles_tuple_values_recursively() -> None:
+    """CR P4 — tuple 컨테이너도 재귀 (LangGraph state가 tuple을 포함하는 경우 대비).
+
+    종전 구현은 tuple을 ``return value`` 통과시켜 nested PII가 unmasked로
+    LangSmith에 송신될 위험. 본 가드는 tuple → list 재귀 마스킹.
+    """
+    out = mask_run_inputs(
+        {
+            "tuple_payload": (
+                {"raw_text": "secret-A"},
+                {"weight_kg": 70},
+            ),
+        }
+    )
+    assert out == {
+        "tuple_payload": [
+            {"raw_text": _MASK_PLACEHOLDER},
+            {"weight_kg": _MASK_PLACEHOLDER},
+        ]
+    }
 
 
 def test_mask_run_outputs_uses_same_keyset() -> None:
@@ -213,9 +325,13 @@ def test_masked_keys_includes_sentry_keyset() -> None:
 
     Sentry 키 제거 PR이 LangSmith에서도 자동 제거되는 결합도 — 본 가드가
     합집합 회귀를 잡는다(``test_observability_tracing.py`` 동작 가드와 분리).
+
+    CR P17 — extras는 9건: ``feedback`` whole-mask 폐지(citation/macro 가시성
+    보존) + ``text`` 추가(``feedback.text`` 자연어만 마스킹) + ``meal_text``
+    smoke v3 alias.
     """
     assert _SENTRY_MASKED_KEYS <= _LANGSMITH_MASKED_KEYS
-    # LangGraph state PII 추가 키 8건이 모두 포함됐는지(Dev Notes #2 D1).
+    # LangGraph state PII 추가 키 9건이 모두 포함됐는지(CR DN-2 / P17 정합).
     extras = {
         "weight_kg",
         "height_cm",
@@ -224,9 +340,12 @@ def test_masked_keys_includes_sentry_keyset() -> None:
         "food_items",
         "clarification_options",
         "feedback_text",
-        "feedback",
+        "text",  # CR P17 — feedback.text nested 자연어 마스킹용
+        "meal_text",  # smoke v3 raw_text alias
     }
     assert extras <= _LANGSMITH_MASKED_KEYS
+    # CR P17 — ``feedback`` whole-mask는 *제거됨* 가드(영업 데모 보드 가시성 보존).
+    assert "feedback" not in _LANGSMITH_MASKED_KEYS
 
 
 def test_init_langsmith_disabled_when_tracing_v2_false(
@@ -303,6 +422,43 @@ def test_init_langsmith_wires_global_client_for_native_tracing(
     )
 
 
+def test_init_langsmith_resets_client_when_global_wiring_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CR P2 — private SDK 변수 import/주입 실패 시 ``_langsmith_client`` 명시 리셋.
+
+    LangSmith SDK 미래 minor bump가 ``_GLOBAL_CLIENT``를 rename/제거하면 ``ImportError``
+    또는 ``AttributeError``가 raise됨. 종전 구현은 Client 인스턴스가 살아있는 채
+    globals만 미주입된 *부분 성공* 상태 — default Client 생성 → unmasked PII 송신.
+    본 가드: inner exception → singleton ``None`` 리셋 + WARNING 로그 + None return.
+    DN-5(``main.py`` ``LANGCHAIN_TRACING_V2=false`` 강제)와 결합해 fail-closed.
+
+    ``sys.modules[name] = None`` 패턴으로 import 실패 simulate(documented Python
+    behavior — ImportError raise).
+    """
+    import sys
+
+    from app.core import observability
+
+    monkeypatch.setattr(_settings, "langchain_tracing_v2", True)
+    monkeypatch.setattr(_settings, "langsmith_api_key", "ls__test")
+    monkeypatch.setattr(observability, "Client", MagicMock(name="FakeClient"))
+    reset_langsmith_for_tests()
+
+    # private 모듈 import 시점에서 ImportError raise — sys.modules[name]=None은
+    # Python import system이 ImportError를 raise하도록 만든다(documented).
+    monkeypatch.setitem(sys.modules, "langsmith._internal._context", None)
+
+    with capture_logs() as cap:
+        client = init_langsmith()
+    assert client is None
+    assert get_langsmith_client() is None, "singleton must be reset on partial-init failure"
+    failure_events = [
+        e for e in cap if e.get("event") == "observability.langsmith.global_client_wiring_failed"
+    ]
+    assert failure_events, f"missing wiring_failed warning: {cap}"
+
+
 def test_init_langsmith_creates_singleton_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -337,14 +493,22 @@ def test_init_langsmith_creates_singleton_client(
     assert "observability.langsmith.initialized" in info_events
 
 
-def test_reset_langsmith_for_tests_clears_singleton(
+def test_reset_langsmith_for_tests_clears_singleton_and_env_keys(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``reset_langsmith_for_tests()`` 호출 후 module 변수 None 강제."""
+    """CR P8 — ``reset_langsmith_for_tests()`` 호출 후 module 변수 None + env 키 cleanup.
+
+    종전 구현은 ``_langsmith_client``만 None 처리하고 ``init_langsmith()``이
+    ``os.environ.setdefault``로 추가한 ``LANGSMITH_API_KEY`` / ``LANGSMITH_PROJECT``
+    키는 process env에 남아 후속 테스트에 leak. 본 가드: env 키도 cleanup.
+    """
     from app.core import observability
 
+    monkeypatch.delenv("LANGSMITH_API_KEY", raising=False)
+    monkeypatch.delenv("LANGSMITH_PROJECT", raising=False)
     monkeypatch.setattr(_settings, "langchain_tracing_v2", True)
     monkeypatch.setattr(_settings, "langsmith_api_key", "ls__test")
+    monkeypatch.setattr(_settings, "langsmith_project", "balancenote-cr-test")
 
     fake_client_instance = MagicMock(name="FakeLangSmithClient")
     fake_client_class = MagicMock(return_value=fake_client_instance)
@@ -353,8 +517,15 @@ def test_reset_langsmith_for_tests_clears_singleton(
 
     assert init_langsmith() is fake_client_instance
     assert get_langsmith_client() is fake_client_instance
+    # init이 setdefault로 추가한 env 키 존재.
+    assert os.environ.get("LANGSMITH_API_KEY") == "ls__test"
+    assert os.environ.get("LANGSMITH_PROJECT") == "balancenote-cr-test"
+
     reset_langsmith_for_tests()
     assert get_langsmith_client() is None
+    # CR P8 — env 키도 cleanup.
+    assert "LANGSMITH_API_KEY" not in os.environ
+    assert "LANGSMITH_PROJECT" not in os.environ
 
 
 def test_mask_run_inputs_passes_unknown_scalar_payload() -> None:

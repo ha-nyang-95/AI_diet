@@ -8,6 +8,11 @@
 
 Task 5 D6 결정 정합 — 본 통합 테스트는 *mock-level 가드만*. 실 trace 송신은
 staging/prod 수동 verification(`docs/observability/langsmith-dashboard.md`).
+
+CR P9 — 종전 vacuous 테스트 2건(``test_compile_pipeline_smoke_with_tracing_mocked``
+``assert callable``, ``test_langgraph_tracing_v2_env_recognized_by_langchain_core``
+SDK 자체 검증) 폐지. 본 모듈은 *마스킹 hook wired 가드 + tracer 클래스 import 가능
+가드*만 유지(BalanceNote 통합 정합).
 """
 
 from __future__ import annotations
@@ -25,23 +30,11 @@ from app.core.observability import (
 )
 
 
-def test_langgraph_tracing_v2_env_recognized_by_langchain_core(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """`LANGCHAIN_TRACING_V2=true` env 시 langchain-core의 ``tracing_v2_enabled``
-    helper가 native로 활성을 인식한다 — 이게 LangGraph 노드 호출의 자동 트레이싱
-    SOT(D4: 라우터/노드 코드 변경 0).
-    """
-    from langchain_core.tracers import context as tcontext
-
-    monkeypatch.setenv("LANGCHAIN_TRACING_V2", "true")
-    monkeypatch.setenv("LANGSMITH_API_KEY", "ls__mock")
-
-    # context manager로 활성 — `compile_pipeline`이 컴파일 시점에 callback을 박는
-    # 패턴이 아니라 *runtime invocation 시점에 langchain-core가 env를 읽어 tracer
-    # 부착*하는 패턴이라 ``tracing_v2_enabled`` 자체의 인식만 가드.
-    with tcontext.tracing_v2_enabled() as cb:
-        assert cb is not None
+@pytest.fixture(autouse=True)
+def _reset_observability_state() -> None:
+    """CR P8 — env/singleton leak 방지(test pollution 차단)."""
+    yield
+    reset_langsmith_for_tests()
 
 
 def test_langgraph_tracing_v2_disabled_when_env_false(
@@ -83,21 +76,15 @@ def test_init_langsmith_wires_masking_hooks_to_client(
     assert kwargs["hide_outputs"] is mask_run_outputs
 
 
-def test_compile_pipeline_smoke_with_tracing_mocked(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """`LANGCHAIN_TRACING_V2=true` env 환경에서 `compile_pipeline`이 호출되어도 회귀 0.
-
-    실 OpenAI/Anthropic 호출은 dev 환경에서 차단(Story 3.7 패턴) — 본 가드는 단순히
-    *env가 설정돼도 컴파일 자체가 깨지지 않는지* 확인. 실 trace upload는
-    staging/prod 수동(D6 정합).
+def test_langchain_tracer_class_importable() -> None:
+    """CR P9 — vacuous ``assert callable`` 교체. LangGraph가 자동 부착하는
+    ``LangChainTracer`` 클래스가 langchain-core SOT에서 import 가능한지 가드 —
+    SDK upstream rename/이동을 즉시 감지(현 ``langsmith>=0.7.31,<0.9`` + langchain-core
+    안정 buffer 하에서는 통과).
     """
-    monkeypatch.setenv("LANGCHAIN_TRACING_V2", "true")
-    monkeypatch.setenv("LANGSMITH_API_KEY", "ls__mock")
+    from langchain_core.tracers import LangChainTracer
 
-    # `compile_pipeline`은 checkpointer + deps 인자를 받지만 본 smoke는 *import 가능
-    # 여부 + LangChainTracer 의존 import* 만 가드. 실 graph build는 conftest의 lifespan
-    # fixture가 담당(test_pipeline.py 등).
-    from app.graph.pipeline import compile_pipeline
-
-    assert callable(compile_pipeline)
+    assert isinstance(LangChainTracer, type), (
+        "LangChainTracer는 langchain-core 1.x SOT 클래스 — rename 시 본 가드가 "
+        "ImportError로 즉시 실패해 wiring 패턴 점검 트리거."
+    )

@@ -12,11 +12,16 @@
     - food_nutrition / knowledge_chunks 시드 완료 (`scripts/seed_food_db.py` +
       `seed_guidelines.py`). 미시드 시 retrieve_nutrition이 빈 결과 → Self-RAG
       rewrite/clarify 분기.
+    - **environment 가드**: ``settings.environment``가 ``dev`` 또는 ``test``일 때만
+      실행. staging/prod에서 실수 실행을 방지(synthetic 사용자/consent INSERT가
+      운영 DB에 박히는 사고 차단 — CR DN-4 정합).
 
 사용법:
     cd api && uv run python ../scripts/dev_smoke_six_node_pipeline.py
 
 idempotent — 같은 deterministic user_id를 반복 시드(ON CONFLICT skip).
+synthetic 시드는 ``Consent.audit_metadata``에 ``synthetic=True`` 마커가 박혀 있어
+audit 보고서에서 즉시 식별 가능(Story 1.4 audit trail 정합).
 """
 
 from __future__ import annotations
@@ -33,7 +38,9 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast
 
 # LANGCHAIN_TRACING_V2 강제 활성 — .env가 false 디폴트라도 본 smoke는 trace 송신.
-os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
+# CR DN-4 / B-21 — ``setdefault``가 아닌 *override*(시점 무관 강제) — 운영자가
+# .env에 ``false``를 박았어도 smoke 본 시점은 trace 송신이 의도이므로 명시 set.
+os.environ["LANGCHAIN_TRACING_V2"] = "true"
 
 import redis.asyncio as redis_asyncio  # noqa: E402
 from sqlalchemy import select  # noqa: E402
@@ -60,11 +67,23 @@ DEV_USER_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
 DEV_GOOGLE_SUB = "dev-smoke-six-node-001"
 DEV_EMAIL = "dev-smoke@balancenote.local"
 
+# CR DN-4 — env guard 화이트리스트. ``staging``/``production`` 등 운영 환경에서
+# 본 스크립트 실행 시 즉시 abort — synthetic 사용자/consent가 운영 DB로 박히는
+# 사고를 차단(deterministic UUID로 인한 row collision도 함께 방지).
+_ALLOWED_ENVIRONMENTS = frozenset({"dev", "test", "ci"})
+
 DEV_RAW_TEXT = "삼겹살 200g 김치 1접시 쌀밥 1공기"
 
 
 async def seed_dev_user(session_maker: _SessionMaker) -> None:
-    """dev user + consent 시드 — 6노드 풀 흐름 통과 가능한 최소 fixture."""
+    """dev user + consent 시드 — 6노드 풀 흐름 통과 가능한 최소 fixture.
+
+    CR DN-4 — Consent에 ``user_agent="dev-smoke-six-node/synthetic"`` 마커를
+    박는다. ``audit_metadata`` 컬럼이 없어 신규 마이그레이션 추가는 본 스토리
+    범위 밖 — 기존 ``user_agent`` 필드를 audit 식별자로 재활용. Story 7.3 audit
+    화면에서 substring ``synthetic``으로 합성 row 즉시 식별 가능(real consent의
+    user_agent는 브라우저 UA string이라 충돌 0).
+    """
     async with session_maker() as session:
         existing = (
             await session.execute(select(User).where(User.id == DEV_USER_ID))
@@ -108,12 +127,15 @@ async def seed_dev_user(session_maker: _SessionMaker) -> None:
             sensitive_personal_info_version=CURRENT_VERSIONS["sensitive_personal_info"],
             automated_decision_consent_at=now,
             automated_decision_version=CURRENT_VERSIONS["automated-decision"],
+            # CR DN-4 — synthetic 마커. audit 보고서에서 즉시 식별 가능.
+            ip_address="127.0.0.1",
+            user_agent="dev-smoke-six-node/synthetic",
             created_at=now,
             updated_at=now,
         )
         session.add(consent)
         await session.commit()
-        print(f"[seed] user {DEV_USER_ID} + consent inserted")
+        print(f"[seed] user {DEV_USER_ID} + consent inserted (synthetic marker)")
 
 
 async def run_pipeline_once() -> None:
@@ -180,5 +202,25 @@ async def run_pipeline_once() -> None:
     print("  - 노드별 latency / token / cost / inputs(마스킹) / outputs(마스킹)")
 
 
+def _enforce_environment_guard() -> None:
+    """CR DN-4 — staging/production 실수 실행 차단.
+
+    ``settings.environment`` 화이트리스트(dev/test/ci) 외에서 실행 시 즉시 abort.
+    deterministic UUID + synthetic consent INSERT는 운영 DB에 박히면 audit 무결성
+    훼손 + row collision 위험. 본 가드는 *모든* 부수효과 발생 전(env 활성 + import
+    완료 직후)에 abort.
+    """
+    env = (settings.environment or "").lower().strip()
+    if env not in _ALLOWED_ENVIRONMENTS:
+        sys.stderr.write(
+            f"[abort] dev_smoke_six_node_pipeline.py is dev-only — current "
+            f"environment={env!r} not in {sorted(_ALLOWED_ENVIRONMENTS)}.\n"
+            f"  staging/production 운영 DB에 synthetic 사용자/consent를 박지 않도록\n"
+            f"  설정해주세요. ENVIRONMENT=dev 로 export 후 재실행.\n"
+        )
+        raise SystemExit(2)
+
+
 if __name__ == "__main__":
+    _enforce_environment_guard()
     asyncio.run(run_pipeline_once())

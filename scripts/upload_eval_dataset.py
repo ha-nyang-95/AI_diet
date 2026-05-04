@@ -23,6 +23,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import structlog
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_INPUT = REPO_ROOT / "api" / "tests" / "data" / "korean_foods_100.json"
 DEFAULT_NAME = "balancenote-korean-foods-v1"
@@ -32,17 +34,33 @@ _REQUIRED_KEYS: frozenset[str] = frozenset(
     {"input", "expected_canonical", "expected_path", "category"}
 )
 
+_log = structlog.get_logger(__name__)
+
 
 def _load_dataset(path: Path) -> list[dict[str, str]]:
     """JSON 파일 로드 + schema 검증.
 
     Raises:
         ``FileNotFoundError`` — path 부재.
-        ``ValueError`` — row가 list of dict 형태가 아니거나 row schema 불일치.
+        ``ValueError`` — JSON malformed / row가 list of dict 형태가 아니거나 row schema 불일치 / 값 type 위반.
     """
     if not path.exists():
         raise FileNotFoundError(f"dataset not found: {path}")
-    rows = json.loads(path.read_text(encoding="utf-8"))
+
+    # CR P10 — UnicodeDecodeError(file이 UTF-8 아님) → ValueError로 변환해 호출자가
+    # 단일 ValueError catch로 안내 메시지 일관 처리.
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"dataset must be UTF-8 encoded: {exc}") from exc
+
+    # CR P10 — JSONDecodeError를 ValueError로 변환(docstring 정합 + 호출자 단일
+    # except path).
+    try:
+        rows = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid JSON: {exc}") from exc
+
     if not isinstance(rows, list):
         raise ValueError(f"dataset root must be JSON array, got {type(rows).__name__}")
     for idx, row in enumerate(rows):
@@ -51,6 +69,15 @@ def _load_dataset(path: Path) -> list[dict[str, str]]:
         missing = _REQUIRED_KEYS - row.keys()
         if missing:
             raise ValueError(f"row {idx} missing keys {sorted(missing)}: {row!r}")
+        # CR P10 — value type 검증. LangSmith 보드/eval 비교가 string-equal 기반이라
+        # ``None``/list/dict 같은 비-string 값이 silently 업로드되면 회귀 baseline이
+        # 깨짐(eval false-negative). 4개 키 모두 비-empty string 강제.
+        for key in _REQUIRED_KEYS:
+            value = row[key]
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(
+                    f"row {idx} field {key!r} must be non-empty string: {value!r}"
+                )
     return rows
 
 
@@ -72,12 +99,21 @@ def _build_examples(rows: list[dict[str, str]]) -> list[dict[str, Any]]:
 def _resolve_dataset(client: Any, name: str, description: str) -> Any:
     """dataset name으로 read 시도 → 미존재 시 신규 create.
 
-    LangSmith SDK는 read_dataset이 미존재 시 LangSmithNotFoundError를 raise하지만,
-    SDK 버전별 예외 클래스가 달라 ``Exception`` catch 후 create fallback.
+    CR P5 — 종전 ``except Exception`` blanket catch는 transient(timeout/5xx/auth
+    fail)도 미존재로 오인하여 *중복 dataset 생성*을 유발. ``LangSmithNotFoundError``
+    만 catch해 미존재 → create 분기, 그 외 예외는 propagate해 운영자에게 명확한
+    incident 신호 노출.
     """
     try:
+        from langsmith.utils import LangSmithNotFoundError  # noqa: PLC0415
+    except ImportError:
+        # 0.7.x 이전/이후 SDK rename 안전망 — utils 모듈 미공개 시 generic 예외로 fallback.
+        # ``langsmith>=0.7.31,<0.9`` 상한 하에서는 도달하지 않지만 silent break 차단용.
+        LangSmithNotFoundError = Exception  # type: ignore[assignment, misc]
+
+    try:
         return client.read_dataset(dataset_name=name)
-    except Exception:
+    except LangSmithNotFoundError:
         return client.create_dataset(dataset_name=name, description=description)
 
 
@@ -97,12 +133,33 @@ def _upload(
     dataset = _resolve_dataset(client, name, description)
     existing = list(client.list_examples(dataset_id=dataset.id, limit=1))
     if existing and not force:
+        # CR P11 — print(stderr) → structlog INFO 이벤트(spec AC6 ``eval.upload.skipped``
+        # 정합). stderr는 사용자 즉시 식별용으로 유지(터미널 가시성).
+        _log.info("eval.upload.skipped", dataset=name, reason="examples_exist_no_force")
         print(
             f"[skip] dataset {name!r} already has examples; use --force to append",
             file=sys.stderr,
         )
         return 0
+
+    if existing and force:
+        # CR P15 — ``--force``는 dedupe 없이 append만 함 → 기존 100건 + 신규 100건
+        # = 200건 dataset. 회귀 baseline 오염 위험. stderr WARNING + structlog event
+        # 둘 다 emit해 비대화형(CI) / 대화형(터미널) 양쪽에서 인지 가능.
+        _log.warning(
+            "eval.upload.force_append_no_dedupe",
+            dataset=name,
+            existing_examples=True,
+            warning="기존 examples 존재 — append만 수행, dedupe 없음(중복 row 위험)",
+        )
+        print(
+            f"[warn] --force: {name!r} already has examples — appending without dedupe "
+            f"(중복 row가 보드에 누적됩니다. 의도와 일치하는지 확인하세요)",
+            file=sys.stderr,
+        )
+
     client.create_examples(dataset_id=dataset.id, examples=examples)
+    _log.info("eval.upload.created", dataset=name, examples_count=len(examples))
     return len(examples)
 
 
@@ -114,7 +171,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="기존 dataset에 examples 존재해도 추가 append (중복 위험 — 기본 skip)",
+        help=(
+            "기존 dataset에 examples 존재해도 추가 append (dedupe 없음 — 중복 row "
+            "위험. 회귀 baseline 오염 가능. 기본 skip)"
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -127,6 +187,11 @@ def main(argv: list[str] | None = None) -> int:
     examples = _build_examples(rows)
 
     if args.dry_run:
+        _log.info(
+            "eval.upload.dry_run",
+            dataset=args.dataset_name,
+            examples_count=len(examples),
+        )
         print(
             f"[dry-run] would upload {len(examples)} examples to {args.dataset_name!r} "
             f"(description={args.description!r})"
@@ -136,7 +201,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[dry-run] sample example: {json.dumps(examples[0], ensure_ascii=False)}")
         return 0
 
-    if not os.environ.get("LANGSMITH_API_KEY"):
+    api_key = os.environ.get("LANGSMITH_API_KEY", "")
+    # CR P10 — 종전 ``not os.environ.get("LANGSMITH_API_KEY")``는 빈 문자열만 거름.
+    # whitespace-only 값(``"   "``)이 truthy → SDK가 401 cryptic fail.
+    if not api_key.strip():
         print(
             "LANGSMITH_API_KEY required — set in env before run",
             file=sys.stderr,

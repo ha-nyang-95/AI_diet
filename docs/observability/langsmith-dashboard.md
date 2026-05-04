@@ -72,15 +72,17 @@ hook이 LangSmith trace에서 정확히 동작하는지 시각 확인.
 1. `LANGCHAIN_TRACING_V2=true` + `LANGSMITH_API_KEY=...` 로컬 dev에서
    `POST /v1/analysis/stream` 호출(임의 식단 텍스트 + JWT).
 2. LangSmith 보드 → `balancenote-dev` 프로젝트 → 방금 업로드된 trace 클릭.
-3. `Inputs` 탭 — `raw_text` / `weight_kg` / `height_cm` / `allergies` /
-   `parsed_items` / `feedback` 필드 모두 `"***"` 표시 확인.
-4. `meal_id` / `final_fit_score` / `phase` / `node_errors` 등 비-PII 필드는
-   *원본 그대로* 노출됨을 확인.
+3. `Inputs` 탭 — `raw_text` / `meal_text` / `weight_kg` / `height_cm` / `allergies` /
+   `parsed_items` / `feedback_text` / `feedback.text` 필드 모두 `"***"` 표시 확인.
+4. `meal_id` / `final_fit_score` / `phase` / `node_errors` / `feedback.citations` /
+   `feedback.macros` / `feedback.fit_score` 등 비-PII 필드는 *원본 그대로* 노출됨을 확인
+   (CR DN-2 — `feedback.text` 자연어만 마스킹, citation/macro/fit_score는 영업 데모
+   가시성 보존).
 5. 하나라도 raw value가 노출되면 즉시 `tests/core/test_observability.py`
    회귀 추가 + ``_LANGSMITH_MASKED_KEYS`` 키 보강.
 
 대안 단위 테스트 — CI에서 자동 실행: `tests/core/test_observability.py:test_mask_run_inputs_*`
-(NFR-O2 키별 redact 가드 13건). PR 머지 차단 가드.
+(NFR-O2 키별 redact 가드 19건 + cycle/depth/tuple 가드). PR 머지 차단 가드.
 
 ## 4. API key 회전 절차
 
@@ -105,6 +107,6 @@ LangSmith API key 회전 SOP는 [docs/runbook/secret-rotation.md](../runbook/sec
 - [Source: prd.md#NFR-O4] — 영업 산출물 보드 링크
 - [Source: architecture.md line 232-242] — LangSmith 통합 결정 3
 - [Source: api/app/core/observability.py] — 마스킹 hook + Client init SOT
-- [Source: api/tests/core/test_observability.py] — NFR-O2 단위 회귀 가드 13건
+- [Source: api/tests/core/test_observability.py] — NFR-O2 단위 회귀 가드 19건 + cycle/depth/tuple 가드
 - [Source: api/tests/test_korean_foods_eval.py] — 한식 100건 회귀 평가 marker (`@pytest.mark.eval`)
 - [Source: scripts/upload_eval_dataset.py] — `balancenote-korean-foods-v1` 업로드 스크립트
