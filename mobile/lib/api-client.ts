@@ -1937,6 +1937,13 @@ export interface operations {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
+            /** @description polling rate limit 초과 (analysis.rate_limit.exceeded) */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description checkpointer 미가동 */
             503: {
                 headers: {
