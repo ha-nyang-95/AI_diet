@@ -435,7 +435,10 @@ async def generate_feedback(state: MealAnalysisState, *, deps: NodeDeps) -> dict
             "3-tuple 패턴을 포함하세요."
         )
         try:
-            regen_out, _, _ = await route_feedback(
+            # CR Gemini G4 — regen이 fallback LLM을 사용한 경우 final telemetry attribution
+            # 정확화 (이전 ``_, _, _``는 used_llm을 폐기 → primary가 죽고 Anthropic이
+            # 응답해도 log/FeedbackOutput에 ``gpt-4o-mini``가 박힘).
+            regen_out, used_llm, _ = await route_feedback(
                 system=system,
                 user=regen_user_citation,
                 cache_key=None,  # 재생성은 캐시 우회
@@ -466,7 +469,8 @@ async def generate_feedback(state: MealAnalysisState, *, deps: NodeDeps) -> dict
             "안전 워딩(안내/관리/도움이 될 수 있는/참고/권장)으로 다시 작성하세요."
         )
         try:
-            regen_out, _, _ = await route_feedback(
+            # CR Gemini G5 — regen used_llm 캡처 (fallback 발동 시 attribution 정확화).
+            regen_out, used_llm, _ = await route_feedback(
                 system=system,
                 user=regen_user_ad,
                 cache_key=None,
@@ -512,7 +516,8 @@ async def generate_feedback(state: MealAnalysisState, *, deps: NodeDeps) -> dict
             "두 섹션을 모두 포함해 다시 작성하세요."
         )
         try:
-            regen_out, _, _ = await route_feedback(
+            # CR Gemini G6 — regen used_llm 캡처 (fallback 발동 시 attribution 정확화).
+            regen_out, used_llm, _ = await route_feedback(
                 system=system,
                 user=regen_user_structure,
                 cache_key=None,

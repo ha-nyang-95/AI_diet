@@ -13,22 +13,44 @@ from app.core.config import settings
 # Story 3.6 anchor — LLM router/Anthropic adapter capture_exception 시 prompt/response/
 # raw_text 키가 extra/contexts에 leak될 가능성 차단. Story 8.4 polish가 정교화 — 본
 # 단계는 *anchor*만(메모리 [feedback_distinguish_ceremony_from_anchor] 정합).
+#
+# CR Gemini G1 — ``_MESSAGE_LEAK_PATTERN``이 catch하는 키와 정합. ``content``/``messages``
+# 가 structured ``extra``/``contexts`` dict에 들어와도 동일 마스킹 적용.
 _MASKED_KEYS: Final[frozenset[str]] = frozenset(
-    {"prompt", "response_text", "raw_text", "system", "user_prompt"}
+    {
+        "prompt",
+        "response_text",
+        "raw_text",
+        "system",
+        "user_prompt",
+        "content",
+        "messages",
+    }
 )
 _MASK_PLACEHOLDER: Final[str] = "***"
 
 # CR C2 — SDK BadRequestError 등의 message에 raw_text/prompt 본문이 echo되는
 # 패턴(`'content': "..."` / `"raw_text": "..."`)을 정규식으로 ``"***"`` 대체.
+#
+# CR Gemini G2 — 이전 ``(.*?)(\2)``는 escape된 따옴표(``\\"``) 발견 시 첫 closing quote
+# 에서 끊겨 partial leak 회귀. ``((?:(?!\2).|\\.)*)``는 escape sequence를 토큰으로 소비
+# 한 뒤 closing quote에 도달하므로 본문 전체 마스킹 보장.
 _MESSAGE_LEAK_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"(['\"](?:content|raw_text|prompt|response_text|system|user_prompt|messages)['\"]\s*[:=]\s*)"
-    r"(['\"])(.*?)(\2)",
+    r"(['\"])"  # Group 2: opening quote
+    r"((?:(?!\2).|\\.)*)"  # Group 3: 본문 — escape 문자 토큰 우선 소비
+    r"(\2)",  # Group 4: closing quote (== group 2)
     flags=re.DOTALL,
 )
 
 
 def _mask_dict(payload: dict[str, Any]) -> dict[str, Any]:
-    """dict 내부 ``_MASKED_KEYS`` value를 ``"***"``로 치환 (얕은 단계만 — anchor 가드)."""
+    """dict 내부 ``_MASKED_KEYS`` value를 ``"***"``로 치환 (anchor 가드).
+
+    CR Gemini G3 — list of dicts 처리 추가. Sentry event payload(`extra`/`contexts`/
+    frame `vars`)는 list of dict 구조를 흔히 포함 — 이전 구현은 list 안의 dict를 통과시켜
+    민감 키가 마스킹 우회되던 회귀.
+    """
     if not isinstance(payload, dict):
         return payload
     cleaned: dict[str, Any] = {}
@@ -37,6 +59,8 @@ def _mask_dict(payload: dict[str, Any]) -> dict[str, Any]:
             cleaned[key] = _MASK_PLACEHOLDER
         elif isinstance(value, dict):
             cleaned[key] = _mask_dict(value)
+        elif isinstance(value, list):
+            cleaned[key] = [_mask_dict(v) if isinstance(v, dict) else v for v in value]
         else:
             cleaned[key] = value
     return cleaned
