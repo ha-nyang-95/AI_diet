@@ -47,6 +47,7 @@ from app.core.exceptions import (
 )
 from app.core.logging import configure_logging
 from app.core.middleware import RequestIdMiddleware
+from app.core.observability import init_langsmith
 from app.core.sentry import init_sentry
 from app.graph.checkpointer import build_checkpointer, dispose_checkpointer
 from app.graph.deps import NodeDeps
@@ -83,6 +84,37 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     log = structlog.get_logger()
     log.info("app.startup", environment=settings.environment)
+
+    # Story 3.8 — LangSmith 외부 옵저버빌리티(NFR-O1). ``init_langsmith()`` 자체는
+    # graceful(``settings.langchain_tracing_v2 is False`` 또는 missing api_key 시
+    # ``None`` return) — 부팅 차단 X. 단, SDK 내부 unexpected ValueError 등을
+    # 대비해 Story 3.7 lifespan 패턴(독립 try/except + log.error)을 그대로 적용.
+    #
+    # CR DN-5 — init 실패 시 fail-closed 강제. ``init_langsmith()`` 예외 또는
+    # ``None`` return은 *마스킹 hook이 wired되지 않은 상태*다. 그러나 env
+    # ``LANGCHAIN_TRACING_V2=true``가 살아있으면 LangChain native tracer가
+    # *default unmasked* Client를 자체 생성해 raw PII를 LangSmith에 송신 →
+    # NFR-S5 우회. ``LANGCHAIN_TRACING_V2``를 ``"false"``로 강제 set해 native
+    # tracer 자체를 차단(fail-closed). prod env에서는 init이 정상 통과해야
+    # 하므로, 이 분기 발동은 incident 신호 — Sentry alert로 운영자가 즉시 인지.
+    import os as _os  # noqa: PLC0415
+
+    try:
+        _ls_client = init_langsmith()
+    except Exception as exc:  # noqa: BLE001
+        log.error("app.startup.langsmith_init_failed", error=str(exc))
+        _os.environ["LANGCHAIN_TRACING_V2"] = "false"
+        log.warning("app.startup.langsmith_tracing_force_disabled", reason="init_exception")
+    else:
+        if _ls_client is None and settings.langchain_tracing_v2:
+            # ``settings``는 ``True``인데 client가 ``None`` → wiring 부분 실패 또는
+            # config 모순(missing api_key). 어느 쪽이든 native tracer가 unmasked
+            # Client를 만들지 않도록 env 강제 차단.
+            _os.environ["LANGCHAIN_TRACING_V2"] = "false"
+            log.warning(
+                "app.startup.langsmith_tracing_force_disabled",
+                reason="client_unavailable",
+            )
 
     # 자원 init은 각각 독립 try/except — 한 자원 실패가 다른 자원·앱 부팅 자체를 막지 않음.
     try:

@@ -18,12 +18,25 @@ ConsentFactory = Callable[..., Awaitable[Consent]]
 
 
 def _payload(*, version: str | None = None) -> dict[str, str]:
-    v = version or CURRENT_VERSIONS["disclaimer"]
+    """기본 동의 4종 페이로드 생성 — 각 키는 ``CURRENT_VERSIONS``의 *per-doc* version.
+
+    Story 3.8 CR DN-1 — version SOT가 doc-key별 dict로 분리됐기 때문에 ``disclaimer``/
+    ``terms``는 baseline ``ko-2026-04-28``, ``privacy``/``sensitive_personal_info``는
+    ``ko-2026-05-04``로 서로 다르다. 단일 ``version`` override 인자는 *전체 mismatch*
+    테스트(version_mismatch_with_409)에만 사용 — 정상 흐름은 키별 SOT 정확 매핑.
+    """
+    if version is not None:
+        return {
+            "disclaimer_version": version,
+            "terms_version": version,
+            "privacy_version": version,
+            "sensitive_personal_info_version": version,
+        }
     return {
-        "disclaimer_version": v,
-        "terms_version": v,
-        "privacy_version": v,
-        "sensitive_personal_info_version": v,
+        "disclaimer_version": CURRENT_VERSIONS["disclaimer"],
+        "terms_version": CURRENT_VERSIONS["terms"],
+        "privacy_version": CURRENT_VERSIONS["privacy"],
+        "sensitive_personal_info_version": CURRENT_VERSIONS["sensitive_personal_info"],
     }
 
 
