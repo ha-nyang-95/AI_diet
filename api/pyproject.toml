@@ -14,7 +14,10 @@ dependencies = [
     # Story 3.3 — AsyncPostgresSaver API는 3.x에서 안정 (lock 3.0.5 정합). 외주 인수
     # readiness — 2.x는 deprecated 신호.
     "langgraph-checkpoint-postgres>=3.0",
-    "langsmith>=0.3",
+    # Story 3.8 — 0.7.31 보안 패치(GHSA-rr7j-v2q5-chgv: redaction pipeline `events`
+    # 배열 누락 — token-level streaming raw token leak 차단). 본 SDK는 LangSmith
+    # client(`Client.init`) + 마스킹 hook(`hide_inputs`/`hide_outputs`) 직접 의존.
+    "langsmith>=0.7.31",
     # --- DB / ORM ---
     "sqlalchemy[asyncio]>=2.0.49",
     "alembic>=1.14",

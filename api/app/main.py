@@ -47,6 +47,7 @@ from app.core.exceptions import (
 )
 from app.core.logging import configure_logging
 from app.core.middleware import RequestIdMiddleware
+from app.core.observability import init_langsmith
 from app.core.sentry import init_sentry
 from app.graph.checkpointer import build_checkpointer, dispose_checkpointer
 from app.graph.deps import NodeDeps
@@ -83,6 +84,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     log = structlog.get_logger()
     log.info("app.startup", environment=settings.environment)
+
+    # Story 3.8 — LangSmith 외부 옵저버빌리티(NFR-O1). ``init_langsmith()`` 자체는
+    # graceful(``settings.langchain_tracing_v2 is False`` 또는 missing api_key 시
+    # ``None`` return) — 부팅 차단 X. 단, SDK 내부 unexpected ValueError 등을
+    # 대비해 Story 3.7 lifespan 패턴(독립 try/except + log.error)을 그대로 적용.
+    try:
+        init_langsmith()
+    except Exception as exc:  # noqa: BLE001
+        log.error("app.startup.langsmith_init_failed", error=str(exc))
 
     # 자원 init은 각각 독립 try/except — 한 자원 실패가 다른 자원·앱 부팅 자체를 막지 않음.
     try:

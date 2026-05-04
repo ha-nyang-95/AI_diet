@@ -244,3 +244,103 @@ jobs:
               repo: context.repo.repo,
               body,
             });
+
+  # 8. langsmith-eval-regression (Story 3.8 AC8) -------------------------
+  # 한식 100건 회귀 평가 — *수동 트리거*(workflow_dispatch) 또는 PR 라벨
+  # `langsmith-eval` 매칭 시만 실행. Free tier 5K trace/month 보호 + 실 LLM 비용
+  # 마찰 회피(D3 정합). 머지 비차단(continue-on-error).
+  langsmith-eval-regression:
+    name: langsmith-eval-regression
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.pull_request.labels.*.name, 'langsmith-eval')
+    continue-on-error: true
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app
+          POSTGRES_DB: app
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U app -d app"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    defaults:
+      run:
+        working-directory: api
+    env:
+      DATABASE_URL: postgresql+asyncpg://app:app@localhost:5432/app
+      REDIS_URL: redis://localhost:6379/0
+      ENVIRONMENT: ci
+      LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
+      LANGSMITH_PROJECT: balancenote-ci-eval
+      LANGCHAIN_TRACING_V2: 'true'
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      RUN_EVAL_TESTS: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - name: Enable pgvector extension
+        run: |
+          PGPASSWORD=app psql -h localhost -U app -d app -c "CREATE EXTENSION IF NOT EXISTS vector;"
+      - name: Korean foods 100 eval (T3 KPI ≥ 90%)
+        id: eval
+        run: |
+          set +e
+          uv run pytest tests/test_korean_foods_eval.py -v 2>&1 | tee /tmp/eval.log
+          rc=$?
+          set -e
+          # 정확도 라인을 로그에서 추출 (T3 KPI 미달 fail 메시지의 `accuracy X.X%`).
+          accuracy=$(grep -oE 'accuracy [0-9.]+%' /tmp/eval.log | head -1 | grep -oE '[0-9.]+' || echo "")
+          {
+            echo "exit_code=$rc"
+            echo "accuracy=${accuracy:-unknown}"
+          } >> "$GITHUB_OUTPUT"
+      - name: Comment on PR (권장 — 머지 비차단)
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          # alembic-dry-run 패턴 정합 — env로 전달 + JS 본문에 보간하지 않음(injection 차단).
+          EVAL_RC: ${{ steps.eval.outputs.exit_code }}
+          EVAL_ACCURACY: ${{ steps.eval.outputs.accuracy }}
+        with:
+          script: |
+            const rc = process.env.EVAL_RC || '?';
+            const accuracy = process.env.EVAL_ACCURACY || 'unknown';
+            const passed = rc === '0';
+            const icon = passed ? '✅' : '⚠️';
+            const status = passed ? '통과' : '미달 (90% 권장 · 머지 비차단)';
+            const body = [
+              `### ${icon} LangSmith 회귀 평가 — 한식 100건 (T3 KPI 90%)`,
+              '',
+              `- 정확도: \`${accuracy}%\``,
+              `- 결과: ${status}`,
+              `- exit_code: \`${rc}\``,
+              '',
+              '> 본 평가는 `langsmith-eval` 라벨 트리거 옵션 — 머지를 차단하지 않습니다 (Story 3.8 AC8).',
+              '> 보드: [docs/observability/langsmith-dashboard.md](../blob/master/docs/observability/langsmith-dashboard.md)',
+            ].join('\n');
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body,
+            });
