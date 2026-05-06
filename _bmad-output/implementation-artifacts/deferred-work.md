@@ -2,6 +2,25 @@
 
 리뷰·구현 과정에서 식별되었으나 다음 스토리·시점으로 미룬 항목 모음.
 
+## Deferred from: code review of 4-1-알림-설정-푸시-권한 (2026-05-06)
+
+- **W1 — AC15 mobile ~12건 jest 단위 테스트**: spec(`push.test.ts` ~4 + `permissions.test.ts` ~4 + `PermissionDeniedView.test.tsx` ~2 + `api.ts` schema ~2)이 명시했으나 mobile baseline에 jest 인프라 부재. **결정 (2026-05-06, hwan)**: 옵션 (a) 채택 — Story 8.4 ACs에 *모바일 jest + RNTL 인프라 도입* AC를 명시 추가(epics.md §Story 8.4 amendment 적용). 본 defer는 Story 8.4가 정식 home — 12건 흡수 + Story 2.2 `useCameraPermission`/`useMediaLibraryPermission` 등 추가 hygiene scope 5건도 동시 도입해 회귀 baseline 확립. Story 8.4 시점에 본 W1은 closed.
+- **W2 — `register_push_token` TOCTOU race**: 두 UPDATE(`other-user.token=NULL` + `self.token=token`) 분리. 동시 등록 race 시 partial UNIQUE `ux_users_expo_push_token_active` 위반 → IntegrityError(데이터 손상 X — 안전망 작동, 사용자에 500 노출). Story 8.4 polish에서 SELECT FOR UPDATE row-lock 또는 IntegrityError catch + retry로 hardening. MVP <100 user 규모에서 발생 확률 극희박.
+- **W3 — `signOut` 중 `unregisterPushTokenAsync` race + 무한 대기**: 401 refresh 인터셉터와 logout flow 충돌, 슬로우 네트워크 시 로그아웃 무한 대기 가능. `Promise.race(timeout 3s)` 도입 권장.
+- **W4 — `(tabs)/_layout.tsx` 첫 prompt useEffect re-fire**: deps `[isReady, isAuthed, user?.profile_completed_at]` 갱신 시 effect 재실행. AsyncStorage flag가 1차 가드지만 getItem 실패 시 silent. 명시적 once-flag pattern로 hardening.
+- **W5 — `NotificationApiError._parseProblem` 단일-사용 Response.json()**: 204 DELETE 응답에서 throw 후 `{}` swallow. response.ok 체크 후에만 json() 호출하는 명시적 status 분기로 정정.
+- **W6 — `useNotificationPermission` AppState 미구독**: 사용자가 OS 설정 앱에서 권한 허용 후 복귀 시 notifications.tsx 권한 OFF 배너가 stale. Story 2.2 `useCameraPermission`도 동일 패턴 — 프로젝트 전반 hardening(AppState change → permission re-fetch).
+- **W7 — TimePicker UX**: 시 단독 탭 시 즉시 `handleTimeSelect` + modal close. 시·분 동시 선택 후 "확인" 패턴이 표준. mutation 실패 시 modal 그대로 남고 에러 표시 X — 사용자 무한 재탭 가능. spec에 명시는 없으나 UX hygiene.
+- **W8 — `getLastNotificationResponse` deprecated**: expo-notifications 55+에서 `useLastNotificationResponse` hook 권장(React 스케줄링 통합). 현재 함수는 stale snapshot 반환 가능. Story 4.2 cold-start deep link wire 시점에 마이그레이션.
+- **W9 — Tasks 7.5/8.4/9.3/11.6 dev device 통합 검증**: DS 스코프는 자동 게이트(tsc/lint/pytest)만, 실 디바이스 push token 발급/permission OEM Android Alert fallback 등은 QA 단계 책임. Story 8.4/QA 통합 시점에 EAS dev build로 검증.
+- **W10 — `push.ts:registerForPushNotificationsAsync`의 iOS `provisional` 분기 미명시**: `permissions.ts:_normalizeStatus`는 `provisional → granted` 매핑하나 `push.ts`는 raw `Notifications.PermissionStatus` 비교. provisional 사용자가 token 발급 단계 진입하지 못할 가능성. 통합 매핑.
+- **W11 — `_resolveProjectId` 빈 문자열 fallback**: `Constants.expoConfig?.extra?.eas?.projectId = ''` 시 `??` 사용으로 빈 문자열 통과 → `getExpoPushTokenAsync({projectId: ''})` warning. truthy 검증으로 정정.
+- **W12 — `getExpoPushTokenAsync` 빈 문자열 token edge**: SDK 극단 케이스(인증 회복 중 등)에서 빈 문자열 token 반환 가능. 백엔드 regex 거부 → 400. mobile에서 사전 가드.
+- **W13 — `registerForPushNotificationsAsync` granted+token=null 시 prompt flag set**: Expo Go / projectId 누락 사용자가 영구히 `has_push_token=false`로 묶임 → 향후 Story 4.2 cron skip. flag set 조건을 token 발급 성공으로 강화 + EAS dev build 사용자 retry path.
+- **W14 — `notifications.tsx` Switch toggle granted+token=null silent gap**: 사용자는 알림 ON으로 인지하나 backend token 미등록 → 푸시 영구 미수신. Alert 또는 `has_push_token` 기반 inline 안내.
+- **W15 — `updateMutation`/`registerMutation` rejection 표시**: Switch/TimePicker 실패 시 UI silent. `Alert.alert` 또는 toast로 에러 노티.
+- **W16 — `push.ts:_ensureAndroidChannel` 첫 실패 시 `_channelInitialized=true` 영구 set**: retry 영구 차단. 성공 시에만 set으로 정정.
+
 ## CLOSED (2026-05-05) — Story 3.9 에픽 3 후 polish 일괄 처리
 
 Story 3.9 (`_bmad-output/implementation-artifacts/3-9-에픽-3-후-polish.md`)에서 23건

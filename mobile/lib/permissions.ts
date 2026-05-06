@@ -18,6 +18,8 @@
  */
 
 import * as ImagePicker from 'expo-image-picker';
+import * as Notifications from 'expo-notifications';
+import { useCallback, useEffect, useState } from 'react';
 
 export type PermissionStatus = 'granted' | 'denied' | 'undetermined';
 
@@ -35,7 +37,11 @@ function _normalizeStatus(status: ImagePicker.PermissionStatus | string): Permis
   // limited 모드에서도 picker가 정상 동작(사용자가 허용한 사진 부분집합 노출). enum에는
   // LIMITED가 없어 string 비교(`'limited'`)로 처리. denied로 매핑하면 사용자가 "다시 요청"
   // 버튼만 보이고 picker는 영원히 사용 불가 → UX stuck. granted 매핑이 expo의 의도.
-  if (status === 'granted' || status === 'limited') return 'granted';
+  //
+  // Story 4.1 — iOS `'provisional'` 상태(조용한 알림 자동 허용)도 `'granted'`로 매핑
+  // (PRD M4 정합 — 권한 거부와 동치 X). expo-notifications status에서만 발생 (Android는
+  // `'provisional'` 미존재 — 통과).
+  if (status === 'granted' || status === 'limited' || status === 'provisional') return 'granted';
   if (status === 'denied') return 'denied';
   return 'undetermined';
 }
@@ -76,6 +82,61 @@ export function useMediaLibraryPermission(): PermissionHookResult {
     // P17 — permission이 null(hook 미해결 첫 frame)이면 status='undetermined' + canAskAgain=true.
     // 이 상태로 `request()` 호출 시 expo-image-picker가 내부적으로 첫 권한 fetch를 강제하므로
     // 안전(race window 0). 'undetermined' 매핑은 *첫 prompt 미진행 상태*와 동일 시맨틱.
+    status: permission == null ? 'undetermined' : _normalizeStatus(permission.status),
+    request,
+    canAskAgain: permission?.canAskAgain ?? true,
+  };
+}
+
+/**
+ * Story 4.1 — 알림 권한 hook. `expo-notifications`의 `getPermissionsAsync` /
+ * `requestPermissionsAsync` wrap.
+ *
+ * iOS 분기:
+ * - 첫 prompt에서 `requestPermissionsAsync({ ios: { allowAlert, allowBadge, allowSound } })`
+ *   호출 — critical alert 미요청 (App Store 정책 정합 PRD M6).
+ * - `'provisional'` 상태(조용한 알림 자동 허용)는 `_normalizeStatus`가 `'granted'`로 매핑.
+ * - 첫 prompt 후 거부 시 `canAskAgain=false` → `Linking.openSettings()`만 액션 가능.
+ *
+ * Android 분기:
+ * - API 33+ (POST_NOTIFICATIONS runtime permission) — 동일 흐름.
+ * - `'provisional'` 미존재 — 분기 무영향.
+ */
+export function useNotificationPermission(): PermissionHookResult {
+  const [permission, setPermission] = useState<Notifications.NotificationPermissionsStatus | null>(
+    null,
+  );
+
+  // 마운트 시 1회 status fetch. Story 2.2 패턴 (image-picker는 hook 자체가 fetch — 본
+  // hook은 expo-notifications의 raw API를 wrap이라 mount effect로 1차 fetch).
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const result = await Notifications.getPermissionsAsync();
+        if (!cancelled) setPermission(result);
+      } catch {
+        // graceful — null 상태 유지 (status='undetermined' 매핑).
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const request = useCallback(async (): Promise<PermissionStatus> => {
+    try {
+      const result = await Notifications.requestPermissionsAsync({
+        ios: { allowAlert: true, allowBadge: true, allowSound: true },
+      });
+      setPermission(result);
+      return _normalizeStatus(result.status);
+    } catch {
+      return 'undetermined';
+    }
+  }, []);
+
+  return {
     status: permission == null ? 'undetermined' : _normalizeStatus(permission.status),
     request,
     canAskAgain: permission?.canAskAgain ?? true,

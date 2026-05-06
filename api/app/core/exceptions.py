@@ -667,3 +667,40 @@ class LLMRouterExhaustedError(LLMRouterError):
     status: ClassVar[int] = 503
     code: ClassVar[str] = "llm_router.exhausted"
     title: ClassVar[str] = "LLM Router Exhausted"
+
+
+# --- Notification 계층 (Story 4.1 — 알림 설정 + 푸시 토큰) ---
+
+
+class NotificationError(BalanceNoteError):
+    """Story 4.1 알림 도메인 예외 base. 직접 raise 회피 — 서브클래스만 사용."""
+
+    status: ClassVar[int] = 400
+    code: ClassVar[str] = "notification.error"
+    title: ClassVar[str] = "Notification Error"
+
+
+class NotificationTimeInvalidFormatError(NotificationError):
+    """``notification_time`` 형식 위반 — Pydantic ``field_validator``의 1차 게이트(``HH:MM``
+    24시간제 regex). ``25:00`` 또는 ``13:00 PM`` 같은 입력 거부.
+
+    DB CHECK ``ck_users_notification_time_kst_format``이 2차 게이트(분 단위 정렬), 본
+    예외는 1차(format).
+    """
+
+    status: ClassVar[int] = 400
+    code: ClassVar[str] = "notification.time.invalid_format"
+    title: ClassVar[str] = "Notification time invalid format"
+
+
+class NotificationTokenInvalidError(NotificationError):
+    """``expo_push_token`` 형식 위반 — Expo 표준 prefix(``ExponentPushToken[…]`` 또는
+    ``ExpoPushToken[…]``)가 아닌 token 거부.
+
+    Pydantic ``field_validator`` 1차 게이트. 형식 통과 후의 *서버 발송 실패*(token revoked
+    by Expo)는 Story 4.2 cron 책임 — 본 스토리는 *형식 검증*만.
+    """
+
+    status: ClassVar[int] = 400
+    code: ClassVar[str] = "notification.token.invalid"
+    title: ClassVar[str] = "Notification token invalid"
