@@ -539,7 +539,9 @@ export interface paths {
          * @description 7일 주간 리포트 — meals + meal_analyses LEFT JOIN aggregation.
          *
          *     ``from_date``/``to_date`` 모두 필수(default X) — 클라이언트가 KST 7일 윈도우를
-         *     명시 결정. (to-from)>30일 또는 from>to는 ``reports.invalid_date_range``(400).
+         *     명시 결정. 날짜 범위 검증은 ``service/report_service.py``가 SOT —
+         *     ``WeeklyReportInvalidDateRangeError``를 raise해 글로벌 핸들러가
+         *     ``reports.invalid_date_range``(400) 응답 생성.
          */
         get: operations["get_weekly_report_endpoint_v1_reports_weekly_get"];
         put?: never;
@@ -2394,7 +2396,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description 주간 리포트 — 7일 (또는 일반화 0..30일) 매크로/칼로리/단백질/알레르기 노출 */
+            /** @description 주간 리포트 — 7일 매크로/칼로리/단백질/알레르기 노출 */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -2403,7 +2405,7 @@ export interface operations {
                     "application/json": components["schemas"]["WeeklyReportResponse"];
                 };
             };
-            /** @description from_date > to_date 또는 (to-from) > 30일 (`reports.invalid_date_range`) */
+            /** @description 잘못된 날짜 범위 (`reports.invalid_date_range`) */
             400: {
                 headers: {
                     [name: string]: unknown;
