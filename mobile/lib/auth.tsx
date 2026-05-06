@@ -6,12 +6,14 @@
  * - 401 시 refresh 1회만 시도 (인터셉터 무한 루프 차단).
  * - refresh 실패 → 로컬 토큰 클리어 + /(auth)/login 라우팅 트리거.
  */
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { QueryClient } from '@tanstack/react-query';
 import { router } from 'expo-router';
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 
 import { clearOnboardingState } from '@/features/onboarding/tutorialState';
 
+import { unregisterPushTokenAsync } from './push';
 import {
   clearAuth,
   getAccessToken,
@@ -19,6 +21,10 @@ import {
   setAccessToken,
   setRefreshToken,
 } from './secure-store';
+
+// Story 4.1 AC13 — signOut 시 first-time prompt flag도 clear (다음 사용자 로그인 시
+// 깨끗한 시작). `(tabs)/_layout.tsx`의 PUSH_PROMPTED_STORAGE_KEY와 동일 SOT.
+const PUSH_PROMPTED_STORAGE_KEY = '@balancenote/push_prompted';
 
 export interface AuthUser {
   id: string;
@@ -257,6 +263,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       },
       async signOut() {
         const [access, refresh] = await Promise.all([getAccessToken(), getRefreshToken()]);
+
+        // Story 4.1 AC13 — push token revoke (DELETE /v1/notifications/devices) +
+        // AsyncStorage clear. graceful: 백엔드 실패해도 SecureStore clear는 진행
+        // (사용자 logout 의도 보존). 사용자 swap 회귀 차단 1차 가드(2차는 백엔드
+        // register_push_token의 기존 row token NULL set).
+        try {
+          await unregisterPushTokenAsync();
+        } catch {
+          // ignore — 로컬 클리어는 계속 진행.
+        }
+
         if (refresh) {
           try {
             // spec AC5: 모바일은 Authorization 헤더 + body의 refresh_token 둘 다 동봉.
@@ -282,6 +299,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           await clearOnboardingState();
         } catch {
           // ignore — signOut의 후속 라우팅이 절대 차단되면 안 됨.
+        }
+        // Story 4.1 AC13 — push prompted flag clear (다음 사용자 깨끗한 시작).
+        try {
+          await AsyncStorage.removeItem(PUSH_PROMPTED_STORAGE_KEY);
+        } catch {
+          // ignore.
         }
         setUser(null);
         setConsentStatusState(null);

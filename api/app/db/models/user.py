@@ -3,19 +3,25 @@
 Story 1.5에서 건강 프로필 7컬럼(나이/체중/신장/활동/health_goal/22종 알레르기/
 ``profile_completed_at``) + Postgres ENUM 2종(``users_activity_level_enum`` /
 ``users_health_goal_enum``) + DB CHECK 제약 4건 추가.
+
+Story 4.1에서 알림 설정 4컬럼(``notifications_enabled`` / ``notification_time`` /
+``notification_timezone`` / ``expo_push_token``) + CHECK 제약 1건
+(``ck_users_notification_time_kst_format``) 추가. partial UNIQUE index
+``ux_users_expo_push_token_active``는 alembic 0013에서 생성 — ORM ``Index`` 미선언
+(부분 index는 ORM 레벨에서 metadata 동기화 X — alembic SOT만 유지).
 """
 
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, time
 from decimal import Decimal
 
 from sqlalchemy import ARRAY, CheckConstraint, Index, Integer, Numeric, String, Text, text
 from sqlalchemy.dialects.postgresql import ENUM as PG_ENUM
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy.types import Boolean, DateTime
+from sqlalchemy.types import Boolean, DateTime, Time
 
 from app.db.base import Base
 from app.domain.allergens import KOREAN_22_ALLERGENS
@@ -104,6 +110,25 @@ class User(Base):
         DateTime(timezone=True), nullable=True
     )
 
+    # Story 4.1 — 알림 설정 4 컬럼. alembic 0013과 동일 SOT(server_default + nullable).
+    # 변경 시 새 alembic revision 추가로 drop+recreate (Story 1.5 R8 SOP 정합).
+    notifications_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    # ``timezone=False`` — TZ-naive ``datetime.time``. TZ는 ``notification_timezone`` 별 SOT.
+    notification_time: Mapped[time] = mapped_column(
+        Time(timezone=False),
+        nullable=False,
+        server_default=text("'20:00:00'"),
+    )
+    notification_timezone: Mapped[str] = mapped_column(
+        String, nullable=False, server_default=text("'Asia/Seoul'")
+    )
+    # ``ExponentPushToken[xxx]`` 형식 — 라우터 Pydantic field_validator가 검증. partial
+    # UNIQUE index ``ux_users_expo_push_token_active``(alembic 0013 SOT)가 동일 device의
+    # 사용자 swap 회귀 차단.
+    expo_push_token: Mapped[str | None] = mapped_column(String, nullable=True)
+
     __table_args__ = (
         CheckConstraint("role IN ('user','admin')", name="ck_users_role"),
         # Story 1.5 — 건강 프로필 도메인 CHECK 제약 4건.
@@ -122,6 +147,13 @@ class User(Base):
         CheckConstraint(
             _ALLERGIES_CHECK_SQL,
             name="ck_users_allergies_domain",
+        ),
+        # Story 4.1 — 분 단위 정렬 강제(초·분초 자유 입력 차단, APScheduler 일별 잡 안정성).
+        # alembic 0013 SQL과 동일 SOT (regex가 SQLAlchemy text parser와 충돌 — EXTRACT
+        # 기반 표현으로 의미 동등 변환. 0013 docstring deviation 메모 참조).
+        CheckConstraint(
+            "notification_time IS NULL OR EXTRACT(SECOND FROM notification_time) = 0",
+            name="ck_users_notification_time_kst_format",
         ),
         # admin 사용자는 소수 — partial index로 lookup 비용 최소화 (Story 7.1+에서 활용).
         Index(

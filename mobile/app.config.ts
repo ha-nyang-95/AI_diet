@@ -82,6 +82,16 @@ export default ({ config }: ConfigContext): ExpoConfig => {
           microphonePermission: false,
         },
       ],
+      // Story 4.1 — 알림 푸시 plugin. icon은 Story 8.6 영업 자료 시점에 디자인 (현
+      // 시점 placeholder 회피 — Expo가 default 아이콘 사용). color만 brand primary로
+      // 지정. iOS는 별도 plist override 무필요(Expo가 자동 처리). Android channel
+      // SOT는 ``mobile/lib/push.ts`` ``setNotificationChannelAsync('default', ...)``.
+      [
+        "expo-notifications",
+        {
+          color: "#0a7ea4",
+        },
+      ],
     ],
     experiments: {
       typedRoutes: true,

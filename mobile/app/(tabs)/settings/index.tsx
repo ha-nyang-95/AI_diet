@@ -22,6 +22,10 @@ export default function SettingsIndex() {
   const navigateTo = (path: string) => router.push(path as PushTarget);
   const items: MenuItem[] = [
     {
+      label: '알림',
+      onPress: () => navigateTo('/(tabs)/settings/notifications'),
+    },
+    {
       label: '디스클레이머',
       onPress: () => navigateTo('/(tabs)/settings/disclaimer'),
     },

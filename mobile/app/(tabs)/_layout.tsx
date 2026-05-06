@@ -1,7 +1,17 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
 import { Redirect, Tabs, usePathname } from 'expo-router';
+import { useEffect } from 'react';
 
+import {
+  useRegisterPushTokenMutation,
+  useUpdateNotificationSettingsMutation,
+} from '@/features/notifications/api';
 import { useAuth } from '@/lib/auth';
+import { registerForPushNotificationsAsync } from '@/lib/push';
+
+// Story 4.1 AC12 — first-time prompt flag (Story 1.6 `tutorial-seen` 패턴 정합).
+const PUSH_PROMPTED_STORAGE_KEY = '@balancenote/push_prompted';
 
 /**
  * (tabs) 그룹은 보호 라우트 — 인증 + 동의 + 프로필 게이트 4단계 통과 시에만 진입.
@@ -25,6 +35,51 @@ import { useAuth } from '@/lib/auth';
 export default function TabsLayout() {
   const { isAuthed, isReady, consentStatus, user } = useAuth();
   const pathname = usePathname();
+  const registerPushToken = useRegisterPushTokenMutation();
+  const updateSettings = useUpdateNotificationSettingsMutation();
+
+  // Story 4.1 AC12 — 4 가드 모두 통과(profile_completed_at 존재) + AsyncStorage flag
+  // absent일 때만 1회 push 권한 prompt. 거부한 사용자에게 매 진입마다 prompt 회피
+  // (iOS App Store 정책 + UX 표준).
+  useEffect(() => {
+    if (!isReady || !isAuthed) return;
+    if (!user?.profile_completed_at) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const flag = await AsyncStorage.getItem(PUSH_PROMPTED_STORAGE_KEY);
+        if (flag) return; // 이미 prompt 1회 진행 — skip.
+        const { status, token } = await registerForPushNotificationsAsync();
+        if (cancelled) return;
+        // 결과 무관 flag set — denied 사용자에게도 매 진입마다 재 prompt 차단.
+        try {
+          await AsyncStorage.setItem(PUSH_PROMPTED_STORAGE_KEY, '1');
+        } catch {
+          // graceful — flag 저장 실패해도 재 prompt만 가능, 기능 차단 X.
+        }
+        if (status === 'granted' && token) {
+          // 자동 등록 + setting ON 갱신 (settings에서 사용자가 즉시 OFF 가능).
+          try {
+            await registerPushToken.mutateAsync({
+              expo_push_token: token,
+              platform: 'ios', // Story 8.4 polish — Platform.OS 분기.
+            });
+            await updateSettings.mutateAsync({ notifications_enabled: true });
+          } catch {
+            // graceful — UI silent (사용자가 알림 설정 화면에서 회복 가능).
+          }
+        }
+        // denied — UI silent. 사용자가 *알림 설정* 화면 진입 시 *"다시 요청"* 또는
+        // *"설정 열기"*로 회복 가능 (notifications.tsx 권한 OFF 배너).
+      } catch {
+        // graceful — first-time prompt 실패가 화면 mount를 막지 않음.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isReady, isAuthed, user?.profile_completed_at]);
 
   if (!isReady) return null;
   if (!isAuthed) {

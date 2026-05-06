@@ -158,6 +158,11 @@ CSRF 추가 가드 — httpOnly 쿠키 + SameSite=Lax는 1차 방어, Cloudflare
 
 분기 1회(=3개월) 운영자 작업. 별도 문서: [`cloudflare-ip-refresh.md`](./cloudflare-ip-refresh.md).
 
+### 5.1 Push 알림 dev SOP (Story 4.1)
+
+EAS dev build / projectId / FCM v1 / iOS aps-environment / 권한 거부 회복 절차:
+[`push-notifications-dev.md`](./push-notifications-dev.md).
+
 ---
 
 ## 6. 결정 SOT
