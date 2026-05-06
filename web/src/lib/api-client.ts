@@ -467,6 +467,66 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/notifications/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Notification Settings
+         * @description 자기 정보 조회 — 인증만 (동의 게이트 X, PIPA Art.35 정합).
+         */
+        get: operations["get_notification_settings_v1_notifications_settings_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Patch Notification Settings
+         * @description partial PATCH — `notifications_enabled` 단독, `notification_time` 단독, 둘 다 모두 200.
+         *
+         *     *Why ``require_basic_consents``*: 작성 경로 — Story 1.5 ``submit_health_profile`` 정합.
+         *
+         *     형식 검증 2단: (1) Pydantic 1차 type 가드(str | None) → (2) 라우터 regex 검증
+         *     ``_NOTIFICATION_TIME_WIRE_RE`` → ``NotificationTimeInvalidFormatError`` raise(`code=
+         *     notification.time.invalid_format`). DB CHECK ``ck_users_notification_time_kst_format``
+         *     은 3차 방어선(seconds=0 강제, ORM SOT).
+         */
+        patch: operations["patch_notification_settings_v1_notifications_settings_patch"];
+        trace?: never;
+    };
+    "/v1/notifications/devices": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Register Device
+         * @description token 등록 — *사용자 swap* atomic (notification_service.register_push_token 정합).
+         *
+         *     형식 검증: Pydantic type 가드 후 라우터에서 Expo regex 검증 →
+         *     ``NotificationTokenInvalidError`` raise(`code=notification.token.invalid`).
+         */
+        post: operations["register_device_v1_notifications_devices_post"];
+        /**
+         * Revoke Device
+         * @description token 해제 — 멱등 (이미 NULL이어도 204).
+         *
+         *     *Why*: 모바일 logout flow(Story 4.1 AC13) / 권한 거부 회복 / 명시 토큰 해제.
+         */
+        delete: operations["revoke_device_v1_notifications_devices_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/healthz": {
         parameters: {
             query?: never;
@@ -947,6 +1007,36 @@ export interface components {
             parsed_items?: components["schemas"]["ParsedMealItem"][] | null;
         };
         /**
+         * NotificationSettingsResponse
+         * @description 4 필드 + ``has_push_token`` boolean(token 노출 X — privacy 보호).
+         */
+        NotificationSettingsResponse: {
+            /** Notifications Enabled */
+            notifications_enabled: boolean;
+            /** Notification Time */
+            notification_time: string;
+            /** Notification Timezone */
+            notification_timezone: string;
+            /** Has Push Token */
+            has_push_token: boolean;
+        };
+        /**
+         * NotificationSettingsUpdate
+         * @description partial PATCH body — 두 필드 모두 optional.
+         *
+         *     형식 검증은 라우터(``patch_notification_settings``)에서 ``NotificationTimeInvalidFormatError``
+         *     raise — Pydantic 1차 게이트는 *type 가드*에 한정. 이렇게 분리하는 이유: Pydantic
+         *     field_validator의 ValueError는 글로벌 ``RequestValidationError`` 핸들러에서 ``code=
+         *     validation.error``로 평탄화되어 spec 카탈로그(``notification.time.invalid_format``)
+         *     노출이 불가능하기 때문.
+         */
+        NotificationSettingsUpdate: {
+            /** Notifications Enabled */
+            notifications_enabled?: boolean | null;
+            /** Notification Time */
+            notification_time?: string | null;
+        };
+        /**
          * ParsedMealItem
          * @description OCR Vision 추출 단일 항목.
          *
@@ -967,6 +1057,23 @@ export interface components {
             quantity: string;
             /** Confidence */
             confidence: number;
+        };
+        /**
+         * PushTokenRegisterRequest
+         * @description device 등록 body — token + platform.
+         *
+         *     ``expo_push_token`` 형식 검증은 라우터(``register_device``)에서
+         *     ``NotificationTokenInvalidError`` raise(``NotificationSettingsUpdate``와 동일 사유 —
+         *     typed code 카탈로그 노출).
+         */
+        PushTokenRegisterRequest: {
+            /** Expo Push Token */
+            expo_push_token: string;
+            /**
+             * Platform
+             * @enum {string}
+             */
+            platform: "ios" | "android" | "web";
         };
         /** RefreshRequest */
         RefreshRequest: {
@@ -2016,6 +2123,146 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    get_notification_settings_v1_notifications_settings_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                Authorization?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                bn_access?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationSettingsResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    patch_notification_settings_v1_notifications_settings_patch: {
+        parameters: {
+            query?: never;
+            header?: {
+                Authorization?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                bn_access?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NotificationSettingsUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationSettingsResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    register_device_v1_notifications_devices_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                Authorization?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                bn_access?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PushTokenRegisterRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: boolean;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    revoke_device_v1_notifications_devices_delete: {
+        parameters: {
+            query?: never;
+            header?: {
+                Authorization?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                bn_access?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
             };
         };
     };
