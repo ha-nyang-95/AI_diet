@@ -75,8 +75,9 @@ def _is_trusted_proxy_ip(client_host: str | None) -> bool:
     """``client_host``가 신뢰 proxy 범위(Cloudflare CIDR 또는 사설/loopback)인지.
 
     Railway 내부 routing은 사설 IP(10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)로
-    forwarding되므로 ``ip.is_private``로 자동 trust. ``ip.is_loopback``은 dev/test
-    (uvicorn 127.0.0.1) 정합. ``ip.is_link_local``은 IPv6 fe80::/10 시 신뢰.
+    forwarding되므로 ``ip.is_private``로 자동 trust(IPv6 link-local fe80::/10도
+    ``is_private``가 IANA 특수 등기 정합으로 포함). ``ip.is_loopback``은 dev/test
+    (uvicorn 127.0.0.1) 정합.
     """
     if not client_host:
         return False
@@ -84,7 +85,7 @@ def _is_trusted_proxy_ip(client_host: str | None) -> bool:
         ip = ipaddress.ip_address(client_host)
     except ValueError:
         return False
-    if ip.is_private or ip.is_loopback or ip.is_link_local:
+    if ip.is_private or ip.is_loopback:
         return True
     return any(ip in network for network in _CLOUDFLARE_NETWORKS)
 
@@ -113,21 +114,19 @@ def get_real_client_ip(request: Request) -> str:
     """
     raw_client_host = request.client.host if request.client else None
 
-    # CF-Connecting-IP는 Cloudflare가 첨부 — 신뢰 proxy를 통하지 않은 raw 클라이언트가
-    # 자체 첨부했을 가능성도 있으나, prod 토폴로지(Cloudflare 강제 in-front)에서는
-    # CF가 항상 덮어쓴다(Cloudflare WAF rule이 보장). dev/test 환경은
-    # ``init_trusted_proxies``가 wire되지 않으므로 raw fallback이 자연스럽게 우선.
-    cf_connecting = request.headers.get("CF-Connecting-IP") or request.headers.get(
-        "Cf-Connecting-Ip"
-    )
-    if cf_connecting:
-        normalized = _normalize_ip(cf_connecting)
-        if normalized is not None:
-            return normalized
-        # malformed CF-Connecting-IP — 다음 헤더로 fallthrough.
-
-    # X-Forwarded-For는 client spoofing 가능 — 신뢰 proxy를 통과했을 때만 trust.
+    # CR P1 (2026-05-06) — CF-Connecting-IP는 Cloudflare proxy가 첨부하지만 *raw 클라이언트
+    # 가 직접 첨부*한 spoofing 가능성이 있다. 따라서 ``_is_trusted_proxy_ip(raw_client_host)``
+    # 통과 시(=요청이 Cloudflare/Railway 내부 proxy 경유)에만 신뢰. Railway origin URL이
+    # 직접 노출되는 경우(WAF bypass)에도 PIPA audit IP / rate-limit 정확성 보장.
     if _is_trusted_proxy_ip(raw_client_host):
+        cf_connecting = request.headers.get("CF-Connecting-IP")
+        if cf_connecting:
+            normalized = _normalize_ip(cf_connecting)
+            if normalized is not None:
+                return normalized
+            # malformed CF-Connecting-IP — 다음 헤더로 fallthrough.
+
+        # X-Forwarded-For는 client spoofing 가능 — 신뢰 proxy를 통과했을 때만 trust.
         xff = request.headers.get("X-Forwarded-For")
         if xff:
             first_ip = xff.split(",")[0].strip()

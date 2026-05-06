@@ -201,3 +201,30 @@ def test_public_ip_not_trusted() -> None:
     """8.8.8.8 (Google DNS) 같은 공인 non-Cloudflare IP는 trust 거부."""
     assert _is_trusted_proxy_ip("8.8.8.8") is False
     assert _is_trusted_proxy_ip("1.1.1.1") is False  # Cloudflare DNS는 *서비스* IP — range 외
+
+
+# --- CR P1 (2026-05-06) — CF-Connecting-IP source 검증 ---------------------
+
+
+def test_cf_connecting_ip_rejected_when_origin_not_trusted() -> None:
+    """CR P1 — Railway origin URL 직접 호출 시 CF-Connecting-IP spoofing 거부.
+
+    공인 IP(non-Cloudflare, non-private)에서 CF-Connecting-IP를 첨부해도 trust 거부 →
+    raw client.host 사용. WAF bypass 공격자가 PIPA audit / rate-limit IP를 변조할 수
+    없도록 source 검증.
+    """
+    req = _FakeRequest.make(
+        client_host="8.8.8.8",  # 공인 IP, non-Cloudflare — proxy 아님
+        cf_connecting_ip="203.0.113.42",  # 첨부된 CF 헤더는 spoofing
+        x_forwarded_for="1.2.3.4",
+    )
+    assert get_real_client_ip(req) == "8.8.8.8"  # type: ignore[arg-type]
+
+
+def test_ipv6_link_local_trusted_via_is_private() -> None:
+    """IPv6 link-local(fe80::/10)은 IANA 특수 등기상 private — ``is_private``로 trust.
+
+    Edge-case 검토 결과 ``is_link_local``을 별도 제거할 이유 없음(``is_private``가
+    동등 의미 포함, 명시적 제거 시 IPv6 SLAAC 내부 routing 깨짐).
+    """
+    assert _is_trusted_proxy_ip("fe80::1") is True

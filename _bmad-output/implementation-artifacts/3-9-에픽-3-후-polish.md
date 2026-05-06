@@ -1,6 +1,6 @@
 # Story 3.9: 에픽 3 후 polish — 결정 unblock 일괄 적용 + Epic 3 잔여 cleanup
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -494,3 +494,49 @@ claude-opus-4-7[1m] (Amelia / bmad-dev-story workflow, 2026-05-05 ~ 2026-05-06).
 | 2026-05-05 | Task I — MealMacros le=10000 + MealCard layout fix + buster SOP + GET /v1/meals/{meal_id} + useMealQuery (AC17-20) | Amelia |
 | 2026-05-06 | Task J — 통합 검증 824 passed/11 skipped/0 failed + coverage 84.92% + ruff/mypy/tsc 0 + Story 3.3-3.8 회귀 0건 | Amelia |
 | 2026-05-06 | deferred-work.md Story 3.9 CLOSED 섹션 + sprint-status `review` + Story Status `review` | Amelia |
+| 2026-05-06 | CR 3-layer adversarial: Blind 21 + Edge 23 + Auditor 14 → 24 patch + 2 defer + 17 dismiss + 3 decision auto-resolved | Amelia (bmad-code-review) |
+| 2026-05-06 | CR 패치 24건 적용 + 신규 테스트 3건(P1 spoof reject / P4 link-local 정합 / P8 negative ttl_days) + pytest 827/11/0 + coverage 84.59% + ruff/mypy/tsc 0 + 회귀 0건 + Story Status review → done + sprint-status sync | Amelia |
+
+### Review Findings (2026-05-06 — CR 3-layer adversarial)
+
+3-layer adversarial CR(Blind Hunter / Edge Case Hunter / Acceptance Auditor) 67 raw findings → 24 patch + 2 defer + 17 dismiss + 3 decision auto-resolved.
+
+#### Decision-needed (auto-resolved per auto-mode)
+
+- [x] [Review][Decision] AC11 — `parse_meal` 결정적 노드 wrap 누락 — *DISMISS*: spec literal은 3노드(`parse_meal`/`evaluate_retrieval_quality`/`fetch_user_profile`)이나 `parse_meal`은 LLM fallback 분기가 있어 retry 의미 있음. impl 2 노드 선택 defensible. dev 정합.
+- [x] [Review][Decision] AC8 — `DB_GRP_CM_GROUPS` 양 그룹 parallel fetch 미호출 — *DISMISS*: dev notes의 "엔드포인트 미지정 시 양 그룹 통합 응답" 가정 + AC9 외식 50종 CSV 수동 보강으로 P 그룹 gap 보완. constants는 SOT 회귀 가드용.
+- [x] [Review][Decision] deferred-work.md 대량 삭제 — *DISMISS*: bulk doc cleanup 저위험. 별도 cleanup PR 필요 시 후속 작업.
+
+#### Patch (24)
+
+- [x] [Review][Patch] CF-Connecting-IP source 미검증 spoofing 차단 [api/app/core/proxy.py:120-126] — `_is_trusted_proxy_ip(raw_client_host)` 통과 시에만 trust
+- [x] [Review][Patch] Vision cost cap TOCTOU race — INCR-first 후 비교 [api/app/adapters/openai_adapter.py:421-475]
+- [x] [Review][Patch] aresume sanitize layer no-op 수정 + parsed_items propagate [api/app/services/analysis_service.py:115-141]
+- [x] [Review][Patch] `_is_trusted_proxy_ip` is_link_local 검토 — *반려* (IPv6 fe80::/10은 IANA 특수 등기상 ``is_private`` 정합 — 별도 제거 시 SLAAC 깨짐, 기존 동작 유지) [api/app/core/proxy.py:87]
+- [x] [Review][Patch] meals_images model=parsed.model_used [api/app/api/v1/meals_images.py:257]
+- [x] [Review][Patch] aresume `clarified` isinstance str 검증 [api/app/services/analysis_service.py:120-121]
+- [x] [Review][Patch] cleanup script: exception 시 "completed rows_updated=0" log 제거 [scripts/cleanup_idempotency_keys.py:60-69]
+- [x] [Review][Patch] cleanup script: ttl_days <= 0 ValueError 가드 [scripts/cleanup_idempotency_keys.py:38-53]
+- [x] [Review][Patch] mobile fetchMealById encodeURIComponent [mobile/features/meals/api.ts]
+- [x] [Review][Patch] mobile useMealQuery: meal_id 빈 문자열 enabled 가드 [mobile/features/meals/api.ts]
+- [x] [Review][Patch] `_call_vision_fallback` @retry decorator 추가 [api/app/adapters/openai_adapter.py:350-378]
+- [x] [Review][Patch] `parse_meal_image` today_str 1회 계산 — read+incr 동기화 [api/app/adapters/openai_adapter.py:265-303]
+- [x] [Review][Patch] `_redis_fixed_window_incr` ip 부재 시 skip [api/app/api/v1/analysis.py:155]
+- [x] [Review][Patch] cache deserialize fail 시 redis.delete 호출 [api/app/adapters/openai_adapter.py:308-330]
+- [x] [Review][Patch] `X-Consent-Update-Available` privacy/sensitive_personal_info 중복 제거 [api/app/api/deps.py:140-180]
+- [x] [Review][Patch] `init_trusted_proxies` dead `app.state` 정리 [api/app/core/proxy.py:145-157]
+- [x] [Review][Patch] aresume `_AURESUME_*` frozenset module-level [api/app/services/analysis_service.py:114-115]
+- [x] [Review][Patch] deployment.md WAF Rule 1 모바일 차단 회피 [docs/runbook/deployment.md]
+- [x] [Review][Patch] MealMacros legacy data graceful read fallback [api/app/api/v1/meals.py:_meal_to_response 경로]
+- [x] [Review][Patch] `test_no_op_on_already_null_keys` vacuous assertion 강화 [api/tests/scripts/test_cleanup_idempotency_keys.py]
+- [x] [Review][Patch] `test_graceful_db_failure_logs_and_raises` log assertion 추가 [api/tests/scripts/test_cleanup_idempotency_keys.py]
+- [x] [Review][Patch] deferred-work.md CLOSED 16 AC → 20 AC typo 수정 [_bmad-output/implementation-artifacts/deferred-work.md]
+- [x] [Review][Patch] `_increment_daily_cost` EXPIRE NX → Redis 7.0 요구사항 코멘트 또는 nx 제거 [api/app/adapters/openai_adapter.py:291-305]
+- [x] [Review][Patch] `test_vision_kst_midnight_resets_counter` reset 동작 직접 검증 [api/tests/test_openai_adapter.py]
+
+#### Defer (2)
+
+- [x] [Review][Defer] AC12 — `.github/workflows/ci.yml` `langsmith-eval-regression` job T5 KPI 통합 — deferred (LangSmith ops 시점 wiring)
+- [x] [Review][Defer] 403 stale doc detail logging — deferred (operator triage UX, 향후 반영)
+
+

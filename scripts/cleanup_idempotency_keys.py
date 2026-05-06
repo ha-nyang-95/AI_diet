@@ -39,7 +39,13 @@ async def cleanup_idempotency_keys(*, ttl_days: int = _TTL_DAYS) -> int:
     """``meals.idempotency_key`` TTL 경과 row의 키를 NULL로 clear.
 
     Returns: ``rows_updated`` 카운트 (RowCountResult.rowcount).
+
+    CR P8 (2026-05-06) — ``ttl_days <= 0`` 시 ``ValueError``. 음수/0 입력은 NOW() -
+    음수 = 미래 시각이 되어 *모든* row의 키를 NULL로 만들어 30일 보호 자체를 깨뜨리므로
+    명시적 거부.
     """
+    if ttl_days <= 0:
+        raise ValueError(f"ttl_days must be positive (got {ttl_days})")
     engine = create_async_engine(settings.database_url, pool_pre_ping=True)
     try:
         async with engine.begin() as conn:
@@ -59,13 +65,14 @@ async def cleanup_idempotency_keys(*, ttl_days: int = _TTL_DAYS) -> int:
             )
             return rows
     except Exception as exc:  # noqa: BLE001 — graceful — cron continue-on-error.
+        # CR P7 (2026-05-06) — 실패 경로에서 ``cleanup.completed rows_updated=0``를
+        # 추가 emit하면 metrics 대시보드가 *성공 + 실패 동시 발생*으로 오해. 실패 시
+        # ``cleanup.failed``만 남기고 즉시 raise(호출자가 exit code 1로 cron 정합).
         log.error(
             "idempotency.cleanup.failed",
             error_class=type(exc).__name__,
             error=str(exc),
         )
-        # rollback graceful — 카운트 0 로그 추가.
-        log.info("idempotency.cleanup.completed", rows_updated=0, ttl_days=ttl_days)
         raise
     finally:
         await engine.dispose()

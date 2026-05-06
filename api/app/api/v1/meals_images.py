@@ -32,7 +32,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.adapters import openai_adapter
 from app.adapters import r2 as r2_adapter
-from app.adapters.openai_adapter import VISION_MODEL, ParsedMealItem
+from app.adapters.openai_adapter import ParsedMealItem
 from app.api.deps import require_basic_consents
 from app.api.v1.meals import (
     _IMAGE_KEY_MAX_LENGTH,
@@ -254,6 +254,9 @@ async def parse_meal_image_endpoint(
         image_key=body.image_key,
         parsed_items=parsed.items,
         low_confidence=low_confidence,
-        model=VISION_MODEL,
+        # CR P5 (2026-05-06) — Story 3.9 AC7 cost cap 다운그레이드 시 ``parsed.model_used``는
+        # gpt-4o-mini로 갱신됨. 응답에 hardcoded VISION_MODEL을 노출하면 클라이언트가
+        # 실제 사용 모델과 불일치(telemetry 정합 깨짐) → ``parsed.model_used`` forward.
+        model=parsed.model_used,
         latency_ms=latency_ms,
     )

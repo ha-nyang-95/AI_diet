@@ -424,6 +424,21 @@ class _FakeRedis:
         _ = ex
         self.store[key] = value
 
+    async def delete(self, key: str) -> int:
+        existed = key in self.store
+        self.store.pop(key, None)
+        return 1 if existed else 0
+
+    async def incrbyfloat(self, key: str, value: float) -> float:
+        # Standalone incrbyfloat (not via pipeline) — used by atomic refund paths.
+        if key.startswith("cost:vision:daily:"):
+            self.cost_counter += float(value)
+            return self.cost_counter
+        prev = float(self.store.get(key, "0") or 0)
+        new = prev + float(value)
+        self.store[key] = str(new)
+        return new
+
     def pipeline(self, transaction: bool = False) -> _FakePipeline:  # type: ignore[no-untyped-def]
         _ = transaction
         return _FakePipeline(self)

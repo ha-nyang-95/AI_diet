@@ -105,7 +105,10 @@ async function fetchMeals(params: MealsListQuery | undefined): Promise<MealListR
 
 /** Story 3.9 AC20 — 단건 ``GET /v1/meals/{meal_id}``. */
 async function fetchMealById(meal_id: string): Promise<MealResponse> {
-  const response = await authFetch(`/v1/meals/${meal_id}`);
+  // CR P9 (2026-05-06) — meal_id를 URL 경로에 보간 시 ``encodeURIComponent``로 escape.
+  // UUID는 통상 안전 문자만 포함하나 호출자(``[meal_id].tsx`` route param)가 잘못된
+  // 값을 넘길 가능성에 대비한 방어. path 변형 / cache key 오염 차단.
+  const response = await authFetch(`/v1/meals/${encodeURIComponent(meal_id)}`);
   if (!response.ok) {
     const problem = await _parseProblem(response);
     throw new MealSubmitError(response.status, problem.code, problem.detail);
@@ -281,15 +284,19 @@ export function useMealsQuery(params?: MealsListQuery) {
  * 공유 — list invalidation 시 단건 cache도 동시 invalidate 정합.
  */
 export function useMealQuery(meal_id: string | null) {
+  // CR P10 (2026-05-06) — ``meal_id !== null``만 검사하면 빈 문자열도 enabled가 되어
+  // ``GET /v1/meals/`` (list endpoint)로 fallthrough → 응답 shape mismatch로 detail
+  // 화면 crash. 빈 문자열도 비활성으로 정정.
+  const isValid = meal_id != null && meal_id.length > 0;
   return useQuery({
     queryKey: ['meals', meal_id],
     queryFn: () => {
-      if (meal_id == null) {
+      if (!isValid) {
         throw new Error('meal_id required');
       }
       return fetchMealById(meal_id);
     },
-    enabled: meal_id != null,
+    enabled: isValid,
   });
 }
 

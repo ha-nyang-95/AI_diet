@@ -272,12 +272,17 @@ def _vision_cost_counter_key() -> str:
     return f"cost:vision:daily:{_kst_today_string()}"
 
 
-async def _read_daily_cost(redis_client: Any) -> float:
-    """현재 일일 누적 cost (USD) — Redis 부재/장애 시 0.0 graceful."""
+async def _read_daily_cost(redis_client: Any, *, today_str: str | None = None) -> float:
+    """현재 일일 누적 cost (USD) — Redis 부재/장애 시 0.0 graceful.
+
+    CR P12 (2026-05-06) — ``today_str`` 인자로 호출자가 KST 자정 cross race 차단.
+    부재 시 함수 내 계산(legacy 호환).
+    """
     if redis_client is None:
         return 0.0
+    key = f"cost:vision:daily:{today_str or _kst_today_string()}"
     try:
-        raw = await asyncio.wait_for(redis_client.get(_vision_cost_counter_key()), timeout=2.0)
+        raw = await asyncio.wait_for(redis_client.get(key), timeout=2.0)
     except (TimeoutError, Exception):  # noqa: BLE001 — Redis 장애 graceful.
         return 0.0
     if raw is None:
@@ -288,29 +293,42 @@ async def _read_daily_cost(redis_client: Any) -> float:
         return 0.0
 
 
-async def _increment_daily_cost(redis_client: Any, *, cost_usd: float) -> None:
-    """카운터 INCRBYFLOAT + EXPIRE 36h(자정 cross 후 자동 자연 만료).
+async def _adjust_daily_cost(
+    redis_client: Any, *, today_str: str, delta_usd: float
+) -> float | None:
+    """카운터 INCRBYFLOAT(delta) + EXPIRE 36h. delta 음수는 refund.
 
-    pipeline atomic — incr 성공 + expire 실패 race 차단.
+    CR P2 (2026-05-06) — TOCTOU race 차단을 위한 atomic primitive. INCRBYFLOAT 후
+    new total을 반환해 호출자가 cap 비교에 사용. Redis 장애 시 ``None`` (graceful).
+
+    CR P24 (2026-05-06) — ``EXPIRE`` nx 제거. nx=True는 Redis 7.0+ 옵션이며 silently
+    fail 가능. 매 호출 TTL 재설정(idempotent — 같은 날 키는 36h cap 유지).
     """
     if redis_client is None:
-        return
-    key = _vision_cost_counter_key()
+        return None
+    key = f"cost:vision:daily:{today_str}"
     try:
         async with redis_client.pipeline(transaction=False) as pipe:
-            pipe.incrbyfloat(key, cost_usd)
-            pipe.expire(key, 36 * 3600, nx=True)  # 36h — 자정 cross 후 자연 만료.
-            await asyncio.wait_for(pipe.execute(), timeout=2.0)
+            pipe.incrbyfloat(key, delta_usd)
+            pipe.expire(key, 36 * 3600)  # 자정 cross 후 36h 자연 만료.
+            results = await asyncio.wait_for(pipe.execute(), timeout=2.0)
+        return float(results[0])
     except (TimeoutError, Exception):  # noqa: BLE001 — Redis 장애 graceful.
-        logger.warning("vision.cost_counter.increment_failed")
+        logger.warning("vision.cost_counter.adjust_failed", delta_usd=delta_usd)
+        return None
 
 
 async def _get_cached_parsed(redis_client: Any, *, image_key: str) -> ParsedMeal | None:
-    """캐시 hit 시 ``ParsedMeal`` 반환, miss/장애/deserialize fail 시 ``None``."""
+    """캐시 hit 시 ``ParsedMeal`` 반환, miss/장애/deserialize fail 시 ``None``.
+
+    CR P14 (2026-05-06) — deserialize 실패 시 캐시 키를 ``DELETE`` — 동일 키의 후속
+    호출이 24h TTL 동안 같은 Sentry warning을 반복 emit하는 회귀 차단.
+    """
     if redis_client is None or not image_key:
         return None
+    cache_key = _vision_cache_key(image_key)
     try:
-        raw = await asyncio.wait_for(redis_client.get(_vision_cache_key(image_key)), timeout=2.0)
+        raw = await asyncio.wait_for(redis_client.get(cache_key), timeout=2.0)
     except (TimeoutError, Exception):  # noqa: BLE001 — Redis 장애 graceful.
         logger.warning("vision.cache.lookup_failed")
         return None
@@ -321,12 +339,17 @@ async def _get_cached_parsed(redis_client: Any, *, image_key: str) -> ParsedMeal
         return ParsedMeal.model_validate(data)
     except (ValidationError, json.JSONDecodeError, ValueError) as exc:
         # CR DF102 정합 — deserialize 실패는 graceful + Sentry warning.
+        # CR P14 — 손상 캐시 즉시 invalidate(delete graceful — 다음 호출은 cache miss).
         logger.warning(
             "vision.cache.deserialize_failed",
             image_key=image_key,
             error_class=type(exc).__name__,
         )
         sentry_sdk.capture_message("vision.cache.deserialize_failed", level="warning")
+        try:
+            await asyncio.wait_for(redis_client.delete(cache_key), timeout=2.0)
+        except (TimeoutError, Exception):  # noqa: BLE001 — delete 실패도 graceful.
+            logger.warning("vision.cache.invalidate_failed")
         return None
 
 
@@ -347,8 +370,19 @@ async def _set_cached_parsed(redis_client: Any, *, image_key: str, parsed: Parse
         logger.warning("vision.cache.set_failed")
 
 
+@retry(
+    stop=stop_after_attempt(2),
+    wait=wait_exponential(multiplier=1, min=1, max=4),
+    retry=retry_if_exception_type(_TRANSIENT_RETRY_TYPES),
+    reraise=True,
+)
 async def _call_vision_fallback(image_url: str) -> ParsedMeal:
-    """``gpt-4o-mini`` 다운그레이드 호출 — main과 동일 schema, 모델만 swap."""
+    """``gpt-4o-mini`` 다운그레이드 호출 — main과 동일 schema, 모델만 swap.
+
+    CR P11 (2026-05-06) — main ``_call_vision``과 동일 tenacity retry 1회 적용
+    (transient 5xx + RateLimitError + 네트워크). cap 도달 후 fallback 경로에서도
+    transient 실패 시 즉시 503 변환되지 않고 1회 retry 후 변환.
+    """
     client = _get_client()
     response = await client.beta.chat.completions.parse(
         model=VISION_FALLBACK_MODEL,
@@ -390,20 +424,24 @@ async def parse_meal_image(
     ``image_key``는 *로깅 + 캐시 키 SOT* (NFR-S5 — image_url raw 출력 X). 호출자(라우터)가
     image_key를 forward해 1줄 로그에 통일.
 
-    Story 3.9 AC6/AC7 흐름:
+    Story 3.9 AC6/AC7 흐름 (CR P2/P12 — 2026-05-06 atomic 갱신):
     1. ``redis_client`` 제공 + ``image_key`` 있으면 ``cache:llm:vision:{sha256(image_key)}``
        lookup → hit이면 OpenAI 호출 0회.
-    2. 일일 cost cap 검사 — ``cost:vision:daily:{YYYY-MM-DD}`` 카운터 ≥
-       ``vision_daily_cost_cap_usd`` → ``gpt-4o-mini`` 다운그레이드 + ``model_used`` 갱신.
-    3. fallback cap (``vision_fallback_cost_cap_usd``) 도달 시 ``MealOCRUnavailableError`` raise.
-    4. 정상 응답 → 24h TTL 캐시 set + 일일 카운터 INCR.
+    2. ``today_str`` (KST) 1회 계산 — read+adjust 동기화(자정 cross race 차단 — P12).
+    3. **Atomic pre-charge** — primary cost로 INCR 후 new total을 cap과 비교:
+       - new_total > fallback_cap: refund all + ``MealOCRUnavailableError`` raise.
+       - new_total > primary_cap: refund 차액(primary - fallback), ``gpt-4o-mini`` 다운그레이드.
+       - 그 외: primary 모델 사용 (counter 그대로 유지).
+       이로써 concurrent 호출 race 차단(이전: read-then-call-then-incr TOCTOU — P2).
+    4. Vision 호출 실패 시 pre-charged 비용 refund(API 호출 미발생).
+    5. 정상 응답 → 24h TTL 캐시 set.
 
     오류 변환 — tenacity retry 후 모든 transient 실패 → ``MealOCRUnavailableError(503)``.
     structured outputs 위반 → ``MealOCRPayloadInvalidError(502)``.
     """
     start = time.monotonic()
 
-    # ① 캐시 lookup — hit이면 즉시 return (OpenAI 호출 0회).
+    # ① 캐시 lookup — hit이면 즉시 return (OpenAI 호출 0회, cap 무관).
     if image_key:
         cached = await _get_cached_parsed(redis_client, image_key=image_key)
         if cached is not None:
@@ -417,61 +455,75 @@ async def parse_meal_image(
             )
             return cached
 
-    # ② 일일 cost cap 검사 — 다운그레이드 또는 차단.
-    daily_cost = await _read_daily_cost(redis_client)
-    fallback_cap = settings.vision_daily_cost_cap_usd + settings.vision_fallback_cost_cap_usd
-    use_fallback = False
-    if daily_cost >= fallback_cap:
-        # gpt-4o-mini 다운그레이드 cap도 초과 — 사용자에게 명시 안내.
-        sentry_sdk.capture_message(
-            "vision.cost_cap.fallback_exhausted",
-            level="warning",
-        )
-        logger.warning(
-            "vision.cost_cap.fallback_exhausted",
-            daily_cost_usd=round(daily_cost, 4),
-            fallback_cap_usd=fallback_cap,
-        )
-        raise MealOCRUnavailableError(
-            "오늘은 사진 분석 한도에 도달했어요 — 텍스트 입력으로 진행해주세요"
-        )
-    if daily_cost >= settings.vision_daily_cost_cap_usd:
-        use_fallback = True
-        sentry_sdk.capture_message("vision.cost_cap.downgrade", level="warning")
-        logger.warning(
-            "vision.cost_cap.downgrade",
-            daily_cost_usd=round(daily_cost, 4),
-            cap_usd=settings.vision_daily_cost_cap_usd,
-        )
+    # ② P12 — KST today_str 1회 계산(자정 cross race 차단).
+    today_str = _kst_today_string()
+    primary_cap = settings.vision_daily_cost_cap_usd
+    fallback_cap = primary_cap + settings.vision_fallback_cost_cap_usd
+    primary_cost = _VISION_COST_USD_PER_CALL
+    fallback_cost = _VISION_FALLBACK_COST_USD_PER_CALL
 
-    # ③ Vision 호출 (main 또는 fallback 모델).
+    # ③ P2 — atomic pre-charge로 cap 검사. Redis 부재 시 cap 비활성(graceful).
+    use_fallback = False
+    charged_cost = 0.0  # 실패 시 refund용 — Redis 부재면 0.
+    new_total = await _adjust_daily_cost(redis_client, today_str=today_str, delta_usd=primary_cost)
+    if new_total is not None:
+        charged_cost = primary_cost
+        if new_total > fallback_cap:
+            # Both caps 초과 — refund all + raise.
+            await _adjust_daily_cost(redis_client, today_str=today_str, delta_usd=-primary_cost)
+            sentry_sdk.capture_message("vision.cost_cap.fallback_exhausted", level="warning")
+            logger.warning(
+                "vision.cost_cap.fallback_exhausted",
+                daily_cost_usd=round(new_total, 4),
+                fallback_cap_usd=fallback_cap,
+            )
+            raise MealOCRUnavailableError(
+                "오늘은 사진 분석 한도에 도달했어요 — 텍스트 입력으로 진행해주세요"
+            )
+        if new_total > primary_cap:
+            # Primary 캡 초과 — fallback. 차액 refund(primary→fallback delta).
+            delta_refund = primary_cost - fallback_cost
+            await _adjust_daily_cost(redis_client, today_str=today_str, delta_usd=-delta_refund)
+            charged_cost = fallback_cost
+            use_fallback = True
+            sentry_sdk.capture_message("vision.cost_cap.downgrade", level="warning")
+            logger.warning(
+                "vision.cost_cap.downgrade",
+                daily_cost_usd=round(new_total, 4),
+                cap_usd=primary_cap,
+            )
+
+    # ④ Vision 호출 — 실패 시 pre-charged refund(API 미발생).
     try:
         if use_fallback:
             parsed = await _call_vision_fallback(image_url)
             parsed = parsed.model_copy(update={"model_used": VISION_FALLBACK_MODEL})
-            cost_increment = _VISION_FALLBACK_COST_USD_PER_CALL
         else:
             parsed = await _call_vision(image_url)
             parsed = parsed.model_copy(update={"model_used": VISION_MODEL})
-            cost_increment = _VISION_COST_USD_PER_CALL
     except (httpx.HTTPError, openai.APIError, openai.RateLimitError) as exc:
-        # tenacity retry 후 최종 실패 — typed 503으로 변환.
+        # tenacity retry 후 최종 실패 — pre-charged 비용 refund + typed 503 변환.
+        if charged_cost > 0:
+            await _adjust_daily_cost(redis_client, today_str=today_str, delta_usd=-charged_cost)
         raise MealOCRUnavailableError(
             f"Vision API transient failure after retry: {type(exc).__name__}"
         ) from exc
     except ValidationError as exc:
         # SDK가 자동 Pydantic 역직렬화 시 schema 위반 ValidationError raise.
+        if charged_cost > 0:
+            await _adjust_daily_cost(redis_client, today_str=today_str, delta_usd=-charged_cost)
         raise MealOCRPayloadInvalidError(
             f"Vision response: schema validation failed ({exc})"
         ) from exc
     except MealOCRPayloadInvalidError:
-        # _call_vision 내부에서 raise한 것은 그대로 전파(cost 낭비 차단 — retry X).
+        # _call_vision 내부에서 raise한 것은 cost 낭비 차단 — refund + 그대로 전파.
+        if charged_cost > 0:
+            await _adjust_daily_cost(redis_client, today_str=today_str, delta_usd=-charged_cost)
         raise
 
-    # ④ 정상 응답 — cache set + 일일 cost counter incr.
+    # ⑤ 정상 응답 — cache set (cost는 pre-charge 단계에서 이미 반영).
     if image_key:
         await _set_cached_parsed(redis_client, image_key=image_key, parsed=parsed)
-    await _increment_daily_cost(redis_client, cost_usd=cost_increment)
 
     latency_ms = int((time.monotonic() - start) * 1000)
     confidences = [item.confidence for item in parsed.items]

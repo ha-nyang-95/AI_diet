@@ -82,14 +82,24 @@ forwarded 헤더를 일단 trust. application-layer에서 `app.core.proxy.get_re
 
 Cloudflare dashboard → Security → WAF → Custom Rules:
 
-### Rule 1 — Same-origin Referer 강제 (W17 1.5)
+### Rule 1 — Web 전용 Same-origin Referer 강제 (W17 1.5)
 
 ```
 (http.request.method eq "POST"
   and http.request.uri.path eq "/v1/users/me/profile"
+  and (
+    starts_with(http.user_agent, "Mozilla/")
+    or http.user_agent contains "Chrome"
+  )
   and http.referer ne "https://balancenote.com")
 => Block (403)
 ```
+
+**중요 주의 (CR P20 — 2026-05-06)**: React Native / Expo 네이티브 클라이언트는 표준
+``Referer`` 헤더를 발신하지 않으므로 단순 ``http.referer ne ...`` 조건은 모바일
+트래픽도 일괄 차단된다. 위 룰은 *브라우저 UA prefix*로 web 트래픽만 게이팅 — 모바일은
+JWT(Bearer) + httpOnly cookie 부재로 CSRF 표면 자체가 다르다(SameSite는 브라우저 정책).
+운영 적용 전 staging에서 모바일 happy-path 1회 검증 의무.
 
 CSRF 추가 가드 — httpOnly 쿠키 + SameSite=Lax는 1차 방어, Cloudflare WAF는 2차.
 

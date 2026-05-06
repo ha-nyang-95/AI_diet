@@ -152,7 +152,15 @@ async def _redis_fixed_window_incr(request: Request, *, prefix: str, limit: int)
         return
     from app.core.proxy import get_real_client_ip
 
-    ip = get_real_client_ip(request) or "unknown"
+    # CR P13 (2026-05-06) — IP 부재 시 ``"unknown"`` 단일 bucket에 모든 익명 클라이언트가
+    # 합류하면 attacker가 임의 malformed 헤더로 bucket 고갈 → 정상 익명 클라이언트도
+    # DoS. IP 식별 실패 시 rate-limit *skip*(공격 표면 ↓ — IP 없는 요청은 정상 운영
+    # 시점에 Cloudflare WAF + slowapi global cap이 1차 가드). 운영 모니터링은 structlog
+    # warning으로 가시화.
+    ip = get_real_client_ip(request)
+    if not ip:
+        log.warning("analysis.rate_limit.ip_unresolved", prefix=prefix)
+        return
     minute_bucket = int(time.time() // 60)
     key = f"{prefix}:{ip}:{minute_bucket}"
 

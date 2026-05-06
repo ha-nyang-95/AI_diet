@@ -345,7 +345,10 @@ class MealAnalysisSummary(BaseModel):
 
     fit_score: int = Field(ge=0, le=100)
     fit_score_label: Literal["allergen_violation", "low", "moderate", "good", "excellent"]
-    macros: MealMacros
+    # CR P21 (2026-05-06) — Story 3.9 AC17 ``MealMacros.le=10000`` 도입 이전 환각 데이터
+    # 행이 GET 응답 단계에서 ValidationError로 500을 만들지 않도록 ``Optional``로 완화.
+    # ``_meal_analysis_to_summary`` helper에서 graceful fallback(macros=None + WARNING).
+    macros: MealMacros | None = None
     feedback_summary: str = Field(min_length=1, max_length=120)
 
     @model_validator(mode="after")
@@ -414,12 +417,27 @@ def _build_analysis_summary(analysis: MealAnalysis | None) -> MealAnalysisSummar
     """
     if analysis is None:
         return None
-    macros = MealMacros(
-        carbohydrate_g=float(analysis.carbohydrate_g),
-        protein_g=float(analysis.protein_g),
-        fat_g=float(analysis.fat_g),
-        energy_kcal=float(analysis.energy_kcal),
-    )
+    # CR P21 (2026-05-06) — Story 3.9 AC17 ``MealMacros.le=10000`` 도입. 도입 이전
+    # 저장된 환각 데이터(carb=99999 등) row가 GET 응답 시 ValidationError로 500 만들
+    # 가능성 차단. 손상 데이터는 graceful fallback(macros=None + log WARNING) — 사용자
+    # 화면은 "분석 결과 일부 누락" 상태로 강건하게.
+    try:
+        macros: MealMacros | None = MealMacros(
+            carbohydrate_g=float(analysis.carbohydrate_g),
+            protein_g=float(analysis.protein_g),
+            fat_g=float(analysis.fat_g),
+            energy_kcal=float(analysis.energy_kcal),
+        )
+    except ValidationError:
+        logger.warning(
+            "meals.analysis.macros_out_of_range",
+            meal_analysis_id=str(getattr(analysis, "meal_id", "")),
+            carbohydrate_g=float(analysis.carbohydrate_g),
+            protein_g=float(analysis.protein_g),
+            fat_g=float(analysis.fat_g),
+            energy_kcal=float(analysis.energy_kcal),
+        )
+        macros = None
     # 5-band Literal 검증은 MealAnalysisSummary._validate_score_label_consistency가 강제.
     # ORM 컬럼은 str이라 model_validate를 거쳐 Literal narrowing.
     return MealAnalysisSummary.model_validate(

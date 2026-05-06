@@ -5,7 +5,7 @@
 ## CLOSED (2026-05-05) — Story 3.9 에픽 3 후 polish 일괄 처리
 
 Story 3.9 (`_bmad-output/implementation-artifacts/3-9-에픽-3-후-polish.md`)에서 23건
-NOW-ACTIONABLE 일괄 CLOSED. 16 AC + 10 Task로 그룹화 처리.
+NOW-ACTIONABLE 일괄 CLOSED. 20 AC + 10 Task로 그룹화 처리.
 
 **A. 인프라 토폴로지 — Cloudflare proxy IP (DF111, W2 1.2, W10 1.3, W1 1.4, W17 1.5)**: `api/app/core/proxy.py` 신규 + `_CLOUDFLARE_IPV4`/`_CLOUDFLARE_IPV6` 22 CIDR + `get_real_client_ip()` SOT + 5 callsite swap(refresh_token / consents PIPA audit / SSE rate limit / Limiter key_func / lifespan init). `docs/runbook/deployment.md` + `cloudflare-ip-refresh.md` 신규(분기 1회 갱신 SOP).
 

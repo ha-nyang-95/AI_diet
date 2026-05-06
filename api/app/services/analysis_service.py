@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import sentry_sdk
 
@@ -26,6 +26,16 @@ from app.graph.state import MealAnalysisState
 if TYPE_CHECKING:  # pragma: no cover
     from langchain_core.runnables import RunnableConfig
     from langgraph.graph.state import CompiledStateGraph
+
+
+# Story 3.9 AC10 sanitize layer SOT — module-level frozensets(CR P19 — 2026-05-06).
+# 호출자 주입 차단(managed) + 화이트리스트 외 silent drop(unknown). 함수 내 재선언 회피.
+_AURESUME_MANAGED_FIELDS: Final[frozenset[str]] = frozenset(
+    {"rewrite_attempts", "node_errors", "force_llm_parse"}
+)
+_AURESUME_WHITELIST: Final[frozenset[str]] = frozenset(
+    {"raw_text_clarified", "selected_value", "parsed_items"}
+)
 
 
 @dataclass(frozen=True)
@@ -110,24 +120,36 @@ class AnalysisService:
         """
         from langgraph.types import Command
 
-        # Story 3.9 AC10 — sanitize layer: 호출자 주입 차단.
-        _AURESUME_MANAGED_FIELDS = frozenset({"rewrite_attempts", "node_errors", "force_llm_parse"})
-        _AURESUME_WHITELIST = frozenset({"raw_text_clarified", "selected_value", "parsed_items"})
+        # Story 3.9 AC10 — sanitize layer: 호출자 주입 차단(CR P3/P6 강화 — 2026-05-06).
+        # ① managed field 주입 시 ValueError(state corruption 차단).
         for managed_field in _AURESUME_MANAGED_FIELDS:
             if managed_field in user_input:
                 raise ValueError(f"aresume rejects managed field injection: {managed_field}")
 
+        # ② clarified 입력은 str 강제 — dict/list 등 garbage 인입 시 즉시 거부(P6).
         clarified = user_input.get("raw_text_clarified") or user_input.get("selected_value")
-        if not clarified or not str(clarified).strip():
+        if clarified is not None and not isinstance(clarified, str):
+            raise ValueError(
+                "aresume rejects non-string clarified value (raw_text_clarified/selected_value)"
+            )
+        if not clarified or not clarified.strip():
             raise ValueError("aresume requires raw_text_clarified or selected_value (non-empty)")
-        # 화이트리스트 외 키는 silent drop — log 출력 X(NFR-S5 raw_text 보호).
-        _ = {k: user_input[k] for k in user_input if k in _AURESUME_WHITELIST}
+
+        # ③ 화이트리스트 외 키는 silent drop — log 출력 X(NFR-S5 raw_text 보호).
+        # CR P3 (2026-05-06) — 필터 결과를 *실제로* 사용. 사용자가 ``parsed_items``를
+        # 넘겨주면 graph state에 propagate(spec AC10 의도 — pre-edited items overwrite).
+        # 이전 구현(``_ = {...}``)은 결과를 버려 spec contract 미충족.
+        sanitized: dict[str, Any] = {
+            k: user_input[k] for k in user_input if k in _AURESUME_WHITELIST
+        }
+        user_parsed_items = sanitized.get("parsed_items")  # 사용자 편집 항목(있으면).
 
         config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
         cmd: Command[Any] = Command(
             update={
-                "raw_text": str(clarified),
-                "parsed_items": None,
+                "raw_text": clarified,
+                # 사용자 제공 parsed_items가 있으면 propagate, 없으면 None(parse_meal 재실행).
+                "parsed_items": user_parsed_items if user_parsed_items else None,
                 "retrieval": None,
                 "rewrite_attempts": 0,
                 "node_errors": [],
@@ -135,7 +157,8 @@ class AnalysisService:
                 "clarification_options": [],
                 "evaluation_decision": None,
                 "rewritten_query": None,
-                "force_llm_parse": True,
+                # 사용자가 직접 parsed_items 제공한 경우 LLM parse 강제 불필요.
+                "force_llm_parse": not user_parsed_items,
             },
             goto="parse_meal",
         )

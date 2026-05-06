@@ -172,6 +172,18 @@ def _check_basic_consents(row: Consent | None) -> tuple[bool, dict[str, str]]:
 
     if has_major_mismatch:
         return False, {}
+
+    # CR P17 (2026-05-06) — ``sensitive_personal_info``는 ``privacy``와 본문/version을
+    # 공유(``CURRENT_VERSION_TYPES`` 코멘트 정합). 같은 version으로 동시 mismatch 시
+    # ``X-Consent-Update-Available`` 헤더에 *동일 정보 중복 표기*를 회피 — privacy를
+    # canonical로 노출(클라이언트 banner 1회만 표시).
+    if (
+        "privacy" in minor_updates
+        and "sensitive_personal_info" in minor_updates
+        and minor_updates["privacy"] == minor_updates["sensitive_personal_info"]
+    ):
+        del minor_updates["sensitive_personal_info"]
+
     return True, minor_updates
 
 
