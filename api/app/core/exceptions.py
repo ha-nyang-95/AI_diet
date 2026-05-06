@@ -704,3 +704,43 @@ class NotificationTokenInvalidError(NotificationError):
     status: ClassVar[int] = 400
     code: ClassVar[str] = "notification.token.invalid"
     title: ClassVar[str] = "Notification token invalid"
+
+
+# --- Expo Push Adapter 계층 (Story 4.2 — APScheduler nudge + Expo push send) ---
+
+
+class ExpoPushError(BalanceNoteError):
+    """Story 4.2 Expo push 어댑터 도메인 예외 base.
+
+    ``LLMRouterError`` / ``MealOCRUnavailableError`` 카탈로그 패턴 정합 — 직접 raise 회피
+    (서브클래스만 사용 권장 — base 직접 raise는 status/code/title default를 leak).
+    nudge_scheduler가 본 예외를 swallow + Sentry capture(cron은 다음 cycle 재시도).
+    """
+
+    status: ClassVar[int] = 503
+    code: ClassVar[str] = "expo_push.error"
+    title: ClassVar[str] = "Expo Push Error"
+
+
+class ExpoPushUnavailableError(ExpoPushError):
+    """EAS push API 일시 장애 — 5xx / network / timeout / ``PushServerError`` 5xx.
+
+    tenacity 3회 retry 후 최종 실패. nudge_scheduler가 swallow + Sentry capture →
+    *cron 잡은 다음 사이클에서 재시도*.
+    """
+
+    status: ClassVar[int] = 503
+    code: ClassVar[str] = "expo_push.unavailable"
+    title: ClassVar[str] = "Expo Push Unavailable"
+
+
+class ExpoPushAuthError(ExpoPushError):
+    """EAS access token 만료 / 회전 필요 — 401 Unauthorized.
+
+    영구 4xx — retry 무효(토큰 회전 외 회복 X). 운영자 신호 → ``docs/runbook/secret-rotation.md``
+    §4 *EXPO_ACCESS_TOKEN 회전 5단계* 트리거.
+    """
+
+    status: ClassVar[int] = 401
+    code: ClassVar[str] = "expo_push.auth"
+    title: ClassVar[str] = "Expo Push Auth Failed"

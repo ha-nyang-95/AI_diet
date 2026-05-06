@@ -125,6 +125,7 @@ dependencies = [
     { name = "asyncpg" },
     { name = "beautifulsoup4" },
     { name = "boto3" },
+    { name = "exponent-server-sdk" },
     { name = "fastapi", extra = ["standard"] },
     { name = "google-auth" },
     { name = "httpx" },
@@ -169,6 +170,7 @@ requires-dist = [
     { name = "asyncpg", specifier = ">=0.30" },
     { name = "beautifulsoup4", specifier = ">=4.12" },
     { name = "boto3", specifier = ">=1.36" },
+    { name = "exponent-server-sdk", specifier = ">=2.2" },
     { name = "fastapi", extras = ["standard"], specifier = ">=0.115" },
     { name = "google-auth", specifier = ">=2.36" },
     { name = "httpx", specifier = ">=0.28" },
@@ -562,6 +564,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/f5/22/900cb125c76b7aaa450ce02fd727f452243f2e91a61af068b40adba60ea9/email_validator-2.3.0.tar.gz", hash = "sha256:9fc05c37f2f6cf439ff414f8fc46d917929974a82244c20eb10231ba60c54426", size = 51238, upload-time = "2025-08-26T13:09:06.831Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/de/15/545e2b6cf2e3be84bc1ed85613edd75b8aea69807a71c26f4ca6a9258e82/email_validator-2.3.0-py3-none-any.whl", hash = "sha256:80f13f623413e6b197ae73bb10bf4eb0908faf509ad8362c5edeb0be7fd450b4", size = 35604, upload-time = "2025-08-26T13:09:05.858Z" },
+]
+
+[[package]]
+name = "exponent-server-sdk"
+version = "2.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "requests" },
+    { name = "six" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ca/1d/bacc1c009f6a270c098305d83e6da0b54db218f095d8ebd1b4e0a3000abd/exponent_server_sdk-2.2.0.tar.gz", hash = "sha256:162f3b9732a05e8dd8c1263a7ea2aa27c235a2927a4ca08440ba171c95beb449", size = 8669, upload-time = "2025-07-03T15:38:06.119Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e3/6a/9cdf0c704ca375690a0f1543b76bd0fe459c9d1c41ef4c50b2d276e6eb8d/exponent_server_sdk-2.2.0-py3-none-any.whl", hash = "sha256:ee5825baa9870fcdb28f93b3404a5e042c3784d861060e59f7dfd549347a6f0c", size = 8797, upload-time = "2025-07-03T15:38:05.033Z" },
 ]
 
 [[package]]

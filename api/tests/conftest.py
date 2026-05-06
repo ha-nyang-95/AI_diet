@@ -61,6 +61,11 @@ if "_test" not in _test_db_path:
     )
 settings.database_url = settings.database_url_test
 
+# Story 4.2 — APScheduler in-process cron이 pytest 백그라운드 thread를 leak시키지 않도록
+# environment를 "test"로 강제. ``app/main.py:lifespan``의 ``settings.environment in
+# {"ci","test"}`` 분기가 ``app.state.scheduler = None`` + 잡 등록 skip 정합.
+settings.environment = "test"
+
 
 def _alembic_config() -> AlembicConfig:
     cfg = AlembicConfig("alembic.ini")
@@ -118,10 +123,13 @@ async def _truncate_user_tables() -> AsyncIterator[None]:
             # Story 3.7 — meal_analyses 신규(D5 IN). meals.id ON DELETE CASCADE라
             # users TRUNCATE CASCADE로 자동 cascade되지만, 명시 prepend로 가독성 +
             # per-test 격리 강화(다음 테스트로 row leak 차단).
+            # Story 4.2 — notifications 테이블 추가. users.id ON DELETE CASCADE라
+            # users TRUNCATE CASCADE로 자동 cascade되지만, 명시 prepend로 가독성 +
+            # per-test 격리 강화(이전 test의 멱등 row가 다음 test sweep에 leak 차단).
             await conn.execute(
                 text(
-                    "TRUNCATE meal_analyses, meals, consents, refresh_tokens, users, "
-                    "knowledge_chunks RESTART IDENTITY CASCADE"
+                    "TRUNCATE notifications, meal_analyses, meals, consents, "
+                    "refresh_tokens, users, knowledge_chunks RESTART IDENTITY CASCADE"
                 )
             )
     finally:

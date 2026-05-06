@@ -198,10 +198,97 @@ export function setupNotificationTapListener(
 /**
  * cold start 시 push tap 진입 검증 — `getLastNotificationResponse()` thin wrap.
  *
- * Story 4.2가 사용 — 본 스토리는 골격만 노출.
+ * **Deprecated (Story 4.2 W8 흡수)**: Expo SDK 55+에서 `getLastNotificationResponse`는
+ * `useLastNotificationResponse` hook으로 migration 권장. 본 함수는 외부 호출자 없으면
+ * Story 8.4 polish에서 제거 forward — Story 4.2부터는 `setupGlobalPushHandler` /
+ * `useLastNotificationResponse` 경로 사용.
  */
 export function getLastNotificationResponse():
   | Notifications.NotificationResponse
   | null {
   return Notifications.getLastNotificationResponse() ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// Story 4.2 — push tap deep link wire (AC7)
+// ---------------------------------------------------------------------------
+
+/**
+ * push payload SOT — 백엔드 `app/workers/nudge_scheduler.py:NUDGE_DATA`와 동일.
+ * 변경 시 양쪽 동기 갱신.
+ */
+export const NUDGE_DEEP_LINK_PREFIX = 'balancenote://';
+export const NUDGE_TARGET_PATH = '/(tabs)/meals/input';
+
+interface RouterLike {
+  push: (href: string) => void;
+  replace: (href: string) => void;
+}
+
+/**
+ * notification 응답 본문에서 deep link path 추출 + 검증.
+ *
+ * 외부 URL injection 차단 — `data.url`이 `balancenote://` prefix가 아니면 null 반환.
+ * 본 스토리는 전부 `/(tabs)/meals/input`으로 라우팅 — 미래 다양화는 path 매핑 SOT 도입.
+ */
+export function resolveDeepLinkTarget(
+  response: Notifications.NotificationResponse | null | undefined,
+): string | null {
+  if (!response) return null;
+  const data = response.notification?.request?.content?.data as
+    | { url?: unknown; kind?: unknown }
+    | undefined;
+  const url = data?.url;
+  if (typeof url !== 'string') return null;
+  if (!url.startsWith(NUDGE_DEEP_LINK_PREFIX)) return null;
+  // 본 스토리는 단일 target — 미래 path 매핑은 NUDGE_TARGET_PATH SOT 확장.
+  return NUDGE_TARGET_PATH;
+}
+
+let _globalHandlerInstalled = false;
+let _tapSubscription: Notifications.Subscription | null = null;
+
+/**
+ * 앱 root mount 시점에 1회 호출 — foreground 알림 노출 + tap listener 등록.
+ *
+ * (1) `setNotificationHandler` — 앱 활성 상태에서도 알림 banner/sound 노출.
+ * (2) `addNotificationResponseReceivedListener` — foreground/background tap 시 deep
+ *     link target validate 후 `router.push(...)`.
+ *
+ * 멱등 — 중복 호출 시 listener 1개만 유지. 모듈 unmount는 정상 흐름이 아니라 cleanup
+ * helper만 노출.
+ */
+export function setupGlobalPushHandler(router: RouterLike): () => void {
+  if (!_globalHandlerInstalled) {
+    Notifications.setNotificationHandler({
+      handleNotification: async () => ({
+        shouldShowAlert: true,
+        shouldPlaySound: true,
+        shouldSetBadge: false,
+        // SDK 53+ 신규 필드 — undefined도 허용. 안정성 위해 false 명시.
+        shouldShowBanner: true,
+        shouldShowList: true,
+      }),
+    });
+    _globalHandlerInstalled = true;
+  }
+  if (_tapSubscription) {
+    _tapSubscription.remove();
+    _tapSubscription = null;
+  }
+  _tapSubscription = Notifications.addNotificationResponseReceivedListener((response) => {
+    const target = resolveDeepLinkTarget(response);
+    if (!target) return;
+    try {
+      router.push(target);
+    } catch (error) {
+      console.warn('push.tap.navigate_failed', error);
+    }
+  });
+  return () => {
+    if (_tapSubscription) {
+      _tapSubscription.remove();
+      _tapSubscription = null;
+    }
+  };
 }

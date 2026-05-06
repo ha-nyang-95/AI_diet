@@ -54,6 +54,10 @@ dependencies = [
     # *명시 직접 의존성*으로 승격 — Story 3.3 `psycopg[binary,pool]` 패턴 정합.
     # SDK 통제권(structured outputs prompt 패턴) + 외주 인수 dependency tree 명확.
     "anthropic>=0.40",
+    # Story 4.2 — Expo Push API 서버 측 어댑터 SDK. expo-community maintained.
+    # `PushClient(session=Session(), access_token=...)` + `publish_multiple([PushMessage])`
+    # + `get_receipts([ticket_id])` 3 핵심 API. SDK 내부 100건 chunking 자동.
+    "exponent-server-sdk>=2.2",
     # --- Story 3.2 — 가이드라인 RAG 시드 + chunking 3-format 인터페이스 ---
     # text-splitters는 langchain umbrella의 별 패키지(메인 langchain의 transitive 미보장).
     "langchain-text-splitters>=0.3",
@@ -99,7 +103,7 @@ plugins = ["pydantic.mypy"]
 mypy_path = "."
 
 [[tool.mypy.overrides]]
-module = ["jose.*", "passlib.*", "pgvector.*", "slowapi.*", "apscheduler.*", "google.*", "boto3.*", "botocore.*", "pypdf.*", "bs4.*", "langchain_text_splitters.*", "yaml.*", "psycopg.*", "psycopg_pool.*"]
+module = ["jose.*", "passlib.*", "pgvector.*", "slowapi.*", "apscheduler.*", "google.*", "boto3.*", "botocore.*", "pypdf.*", "bs4.*", "langchain_text_splitters.*", "yaml.*", "psycopg.*", "psycopg_pool.*", "exponent_server_sdk.*", "requests.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
