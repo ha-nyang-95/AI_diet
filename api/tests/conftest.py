@@ -44,6 +44,20 @@ from app.domain.health_profile import ActivityLevel, HealthGoal
 from app.domain.legal_documents import CURRENT_VERSIONS
 from app.main import app
 
+# 테스트 격리 invariant — autouse `_truncate_user_tables` fixture가 매 테스트마다 user/
+# meals/consents/refresh_tokens를 TRUNCATE한다. 따라서 dev `app` DB와 같이 쓰면 `pytest`
+# 1회로 dev 데이터 전부 소실. ``settings.database_url_test``를 dev URL에 덮어써 모든
+# 후속 코드(alembic, lifespan engine, autouse fixtures)가 자동으로 test DB를 가리키게 함.
+# 가드: URL이 명시적 test DB가 아니면 abort — dev DB 잘못 가리키는 사고 차단.
+if "_test" not in settings.database_url_test:
+    pytest.exit(
+        f"database_url_test must reference a test DB "
+        f"(got {settings.database_url_test!r}). "
+        "DATABASE_URL_TEST env를 점검하거나 기본값(`...@localhost:5432/app_test`)을 쓰세요.",
+        returncode=2,
+    )
+settings.database_url = settings.database_url_test
+
 
 def _alembic_config() -> AlembicConfig:
     cfg = AlembicConfig("alembic.ini")
