@@ -1,9 +1,14 @@
-"""식약처 *식품 등의 표시기준 별표* 22종 알레르기 유발물질 SOT — Story 1.5.
+"""식약처 *식품 등의 표시기준 별표* 22종 알레르기 유발물질 SOT — Story 1.5 + 3.5 + 4.3.
 
-SOT 단일 위치: 본 모듈의 ``KOREAN_22_ALLERGENS`` tuple.
+SOT 단일 위치: 본 모듈의 ``KOREAN_22_ALLERGENS`` tuple + 4 false-positive 가드 constant
+(``_LABEL_SUBSTRING_EXCLUSIONS`` / ``_ALIAS_TEXT_EXCLUSIONS`` / ``_SKIP_SUBSTRING_LABELS`` /
+``ALLERGEN_ALIAS_MAP``). Story 3.5 시점에 ``fit_score.py`` 내부에 박혀 있던 4 constant를
+Story 4.3 시점에 본 모듈로 *재배치* — ``contains_allergen`` 헬퍼(주간 리포트 알레르기
+노출 매칭) + ``detect_allergen_violations`` (Story 3.5 fit_score 단락) 양쪽이 동일
+SOT를 공유(중복 정의 0). ``fit_score.py``는 본 모듈에서 import로 인계.
 
 변경 시:
-1. 본 tuple 갱신 → 정의 순서 보존(식약처 표시기준 별표 PDF 순).
+1. ``KOREAN_22_ALLERGENS`` tuple 갱신 → 정의 순서 보존(식약처 표시기준 별표 PDF 순).
 2. 새 alembic revision으로 ``users.allergies`` CHECK 제약 drop+recreate
    (``app/db/models/user.py`` 모델 선언과 동일 SQL 사용).
 3. ``scripts/verify_allergy_22.py`` 분기 1회 cron(R8 SOP, Story 8) 실행 결과 동기.
@@ -13,8 +18,10 @@ SOT 단일 위치: 본 모듈의 ``KOREAN_22_ALLERGENS`` tuple.
   ``normalize_allergens()``로 22종 부분집합 검증 + dedup.
 - ``users.allergies`` Postgres ``text[]`` 컬럼에 DB CHECK 제약(``<@`` 부분집합)이
   본 tuple SQL 인라인으로 박힘(0005 마이그레이션).
-- Story 3.5 ``domain/fit_score.py``가 ``users.allergies`` ∩ ``parsed_items`` 단락
-  매칭 — 본 SOT의 22종 무결성에 의존.
+- Story 3.5 ``domain/fit_score.py``가 본 모듈의 SOT 재사용 — ``users.allergies`` ∩
+  ``parsed_items`` 단락 매칭.
+- Story 4.3 ``services/report_service.py``가 ``contains_allergen`` 호출 — 주간
+  알레르기 노출 횟수 카운트.
 """
 
 from __future__ import annotations
@@ -58,6 +65,47 @@ assert len(KOREAN_22_ALLERGENS) == 22, "MFDS spec defines exactly 22 allergens"
 assert len(KOREAN_22_ALLERGENS_SET) == 22, "KOREAN_22_ALLERGENS contains duplicate labels"
 
 
+# Story 3.5 CR B-3: 22-라벨 substring 매칭에서 *제외* 할 라벨 — `기타`는 generic
+# placeholder로 식약처 카테고리 `기타가공식품` 같은 광범 텍스트에 false positive 발화.
+# 본 라벨은 `ALLERGEN_ALIAS_MAP`의 explicit alias 경로로만 매칭(``기타알레르기성분``).
+_SKIP_SUBSTRING_LABELS: Final[frozenset[str]] = frozenset({"기타"})
+
+# Story 3.5 CR B-1: 22-라벨 substring 매칭 시 텍스트에서 먼저 제거할 *neighbor*
+# 부분 문자열. 메밀(buckwheat, Fagopyrum)과 밀(wheat, Triticum)은 taxonomy/clinic
+# 모두 별개 — `밀 in 메밀국수` false positive를 차단해 cross-allergen 오발화를 방지.
+_LABEL_SUBSTRING_EXCLUSIONS: Final[dict[str, tuple[str, ...]]] = {
+    "밀": ("메밀",),
+}
+
+# Story 3.5 CR B-2: ALLERGEN_ALIAS_MAP substring 매칭 시 텍스트에서 먼저 제거할
+# 부분 문자열. `넛 → 호두` alias가 `도넛`(donut, no walnut), `코코넛`(coconut, *Cocos
+# nucifera* — 호두/Juglans와 별개) 같은 비 호두 단어에 false positive 발화하지 않도록.
+_ALIAS_TEXT_EXCLUSIONS: Final[dict[str, tuple[str, ...]]] = {
+    "넛": ("도넛", "코코넛"),
+}
+
+# 한국 외식·배달 메뉴 alias → 22종 표준 라벨 baseline (8-13건).
+# 외주 인수 시 클라이언트가 자사 메뉴별 보강 — SOP는 ``api/data/README.md``.
+# Story 3.5 CR B-3: `기타알레르기성분` → `기타` alias 추가 — 22-라벨 substring
+# 매칭에서 `기타`를 제외(generic substring false positive 차단)하면서도 explicit
+# 음식명을 통한 매칭은 유지.
+ALLERGEN_ALIAS_MAP: Final[dict[str, str]] = {
+    "계란": "난류(가금류)",
+    "달걀": "난류(가금류)",
+    "오믈렛": "난류(가금류)",
+    "마요네즈": "난류(가금류)",
+    "치즈": "우유",
+    "요구르트": "우유",
+    "버터": "우유",
+    "쉬림프": "새우",
+    "포크": "돼지고기",
+    "비프": "쇠고기",
+    "치킨": "닭고기",
+    "넛": "호두",
+    "기타알레르기성분": "기타",
+}
+
+
 def is_valid_allergen(value: str) -> bool:
     """단일 알레르기 라벨이 22종 도메인 내 인지 확인 — Pydantic validator/route 검증에서 사용.
 
@@ -82,3 +130,60 @@ def normalize_allergens(values: list[str]) -> list[str]:
             raise ValueError(f"unknown allergen: {v!r}; must be one of 22 식약처 standard.")
         seen.add(normalized)
     return [a for a in KOREAN_22_ALLERGENS if a in seen]
+
+
+def contains_allergen(text: str, allergen: str) -> bool:
+    """``text``의 NFC 정규화 후 ``allergen`` (22종 중 1) 노출 여부 검사 — Story 4.3.
+
+    매칭 의미론: 자연어 텍스트(``parsed_items[].name`` 또는 ``feedback_text``)가
+    22종 알레르기 라벨을 *substring* 또는 *alias substring* 형태로 포함하는지.
+    Story 3.5의 4 false-positive 가드 SOT(``_LABEL_SUBSTRING_EXCLUSIONS`` /
+    ``_ALIAS_TEXT_EXCLUSIONS`` / ``_SKIP_SUBSTRING_LABELS`` / ``ALLERGEN_ALIAS_MAP``)를
+    그대로 재사용하여 *주간 리포트 알레르기 노출 횟수*와 *fit_score 단락* 양쪽이
+    *동일* 매칭 결과를 갖도록.
+
+    가드:
+
+    - ``allergen``이 22종 SOT 외 → ``ValueError``(prevention보다 fail-fast 정합).
+    - ``text`` ``None`` → ``ValueError``. 빈 문자열은 ``False`` 반환(매칭 없음).
+
+    예시 (Story 4.3 AC6 정의):
+
+    - ``contains_allergen("메밀국수", "밀")`` → ``False`` (``_LABEL_SUBSTRING_EXCLUSIONS``)
+    - ``contains_allergen("밀빵 샐러드", "밀")`` → ``True``
+    - ``contains_allergen("도넛 1개", "호두")`` → ``False`` (``_ALIAS_TEXT_EXCLUSIONS``,
+      ``넛`` alias가 ``도넛`` 매칭 차단)
+    - ``contains_allergen("기타 가공품", "기타")`` → ``False`` (``_SKIP_SUBSTRING_LABELS``)
+    - ``contains_allergen("기타알레르기성분 함유", "기타")`` → ``True`` (explicit alias)
+    - ``contains_allergen("치즈피자", "우유")`` → ``True`` (alias ``치즈``→``우유``)
+    """
+    if text is None:
+        raise ValueError("text must not be None")
+    if allergen not in KOREAN_22_ALLERGENS_SET:
+        raise ValueError(f"unknown allergen: {allergen!r}; must be one of 22 식약처 standard.")
+    if not text:
+        return False
+
+    normalized_text = unicodedata.normalize("NFC", text)
+    normalized_label = unicodedata.normalize("NFC", allergen)
+
+    # (1) 22종 직접 substring 매칭 — _SKIP_SUBSTRING_LABELS 우회 + neighbor exclusion.
+    if normalized_label not in _SKIP_SUBSTRING_LABELS:
+        candidate = normalized_text
+        for excl in _LABEL_SUBSTRING_EXCLUSIONS.get(normalized_label, ()):
+            candidate = candidate.replace(excl, "")
+        if normalized_label in candidate:
+            return True
+
+    # (2) ALLERGEN_ALIAS_MAP — alias substring → 22종 표준 라벨. 본 alias가 입력
+    # ``allergen``으로 매핑되는지 검사.
+    for alias, standard in ALLERGEN_ALIAS_MAP.items():
+        if standard != normalized_label:
+            continue
+        candidate = normalized_text
+        for excl in _ALIAS_TEXT_EXCLUSIONS.get(alias, ()):
+            candidate = candidate.replace(excl, "")
+        if alias in candidate:
+            return True
+
+    return False

@@ -103,3 +103,106 @@ def test_is_valid_allergen_nfd_input_normalized_to_nfc() -> None:
 
     nfd_milk = unicodedata.normalize("NFD", "우유")
     assert is_valid_allergen(nfd_milk) is True
+
+
+# --- Story 4.3 — contains_allergen 헬퍼 ---
+
+
+from app.domain.allergens import contains_allergen  # noqa: E402
+
+
+@pytest.mark.parametrize("allergen", list(KOREAN_22_ALLERGENS))
+def test_contains_allergen_each_22_happy_path(allergen: str) -> None:
+    """22종 각각 — 라벨 자체가 텍스트에 들어있으면 True (alias 의존 X 케이스).
+
+    ``기타``는 ``_SKIP_SUBSTRING_LABELS``로 substring 매칭 스킵 — alias
+    ``기타알레르기성분``로 매칭한다(별도 테스트).
+    """
+    text = f"{allergen} 함유 식품"
+    expected = allergen != "기타"  # 기타는 skip — substring 직접 매칭 X
+    assert contains_allergen(text, allergen) is expected
+
+
+def test_contains_allergen_milk_buckwheat_false_positive_guard() -> None:
+    """``메밀국수``의 ``밀`` substring이어도 False — ``_LABEL_SUBSTRING_EXCLUSIONS``."""
+    assert contains_allergen("메밀국수", "밀") is False
+
+
+def test_contains_allergen_wheat_actual_match() -> None:
+    """``밀빵 샐러드``는 ``밀`` 매칭 True — neighbor 제외 후에도 substring 잔존."""
+    assert contains_allergen("밀빵 샐러드", "밀") is True
+
+
+def test_contains_allergen_donut_walnut_false_positive_guard() -> None:
+    """``도넛``에 alias ``넛``이 substring이지만 False — ``_ALIAS_TEXT_EXCLUSIONS``."""
+    assert contains_allergen("도넛 1개", "호두") is False
+
+
+def test_contains_allergen_coconut_walnut_false_positive_guard() -> None:
+    """``코코넛`` → 호두 alias false positive 차단."""
+    assert contains_allergen("코코넛 라떼", "호두") is False
+
+
+def test_contains_allergen_misc_substring_label_skip() -> None:
+    """``기타 가공품`` 텍스트에 ``기타`` substring이 있어도 False — ``_SKIP_SUBSTRING_LABELS``."""
+    assert contains_allergen("기타 가공품", "기타") is False
+
+
+def test_contains_allergen_misc_via_explicit_alias() -> None:
+    """``기타알레르기성분`` alias만 ``기타`` 매칭 — explicit alias 경로 유지."""
+    assert contains_allergen("기타알레르기성분 함유", "기타") is True
+
+
+def test_contains_allergen_alias_cheese_to_milk() -> None:
+    """``치즈`` alias → ``우유`` 매칭."""
+    assert contains_allergen("치즈피자 1조각", "우유") is True
+
+
+def test_contains_allergen_walnut_via_walnut_food() -> None:
+    """``호두빵`` 같이 ``호두`` 직접 substring → True (alias 가드는 도넛/코코넛만)."""
+    assert contains_allergen("호두빵 1개", "호두") is True
+
+
+def test_contains_allergen_nfc_normalization() -> None:
+    """NFD-encoded Hangul 텍스트 → NFC normalize 후 매칭."""
+    import unicodedata
+
+    nfd_text = unicodedata.normalize("NFD", "우유 라떼")
+    assert nfd_text != "우유 라떼"
+    assert contains_allergen(nfd_text, "우유") is True
+
+
+def test_contains_allergen_empty_text() -> None:
+    """빈 문자열 입력 → False (매칭 없음)."""
+    assert contains_allergen("", "우유") is False
+
+
+def test_contains_allergen_none_text_raises() -> None:
+    """None 입력 → ValueError fail-fast (caller 가드 단순화)."""
+    with pytest.raises(ValueError, match=r"text must not be None"):
+        contains_allergen(None, "우유")  # type: ignore[arg-type]
+
+
+def test_contains_allergen_unknown_label_raises() -> None:
+    """22종 외 라벨 입력 → ValueError fail-fast (caller 가드 단순화)."""
+    with pytest.raises(ValueError, match=r"unknown allergen: 'milk'"):
+        contains_allergen("milk text", "milk")
+
+
+def test_contains_allergen_multi_allergen_independent() -> None:
+    """동일 텍스트가 여러 알레르기에 매칭 — 각각 독립 True."""
+    text = "치즈피자와 새우튀김 세트"
+    assert contains_allergen(text, "우유") is True  # 치즈 alias
+    assert contains_allergen(text, "새우") is True  # 직접 substring
+
+
+def test_contains_allergen_egg_alias() -> None:
+    """``계란`` alias → ``난류(가금류)`` 매칭."""
+    assert contains_allergen("계란말이 정식", "난류(가금류)") is True
+    assert contains_allergen("달걀 후라이", "난류(가금류)") is True
+
+
+def test_contains_allergen_label_not_present() -> None:
+    """라벨이 없는 텍스트는 False — happy 음성."""
+    assert contains_allergen("바나나 1개", "우유") is False
+    assert contains_allergen("바나나 1개", "메밀") is False

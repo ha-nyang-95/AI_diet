@@ -12,8 +12,8 @@
 - **역할**: 주간 리포트 + 관리자 페이지 (모바일은 `mobile/`)
 - **상태 관리**: TanStack Query (server) + useState/useReducer (client)
 - **Auth**: 백엔드 JWT를 httpOnly 쿠키로 직접 교환 — `next-auth` 사용 금지
-- **UI**: Tailwind v4 starter 디폴트. shadcn/ui는 선택적 도입 (Story 4.3 시점에 결정)
-- **차트**: recharts — Story 4.3에서 도입 (현재 미설치)
+- **UI**: Tailwind v4 starter 디폴트. shadcn/ui 미도입 — Story 4.3 시점 결정(raw Tailwind + recharts 충분, bundle size 최소화)
+- **차트**: recharts — Story 4.3 도입 완료 (`src/features/reports/`). 신규 차트 추가 시 동일 패턴 강제 — `<details><summary>데이터 표 보기</summary><table>` 접힘 fallback + `aria-label` (NFR-A5 키보드 + 스크린리더 정합), `useSyncExternalStore`로 SSR-mounted gating(ResponsiveContainer SSR-Hydration mismatch 회피).
 - **API 클라이언트**: `src/lib/api-client.ts` 자동 생성 — `pnpm gen:api`로 OpenAPI 동기화
 - **폼**: 필요 시 `react-hook-form` + `zod` 도입 (현재 미설치)
 
