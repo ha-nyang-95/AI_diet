@@ -56,7 +56,12 @@ async def test_patch_settings_with_consent_passes(
 async def test_patch_settings_invalid_time_format(
     client: AsyncClient, user_factory, consent_factory
 ) -> None:
-    """Story 4.1 AC5 — ``"25:00"`` 입력 시 400 (Pydantic field_validator 1차 게이트)."""
+    """Story 4.1 AC5 — ``"25:00"`` 입력 시 400 + ``code=notification.time.invalid_format``.
+
+    CR P1 — Pydantic은 type 가드만 수행하고, 형식 검증은 라우터에서
+    ``NotificationTimeInvalidFormatError`` raise → 글로벌 ``BalanceNoteError`` 핸들러가
+    spec 카탈로그 ``code`` 발화.
+    """
     user = await user_factory()
     await consent_factory(user)
     response = await client.patch(
@@ -66,8 +71,7 @@ async def test_patch_settings_invalid_time_format(
     )
     assert response.status_code == 400
     body = response.json()
-    # Pydantic ValidationError → 글로벌 핸들러 ``code=validation.error`` 응답.
-    assert body["code"] == "validation.error"
+    assert body["code"] == "notification.time.invalid_format"
 
 
 @pytest.mark.asyncio
@@ -92,7 +96,11 @@ async def test_post_devices_with_valid_token(
 async def test_post_devices_invalid_token(
     client: AsyncClient, user_factory, consent_factory
 ) -> None:
-    """Story 4.1 AC5 — ``"foo"`` token 거부 (Expo prefix 위반) 시 400."""
+    """Story 4.1 AC5 — ``"foo"`` token 거부 시 400 + spec 카탈로그 ``code``.
+
+    CR P1 — 라우터에서 ``NotificationTokenInvalidError`` raise →
+    ``code=notification.token.invalid`` 발화 (Pydantic ValidationError 평탄화 회피).
+    """
     user = await user_factory()
     await consent_factory(user)
     response = await client.post(
@@ -102,7 +110,7 @@ async def test_post_devices_invalid_token(
     )
     assert response.status_code == 400
     body = response.json()
-    assert body["code"] == "validation.error"
+    assert body["code"] == "notification.token.invalid"
 
 
 @pytest.mark.asyncio

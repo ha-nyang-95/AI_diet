@@ -29,9 +29,31 @@ import { authFetch } from './auth';
 // AsyncStorage key — token 중복 register 회피 + signOut clear 시 일괄 wipe.
 const PUSH_TOKEN_STORAGE_KEY = '@balancenote/push_token';
 
+// Story 4.1 AC12 — first-time prompt flag (Story 1.6 `tutorial-seen` 패턴 정합).
+// CR P4 — `(tabs)/_layout.tsx` + `auth.tsx` 양 callsite의 SOT를 본 모듈로 통합 — key 변경
+// 시 한 곳만 수정하면 prompt suppression 정합 유지.
+export const PUSH_PROMPTED_STORAGE_KEY = '@balancenote/push_prompted';
+
 const ANDROID_CHANNEL_ID = 'default';
 
 export type PermissionStatus = Notifications.PermissionStatus;
+
+/** 백엔드 `POST /v1/notifications/devices` body의 `platform` Literal 정합. */
+export type DevicePlatform = 'ios' | 'android' | 'web';
+
+/**
+ * 현 OS를 백엔드 `platform` Literal로 변환.
+ *
+ * CR P2 — 기존 코드는 `platform: 'ios'` 하드코드라 Android/Web 사용자도 모두 iOS로
+ * 등록되어 백엔드 수신 데이터 오염. `Platform.OS`는 ``ios | android | web | windows |
+ * macos`` 이지만 backend Literal은 3종 — windows/macos는 모바일 push 미지원이므로 web
+ * 으로 폴백.
+ */
+export function resolveDevicePlatform(): DevicePlatform {
+  if (Platform.OS === 'android') return 'android';
+  if (Platform.OS === 'ios') return 'ios';
+  return 'web';
+}
 
 export interface RegisterResult {
   /** OS 권한 상태 — 모바일 UI가 'denied' 시 PermissionDeniedView 노출. */

@@ -20,7 +20,7 @@ from datetime import time
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, status
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict
 
 from app.api.deps import DbSession, current_user, require_basic_consents
 from app.core.exceptions import (
@@ -59,41 +59,33 @@ class NotificationSettingsResponse(BaseModel):
 
 
 class NotificationSettingsUpdate(BaseModel):
-    """partial PATCH body — 두 필드 모두 optional."""
+    """partial PATCH body — 두 필드 모두 optional.
+
+    형식 검증은 라우터(``patch_notification_settings``)에서 ``NotificationTimeInvalidFormatError``
+    raise — Pydantic 1차 게이트는 *type 가드*에 한정. 이렇게 분리하는 이유: Pydantic
+    field_validator의 ValueError는 글로벌 ``RequestValidationError`` 핸들러에서 ``code=
+    validation.error``로 평탄화되어 spec 카탈로그(``notification.time.invalid_format``)
+    노출이 불가능하기 때문.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     notifications_enabled: bool | None = None
-    notification_time: str | None = None  # ``HH:MM`` wire format
-
-    @field_validator("notification_time")
-    @classmethod
-    def _validate_time_format(cls, v: str | None) -> str | None:
-        if v is None:
-            return v
-        if not _NOTIFICATION_TIME_WIRE_RE.fullmatch(v):
-            # Pydantic ValidationError로 변환되면 글로벌 핸들러가 ``code=validation.error``
-            # 응답 — 우리 카탈로그(``notification.time.invalid_format``) 노출 위해
-            # 라우터에서 본 검증 통과 후 추가 형식 검증 X. 본 ValueError는 hook —
-            # 라우터에서 *catch* 후 도메인 예외로 변환.
-            raise ValueError("notification_time must be 'HH:MM' (24-hour)")
-        return v
+    notification_time: str | None = None  # ``HH:MM`` wire format — 라우터에서 regex 검증.
 
 
 class PushTokenRegisterRequest(BaseModel):
-    """device 등록 body — token + platform."""
+    """device 등록 body — token + platform.
+
+    ``expo_push_token`` 형식 검증은 라우터(``register_device``)에서
+    ``NotificationTokenInvalidError`` raise(``NotificationSettingsUpdate``와 동일 사유 —
+    typed code 카탈로그 노출).
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     expo_push_token: str
     platform: Literal["ios", "android", "web"]
-
-    @field_validator("expo_push_token")
-    @classmethod
-    def _validate_expo_token(cls, v: str) -> str:
-        if not _EXPO_TOKEN_RE.fullmatch(v):
-            raise ValueError("expo_push_token must match Expo prefix")
-        return v
 
 
 # --- helpers ---
@@ -142,11 +134,19 @@ async def patch_notification_settings(
 
     *Why ``require_basic_consents``*: 작성 경로 — Story 1.5 ``submit_health_profile`` 정합.
 
-    Pydantic ``field_validator``가 1차 형식 가드. 통과 후 ``_from_wire_time``으로 DB 형식
-    변환. DB CHECK ``ck_users_notification_time_kst_format``은 2차 가드(분 단위 정렬).
+    형식 검증 2단: (1) Pydantic 1차 type 가드(str | None) → (2) 라우터 regex 검증
+    ``_NOTIFICATION_TIME_WIRE_RE`` → ``NotificationTimeInvalidFormatError`` raise(`code=
+    notification.time.invalid_format`). DB CHECK ``ck_users_notification_time_kst_format``
+    은 3차 방어선(seconds=0 강제, ORM SOT).
     """
     notification_time_db: time | None = None
     if body.notification_time is not None:
+        if not _NOTIFICATION_TIME_WIRE_RE.fullmatch(body.notification_time):
+            raise NotificationTimeInvalidFormatError(
+                detail=(
+                    f"notification_time must be 'HH:MM' (24-hour), got: {body.notification_time!r}"
+                ),
+            )
         notification_time_db = _from_wire_time(body.notification_time)
 
     settings = await update_settings(
@@ -164,7 +164,17 @@ async def register_device(
     db: DbSession,
     user: Annotated[User, Depends(require_basic_consents)],
 ) -> dict[str, bool]:
-    """token 등록 — *사용자 swap* atomic (notification_service.register_push_token 정합)."""
+    """token 등록 — *사용자 swap* atomic (notification_service.register_push_token 정합).
+
+    형식 검증: Pydantic type 가드 후 라우터에서 Expo regex 검증 →
+    ``NotificationTokenInvalidError`` raise(`code=notification.token.invalid`).
+    """
+    if not _EXPO_TOKEN_RE.fullmatch(body.expo_push_token):
+        raise NotificationTokenInvalidError(
+            detail=(
+                "expo_push_token must match Expo prefix (ExponentPushToken[…] or ExpoPushToken[…])"
+            ),
+        )
     await register_push_token(
         db,
         user,
@@ -187,9 +197,9 @@ async def revoke_device(
 
 
 # --- 도메인 예외 카탈로그 노출 (router 외부에서 import 시 typed 분기) ---
-# Pydantic ``ValidationError``는 글로벌 핸들러가 ``code=validation.error``로 변환 —
 # 본 카탈로그(`notification.time.invalid_format` / `notification.token.invalid`)는
-# 향후 *router 비-Pydantic 경로*에서 raise 가능성을 위해 import 노출만.
+# 라우터에서 직접 raise — Pydantic 가드는 type 검증에 한정하여 글로벌 ``RequestValidationError``
+# 핸들러의 ``code=validation.error`` 평탄화를 회피.
 __all__ = [
     "NotificationSettingsResponse",
     "NotificationSettingsUpdate",

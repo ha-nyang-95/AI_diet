@@ -13,7 +13,7 @@ import { createContext, useContext, useEffect, useMemo, useState, type ReactNode
 
 import { clearOnboardingState } from '@/features/onboarding/tutorialState';
 
-import { unregisterPushTokenAsync } from './push';
+import { PUSH_PROMPTED_STORAGE_KEY, unregisterPushTokenAsync } from './push';
 import {
   clearAuth,
   getAccessToken,
@@ -21,10 +21,6 @@ import {
   setAccessToken,
   setRefreshToken,
 } from './secure-store';
-
-// Story 4.1 AC13 — signOut 시 first-time prompt flag도 clear (다음 사용자 로그인 시
-// 깨끗한 시작). `(tabs)/_layout.tsx`의 PUSH_PROMPTED_STORAGE_KEY와 동일 SOT.
-const PUSH_PROMPTED_STORAGE_KEY = '@balancenote/push_prompted';
 
 export interface AuthUser {
   id: string;

@@ -30,7 +30,7 @@ import {
   useUpdateNotificationSettingsMutation,
 } from '@/features/notifications/api';
 import { useNotificationPermission } from '@/lib/permissions';
-import { registerForPushNotificationsAsync } from '@/lib/push';
+import { registerForPushNotificationsAsync, resolveDevicePlatform } from '@/lib/push';
 
 const HOURS = Array.from({ length: 24 }, (_, i) => i);
 const MINUTES = [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55];
@@ -68,7 +68,7 @@ export default function NotificationsSettingsScreen() {
         try {
           await registerMutation.mutateAsync({
             expo_push_token: token,
-            platform: 'ios', // dev 단순화 — 실제 platform 분기는 Story 8.4 polish (Platform.OS).
+            platform: resolveDevicePlatform(),
           });
         } catch {
           // graceful — UI는 *"알림 등록 실패 — 잠시 후 다시 시도"* (Story 8.4 polish 자동 retry).

@@ -8,10 +8,11 @@ import {
   useUpdateNotificationSettingsMutation,
 } from '@/features/notifications/api';
 import { useAuth } from '@/lib/auth';
-import { registerForPushNotificationsAsync } from '@/lib/push';
-
-// Story 4.1 AC12 — first-time prompt flag (Story 1.6 `tutorial-seen` 패턴 정합).
-const PUSH_PROMPTED_STORAGE_KEY = '@balancenote/push_prompted';
+import {
+  PUSH_PROMPTED_STORAGE_KEY,
+  registerForPushNotificationsAsync,
+  resolveDevicePlatform,
+} from '@/lib/push';
 
 /**
  * (tabs) 그룹은 보호 라우트 — 인증 + 동의 + 프로필 게이트 4단계 통과 시에만 진입.
@@ -62,7 +63,7 @@ export default function TabsLayout() {
           try {
             await registerPushToken.mutateAsync({
               expo_push_token: token,
-              platform: 'ios', // Story 8.4 polish — Platform.OS 분기.
+              platform: resolveDevicePlatform(),
             });
             await updateSettings.mutateAsync({ notifications_enabled: true });
           } catch {

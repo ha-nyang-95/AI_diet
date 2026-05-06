@@ -12,7 +12,13 @@
 - ``register_push_token`` — *사용자 swap* atomic 트랜잭션. 동일 token이 다른 user row에
   박혀 있으면 *해당 row*의 ``expo_push_token``을 NULL set 후 새 user에 set
   (``ux_users_expo_push_token_active`` partial UNIQUE 위반 회피 + 사용자 swap 정합).
-  단일 ``async with db.begin()`` 내에서 두 UPDATE 모두 commit.
+  AsyncSession의 implicit auto-begin이 두 ``db.execute(update(...))``를 단일 트랜잭션으로
+  묶고 마지막 ``db.commit()``으로 확정 — 프로젝트 컨벤션(`update_settings`/`revoke_push_token`/
+  Story 1.5 ``submit_health_profile`` 정합)이라 별도 ``async with db.begin()`` 블록은 사용 X.
+  *Race window*: 동시 등록으로 다른 세션이 같은 token으로 진입하면 partial UNIQUE 위반
+  → IntegrityError(데이터 손상은 partial UNIQUE 안전망이 차단). MVP <100 user 규모에서
+  발생 확률 극희박 — Story 8.4 polish에서 SELECT FOR UPDATE row-lock 또는 IntegrityError
+  catch+retry로 hardening 가능.
 - ``revoke_push_token`` — ``expo_push_token = NULL`` 멱등 set (이미 NULL이어도 OK).
 
 NFR-S5 마스킹 정합 — 4 helper 모두 ``app/core/observability.py`` ``_LANGSMITH_MASKED_KEYS``
