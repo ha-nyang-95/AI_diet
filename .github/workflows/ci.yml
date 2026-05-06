@@ -88,9 +88,14 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --frozen
-      - name: Enable pgvector extension
+      - name: Provision test DB (app_test) + extensions
+        # conftest.py가 dev `app` DB와 분리된 `app_test`로 자동 전환 — postgres service
+        # container는 docker-entrypoint-initdb.d 미사용이라 inline psql로 셋업.
+        # `app` DB의 pgvector ext도 구버전 호환 위해 유지(과거 워크플로 정합).
         run: |
           PGPASSWORD=app psql -h localhost -U app -d app -c "CREATE EXTENSION IF NOT EXISTS vector;"
+          PGPASSWORD=app psql -h localhost -U app -d app -c "CREATE DATABASE app_test;"
+          PGPASSWORD=app psql -h localhost -U app -d app_test -c "CREATE EXTENSION IF NOT EXISTS vector; CREATE SCHEMA IF NOT EXISTS lg_checkpoints;"
       - run: uv run pytest
 
   # 4. typecheck-web ------------------------------------------------------
@@ -298,9 +303,12 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --frozen
-      - name: Enable pgvector extension
+      - name: Provision test DB (app_test) + extensions
+        # test-api 정합 — conftest.py가 `app_test`로 자동 전환되므로 본 job도 동일 셋업.
         run: |
           PGPASSWORD=app psql -h localhost -U app -d app -c "CREATE EXTENSION IF NOT EXISTS vector;"
+          PGPASSWORD=app psql -h localhost -U app -d app -c "CREATE DATABASE app_test;"
+          PGPASSWORD=app psql -h localhost -U app -d app_test -c "CREATE EXTENSION IF NOT EXISTS vector; CREATE SCHEMA IF NOT EXISTS lg_checkpoints;"
       - name: Korean foods 100 eval (T3 KPI ≥ 90%)
         id: eval
         run: |

@@ -21,6 +21,7 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
 from decimal import Decimal
+from urllib.parse import urlparse
 
 # Story 3.3 — psycopg async는 Windows ProactorEventLoop 비호환 (psycopg `InterfaceError`).
 # SelectorEventLoop으로 전환 — asyncpg (SQLAlchemy)는 양쪽 호환이라 안전. macOS/Linux는
@@ -43,6 +44,22 @@ from app.db.models.user import User
 from app.domain.health_profile import ActivityLevel, HealthGoal
 from app.domain.legal_documents import CURRENT_VERSIONS
 from app.main import app
+
+# 테스트 격리 invariant — autouse `_truncate_user_tables` fixture가 매 테스트마다 user/
+# meals/consents/refresh_tokens를 TRUNCATE한다. 따라서 dev `app` DB와 같이 쓰면 `pytest`
+# 1회로 dev 데이터 전부 소실. ``settings.database_url_test``를 dev URL에 덮어써 모든
+# 후속 코드(alembic, lifespan engine, autouse fixtures)가 자동으로 test DB를 가리키게 함.
+# 가드: URL의 *path*(=DB 이름)에 `_test`가 없으면 abort — host/user 명에 우연히 `_test`가
+# 들어가더라도 path 부분만 검사해 dev DB 잘못 가리키는 사고 차단(Gemini PR #28 review).
+_test_db_path = urlparse(settings.database_url_test).path
+if "_test" not in _test_db_path:
+    pytest.exit(
+        f"database_url_test must reference a test DB "
+        f"(got DB path {_test_db_path!r} from URL {settings.database_url_test!r}). "
+        "DATABASE_URL_TEST env를 점검하거나 기본값(`...@localhost:5432/app_test`)을 쓰세요.",
+        returncode=2,
+    )
+settings.database_url = settings.database_url_test
 
 
 def _alembic_config() -> AlembicConfig:

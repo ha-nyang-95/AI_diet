@@ -61,6 +61,12 @@ class Settings(BaseSettings):
     # 디폴트는 로컬 dev(`uv run uvicorn`)용 localhost. Docker 컨테이너 내부에서는
     # docker-compose.yml의 environment 블록이 `@postgres:5432` / `@redis:6379`로 override.
     database_url: str = "postgresql+asyncpg://app:app@localhost:5432/app"
+    # 테스트 전용 DB — dev `app` DB와 분리. conftest.py의 autouse `_truncate_user_tables`
+    # fixture가 매 테스트마다 users/meals/consents/refresh_tokens를 TRUNCATE하기 때문에
+    # 분리하지 않으면 `pytest` 1회만 돌려도 dev에서 입력한 사용자·식단·동의 기록이 전부
+    # 소실됨. CI는 ``DATABASE_URL_TEST`` env로 override 가능. **이름에 ``_test``가 포함되지
+    # 않으면 conftest.py가 abort** — dev DB로 잘못 가리키는 사고 차단.
+    database_url_test: str = "postgresql+asyncpg://app:app@localhost:5432/app_test"
     redis_url: str = "redis://localhost:6379/0"
 
     # --- LLM ---
