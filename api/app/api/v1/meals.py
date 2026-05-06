@@ -310,14 +310,18 @@ class MealMacros(BaseModel):
     Story 2.4 — Epic 3 forward-compat. 모든 필드 ``ge=0`` non-negative 단언. 본 스토리
     baseline은 *항상 None*(서버 join X) — 실제 채움은 Story 3.3 (`meal_analyses` 테이블
     + LangGraph 노드 + ``app/domain/fit_score.py`` 알고리즘) / Story 3.5 (fit_score 룰).
+
+    Story 3.9 AC17 — 환각 데이터 cap. ``le=10000`` (10kg/10000kcal 단위)는 1식 매크로의
+    *최악 환각 상한* — Story 3.3+ LLM이 ``carbohydrate_g=99999`` 같은 환각 출력 시
+    Pydantic ValidationError로 차단(저장 시점에 graceful fallback macros None set).
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    carbohydrate_g: float = Field(ge=0)
-    protein_g: float = Field(ge=0)
-    fat_g: float = Field(ge=0)
-    energy_kcal: float = Field(ge=0)
+    carbohydrate_g: float = Field(ge=0, le=10000)
+    protein_g: float = Field(ge=0, le=10000)
+    fat_g: float = Field(ge=0, le=10000)
+    energy_kcal: float = Field(ge=0, le=10000)
 
 
 class MealAnalysisSummary(BaseModel):
@@ -752,6 +756,46 @@ async def list_meals(
         meals=[_meal_to_response(m) for m in rows],
         next_cursor=None,
     )
+
+
+@router.get(
+    "/{meal_id}",
+    responses={
+        200: {"description": "단건 식단 조회 (analysis_summary JOIN)"},
+        401: {"description": "Authentication required"},
+        404: {"description": "Meal not found / not owned / soft-deleted"},
+    },
+)
+async def get_meal(
+    meal_id: uuid.UUID,
+    db: DbSession,
+    user: Annotated[User, Depends(current_user)],
+) -> MealResponse:
+    """Story 3.9 AC20 — 단건 식단 조회 + ``analysis_summary`` JOIN.
+
+    PIPA Art.35 — 자기 데이터 *조회*는 인증만 요구(``require_basic_consents`` 미wire).
+    권한: 자신의 meal만 조회 가능. 다른 사용자/soft-deleted/미존재 모두 동일 404
+    (enumeration 차단).
+
+    모바일 ``[meal_id].tsx`` 단건 detail 화면이 본 endpoint를 ``useMealQuery(meal_id)``
+    로 호출 — 7일 list cache의 over-fetch 회피.
+
+    ``selectinload(Meal.analysis)`` — N+1 회피 + ``lazy="raise_on_sql"`` 정합.
+    """
+    stmt = (
+        select(Meal)
+        .options(selectinload(Meal.analysis))
+        .where(
+            Meal.id == meal_id,
+            Meal.user_id == user.id,
+            Meal.deleted_at.is_(None),
+        )
+    )
+    result = await db.execute(stmt)
+    meal = result.scalar_one_or_none()
+    if meal is None:
+        raise MealNotFoundError("meal not found")
+    return _meal_to_response(meal)
 
 
 @router.patch("/{meal_id}")

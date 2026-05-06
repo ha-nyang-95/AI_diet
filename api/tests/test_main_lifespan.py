@@ -4,45 +4,22 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterator
-from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import FastAPI
 from httpx import AsyncClient
 
-from app.adapters.openai_adapter import (
-    ClarificationVariants,
-    ParsedMeal,
-    ParsedMealItem,
-    RewriteVariants,
-)
 from app.core.exceptions import AnalysisCheckpointerError
-from app.graph.state import ClarificationOption
 from app.main import app, lifespan
 from app.services.analysis_service import AnalysisService
 
 
 @pytest.fixture
 def _mock_llm_adapters() -> Iterator[None]:
-    parsed = ParsedMeal(
-        items=[ParsedMealItem(name="__test_low_confidence__", quantity="1인분", confidence=0.9)]
-    )
-    rewrite = RewriteVariants(variants=["v1"])
-    clarify = ClarificationVariants(options=[ClarificationOption(label="옵션", value="옵션 1인분")])
-    with (
-        patch(
-            "app.graph.nodes.parse_meal.parse_meal_text",
-            new=AsyncMock(return_value=parsed),
-        ),
-        patch(
-            "app.graph.nodes.rewrite_query.rewrite_food_query",
-            new=AsyncMock(return_value=rewrite),
-        ),
-        patch(
-            "app.graph.nodes.request_clarification.generate_clarification_options",
-            new=AsyncMock(return_value=clarify),
-        ),
-    ):
+    """Story 3.9 AC16 — conftest SOT(`make_llm_adapter_mocks`) 위임."""
+    from tests.conftest import make_llm_adapter_mocks
+
+    with make_llm_adapter_mocks():
         yield
 
 

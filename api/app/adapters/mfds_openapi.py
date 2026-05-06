@@ -69,6 +69,16 @@ MFDS_RESPONSE_TYPE_KEY: Final[str] = "type"  # 본 endpoint는 `type=json` (구 
 MFDS_RESPONSE_TYPE_JSON: Final[str] = "json"
 MFDS_TIMEOUT_SECONDS: Final[float] = 30.0
 
+# Story 3.9 AC8 — max_pages 100 → 500 확대(분당 100회 + 일일 10K 한도 안전 cap).
+# 외식·가공식품(라면/우동/냉면) 카테고리 자동 보강 — 한식 1500건 + 외식·가공식품
+# 1500건 구간 진입까지 페이지 여유. 식약처 OpenAPI 표준 limit 정합.
+MFDS_MAX_PAGES: Final[int] = 500
+# Story 3.9 AC8 — `DB_GRP_CM` 그룹 SOT(D=가정식, P=가공식품). 회귀 가드용 const —
+# 향후 silent rollback 차단(``test_mfds_openapi.py``에서 단언). FoodNtrCpntDbInfo02
+# 엔드포인트는 본 파라미터를 *옵션으로* 수용(미지정 시 양 그룹 통합 응답).
+DB_GRP_CM_GROUPS: Final[tuple[str, ...]] = ("D", "P")
+DB_GRP_CM_KEY: Final[str] = "DB_GRP_CM"
+
 # 식약처 OpenAPI 응답 키 → 식약처 표준 키 매핑 (검증일자 2026-05-03, 실 응답 sample 기반).
 # 원본 키(`AMT_NUM*`)는 식약처 변동 위험으로 어댑터 내부 격리.
 MFDS_RAW_KEY_MAP: Final[dict[str, str]] = {
@@ -400,7 +410,7 @@ async def fetch_food_items(
     client = _get_client()
     collected: list[FoodNutritionRaw] = []
     page_index = 1
-    max_pages = 100  # 무한 루프 방어 (3K건 / 100건 = 30 페이지 + 여유).
+    max_pages = MFDS_MAX_PAGES  # Story 3.9 AC8 — 100 → 500.
     rows_seen = 0
 
     while len(collected) < target_count and page_index <= max_pages:

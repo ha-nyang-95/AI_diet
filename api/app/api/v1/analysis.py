@@ -150,9 +150,9 @@ async def _redis_fixed_window_incr(request: Request, *, prefix: str, limit: int)
     redis_client = getattr(request.app.state, "redis", None)
     if redis_client is None:
         return
-    from slowapi.util import get_remote_address
+    from app.core.proxy import get_real_client_ip
 
-    ip = get_remote_address(request)
+    ip = get_real_client_ip(request) or "unknown"
     minute_bucket = int(time.time() // 60)
     key = f"{prefix}:{ip}:{minute_bucket}"
 

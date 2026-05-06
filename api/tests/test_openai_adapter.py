@@ -18,6 +18,7 @@ monkeypatch fixture로 `_get_client` mock — 실제 OpenAI 도달 X (cost 0 + o
 
 from __future__ import annotations
 
+from datetime import UTC
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -399,4 +400,218 @@ async def test_generate_clarification_options_payload_invalid(
     _install_mock_client(monkeypatch, parse_return=response)
 
     with pytest.raises(MealOCRPayloadInvalidError):
-        await openai_adapter.generate_clarification_options("xxxx")
+        await openai_adapter.generate_clarification_options("포케볼")
+
+
+# ---------------------------------------------------------------------------
+# Story 3.9 AC6/AC7 — Vision 캐시 + cost cap (6 케이스)
+# ---------------------------------------------------------------------------
+
+
+class _FakeRedis:
+    """Redis stub — async get/set/incrbyfloat/expire + pipeline."""
+
+    def __init__(self) -> None:
+        self.store: dict[str, str] = {}
+        self.cost_counter: float = 0.0
+
+    async def get(self, key: str) -> str | None:
+        if key.startswith("cost:vision:daily:"):
+            return str(self.cost_counter) if self.cost_counter else None
+        return self.store.get(key)
+
+    async def set(self, key: str, value: str, *, ex: int | None = None) -> None:
+        _ = ex
+        self.store[key] = value
+
+    def pipeline(self, transaction: bool = False) -> _FakePipeline:  # type: ignore[no-untyped-def]
+        _ = transaction
+        return _FakePipeline(self)
+
+
+class _FakePipeline:
+    def __init__(self, redis: _FakeRedis) -> None:
+        self.redis = redis
+        self._ops: list[tuple[str, tuple[Any, ...]]] = []
+
+    def incrbyfloat(self, key: str, value: float) -> None:
+        self._ops.append(("incrbyfloat", (key, value)))
+
+    def expire(self, key: str, ttl: int, nx: bool = False) -> None:  # noqa: ARG002
+        self._ops.append(("expire", (key, ttl)))
+
+    async def execute(self) -> list[Any]:
+        results: list[Any] = []
+        for op, args in self._ops:
+            if op == "incrbyfloat":
+                key, value = args
+                if key.startswith("cost:vision:daily:"):
+                    self.redis.cost_counter += float(value)
+                results.append(self.redis.cost_counter)
+            else:
+                results.append(True)
+        return results
+
+    async def __aenter__(self) -> _FakePipeline:
+        return self
+
+    async def __aexit__(self, *args: Any) -> None:
+        return None
+
+
+async def test_vision_cache_hit_skips_openai_call(
+    monkeypatch: pytest.MonkeyPatch,
+    _openai_configured: None,
+) -> None:
+    """AC6 케이스 ① — cache hit 시 OpenAI 호출 0회 + 캐시된 ParsedMeal 반환."""
+    redis = _FakeRedis()
+    image_key = "meals/userA/abc.jpg"
+    cached_meal = openai_adapter.ParsedMeal(
+        items=[openai_adapter.ParsedMealItem(name="피자", quantity="1조각", confidence=0.9)],
+        model_used="gpt-4o",
+    )
+    redis.store[openai_adapter._vision_cache_key(image_key)] = cached_meal.model_dump_json()
+
+    mock_parse = _install_mock_client(monkeypatch, parse_return=_build_mock_response([]))
+
+    result = await openai_adapter.parse_meal_image(
+        "https://cdn.example.com/meals/userA/abc.jpg",
+        image_key=image_key,
+        redis_client=redis,
+    )
+
+    assert mock_parse.await_count == 0
+    assert result.items[0].name == "피자"
+
+
+async def test_vision_cache_miss_calls_openai_and_sets_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    _openai_configured: None,
+) -> None:
+    """AC6 케이스 ② — cache miss 시 OpenAI 호출 + 응답 cache set."""
+    redis = _FakeRedis()
+    image_key = "meals/userB/def.jpg"
+    items = [{"name": "샐러드", "quantity": "1인분", "confidence": 0.85}]
+    response = _build_mock_response(items)
+    mock_parse = _install_mock_client(monkeypatch, parse_return=response)
+
+    result = await openai_adapter.parse_meal_image(
+        "https://cdn.example.com/meals/userB/def.jpg",
+        image_key=image_key,
+        redis_client=redis,
+    )
+
+    assert mock_parse.await_count == 1
+    assert result.items[0].name == "샐러드"
+    # cache set 확인.
+    cache_key = openai_adapter._vision_cache_key(image_key)
+    assert cache_key in redis.store
+
+
+async def test_vision_cache_deserialize_failure_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+    _openai_configured: None,
+) -> None:
+    """AC6 케이스 ③ — deserialize 실패 시 graceful fallback(cache miss로 처리)."""
+    redis = _FakeRedis()
+    image_key = "meals/userC/ghi.jpg"
+    redis.store[openai_adapter._vision_cache_key(image_key)] = "not-json{{{"
+
+    items = [{"name": "초밥", "quantity": "10pcs", "confidence": 0.92}]
+    response = _build_mock_response(items)
+    mock_parse = _install_mock_client(monkeypatch, parse_return=response)
+
+    result = await openai_adapter.parse_meal_image(
+        "https://cdn.example.com/meals/userC/ghi.jpg",
+        image_key=image_key,
+        redis_client=redis,
+    )
+
+    # OpenAI 호출 1회(graceful fallback) — Sentry warning은 capture만 검증.
+    assert mock_parse.await_count == 1
+    assert result.items[0].name == "초밥"
+
+
+async def test_vision_cap_reached_downgrades_to_mini(
+    monkeypatch: pytest.MonkeyPatch,
+    _openai_configured: None,
+) -> None:
+    """AC7 케이스 ④ — cap 도달 시 ``gpt-4o-mini`` 다운그레이드 + ``model_used`` metadata."""
+    redis = _FakeRedis()
+    redis.cost_counter = 5.0  # vision_daily_cost_cap_usd 도달
+
+    items = [{"name": "스무디", "quantity": "300ml", "confidence": 0.8}]
+    response = _build_mock_response(items)
+    mock_parse = _install_mock_client(monkeypatch, parse_return=response)
+
+    result = await openai_adapter.parse_meal_image(
+        "https://cdn.example.com/meals/userD/jkl.jpg",
+        image_key="meals/userD/jkl.jpg",
+        redis_client=redis,
+    )
+
+    # 다운그레이드 모델로 호출 — model_used 갱신.
+    assert result.model_used == "gpt-4o-mini"
+    assert mock_parse.await_count == 1
+    # 모델 인자 — call_args에서 추출.
+    call_kwargs = mock_parse.call_args.kwargs
+    assert call_kwargs["model"] == "gpt-4o-mini"
+
+
+async def test_vision_fallback_cap_reached_raises_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    _openai_configured: None,
+) -> None:
+    """AC7 케이스 ⑤ — fallback cap도 초과 시 ``MealOCRUnavailableError`` raise."""
+    redis = _FakeRedis()
+    redis.cost_counter = 6.5  # 5.0 + 1.0(fallback) cap도 초과
+
+    response = _build_mock_response([])
+    mock_parse = _install_mock_client(monkeypatch, parse_return=response)
+
+    with pytest.raises(MealOCRUnavailableError) as exc_info:
+        await openai_adapter.parse_meal_image(
+            "https://cdn.example.com/meals/userE/mno.jpg",
+            image_key="meals/userE/mno.jpg",
+            redis_client=redis,
+        )
+
+    assert mock_parse.await_count == 0  # OpenAI 호출 0회
+    assert "한도" in str(exc_info.value)
+
+
+async def test_vision_kst_midnight_resets_counter(
+    monkeypatch: pytest.MonkeyPatch,
+    _openai_configured: None,
+) -> None:
+    """AC7 케이스 ⑥ — KST 자정 cross 시 카운터 키가 새 YYYY-MM-DD로 리셋(키 분리)."""
+    from datetime import datetime
+
+    _ = _FakeRedis()  # presence sanity
+
+    # KST 자정 직전(May 4 23:59) — 기존 키.
+    fake_now_late = datetime(2026, 5, 4, 14, 59, 0, tzinfo=UTC)  # UTC 14:59 = KST 23:59
+
+    class _FakeDatetime:
+        @staticmethod
+        def now(tz=None):  # type: ignore[no-untyped-def]
+            return fake_now_late.astimezone(tz) if tz else fake_now_late
+
+    monkeypatch.setattr(openai_adapter, "datetime", _FakeDatetime)
+    key_late = openai_adapter._vision_cost_counter_key()
+
+    # KST 자정 cross — 새 키 생성.
+    fake_now_early = datetime(2026, 5, 4, 15, 1, 0, tzinfo=UTC)  # UTC 15:01 = KST 00:01 (May 5)
+
+    class _FakeDatetime2:
+        @staticmethod
+        def now(tz=None):  # type: ignore[no-untyped-def]
+            return fake_now_early.astimezone(tz) if tz else fake_now_early
+
+    monkeypatch.setattr(openai_adapter, "datetime", _FakeDatetime2)
+    key_early = openai_adapter._vision_cost_counter_key()
+
+    # 키가 다른 날짜로 분리 — 카운터 자연 리셋.
+    assert key_late != key_early
+    assert "2026-05-04" in key_late
+    assert "2026-05-05" in key_early

@@ -30,6 +30,7 @@ from app.core.exceptions import (
     AutomatedDecisionConsentVersionMismatchError,
     ConsentVersionMismatchError,
 )
+from app.core.proxy import get_real_client_ip
 from app.db.models.consent import Consent
 from app.db.models.user import User
 from app.domain.legal_documents import CURRENT_VERSIONS
@@ -205,7 +206,7 @@ async def submit_consents(
     _validate_versions(body)
 
     now = datetime.now(UTC)
-    ip = request.client.host if request.client else None
+    ip = get_real_client_ip(request) or None
     user_agent = _truncate_user_agent(request.headers.get("user-agent"))
 
     insert_stmt = pg_insert(Consent).values(
@@ -281,7 +282,7 @@ async def grant_automated_decision_consent(
     _validate_automated_decision_version(body.automated_decision_version)
 
     now = datetime.now(UTC)
-    ip = request.client.host if request.client else None
+    ip = get_real_client_ip(request) or None
     user_agent = _truncate_user_agent(request.headers.get("user-agent"))
 
     insert_stmt = pg_insert(Consent).values(

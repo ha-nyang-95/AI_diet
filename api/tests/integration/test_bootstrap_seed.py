@@ -199,8 +199,10 @@ async def test_bootstrap_seed_idempotent(
 
     second_food_inserted, second_food_updated, second_food_total = second[:3]
     assert second_food_inserted == 0
-    assert second_food_updated == 50
-    assert second_food_total == 50
+    # Story 3.9 AC9 — CSV에 외식 50종 추가됨. primary fetch 50건 + CSV fallback 50건 =
+    # 총 100건. 두 번째 호출은 모두 UPDATE 분기로 동일 count 유지(idempotent 정합).
+    assert second_food_updated == 100
+    assert second_food_total == 100
 
 
 def test_bootstrap_seed_prod_fail_fast(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

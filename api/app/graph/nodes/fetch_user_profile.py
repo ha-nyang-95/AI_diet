@@ -23,7 +23,7 @@ from app.graph.nodes._wrapper import _node_wrapper
 from app.graph.state import MealAnalysisState, UserProfileSnapshot
 
 
-@_node_wrapper("fetch_user_profile")
+@_node_wrapper("fetch_user_profile", deterministic=True)
 async def fetch_user_profile(state: MealAnalysisState, *, deps: NodeDeps) -> dict[str, Any]:
     user_id = state["user_id"]
     async with deps.session_maker() as session:

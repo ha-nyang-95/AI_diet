@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 
 import pytest
+from fastapi import Response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.deps import require_automated_decision_consent, require_basic_consents
@@ -25,11 +26,15 @@ UserFactory = Callable[..., Awaitable[User]]
 ConsentFactory = Callable[..., Awaitable[Consent]]
 
 
-async def _call(user: User) -> User:
-    """``require_basic_consents``를 직접 호출 — FastAPI Depends 우회 단위 테스트."""
+async def _call(user: User, *, response: Response | None = None) -> User:
+    """``require_basic_consents``를 직접 호출 — FastAPI Depends 우회 단위 테스트.
+
+    Story 3.9 AC4 — ``response`` 파라미터 추가(minor mismatch 시 헤더 첨부 검증용).
+    """
     session_maker: async_sessionmaker[AsyncSession] = app.state.session_maker
+    response = response if response is not None else Response()
     async with session_maker() as session:
-        return await require_basic_consents(db=session, user=user)
+        return await require_basic_consents(response=response, db=session, user=user)
 
 
 async def _call_ad(user: User) -> User:

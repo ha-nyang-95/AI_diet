@@ -27,7 +27,7 @@ from datetime import UTC
 from typing import Annotated, Final, Literal
 
 import structlog
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.adapters import openai_adapter
@@ -195,6 +195,7 @@ async def issue_presigned_upload(
 )
 async def parse_meal_image_endpoint(
     body: MealImageParseRequest,
+    request: Request,
     user: Annotated[User, Depends(require_basic_consents)],
 ) -> MealImageParseResponse:
     """식단 사진(R2 업로드 완료) → GPT-4o Vision OCR → ``parsed_items`` 응답.
@@ -228,7 +229,12 @@ async def parse_meal_image_endpoint(
         )
 
     start = time.monotonic()
-    parsed = await openai_adapter.parse_meal_image(image_url, image_key=body.image_key)
+    # Story 3.9 AC6/AC7 — Redis 24h cache + $5/일 cost cap. redis_client 미설정/장애 시
+    # parse_meal_image 자체가 graceful skip(직접 OpenAI 호출 fallback).
+    redis_client = getattr(request.app.state, "redis", None)
+    parsed = await openai_adapter.parse_meal_image(
+        image_url, image_key=body.image_key, redis_client=redis_client
+    )
     latency_ms = int((time.monotonic() - start) * 1000)
 
     # low_confidence: items 비었거나 min(confidence) < 0.6 (epic AC 명시).

@@ -15,11 +15,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Final, Literal
 
 # Literal 값은 hyphen 통일 — URL/SDK method/SOT dict 키 모두 동일(Story 1.4 AC13).
 LegalDocType = Literal["disclaimer", "terms", "privacy", "automated-decision"]
 LegalLang = Literal["ko", "en"]
+
+
+# Story 3.9 AC4 — 약관 bump 강도 분기. ``major``는 강제 재동의(403 차단), ``minor``는
+# 통과 + ``X-Consent-Update-Available`` 헤더로 클라이언트 banner 표시.
+# default ``"major"``: 안전 측 fallback — 신규 문서에 ``version_type`` 누락 시 강제
+# 재동의로 회귀 차단.
+LegalVersionType = Literal["major", "minor"]
 
 
 @dataclass(frozen=True)
@@ -30,6 +37,7 @@ class LegalDocument:
     title: str
     body: str  # 풀텍스트(여러 문단 \n\n 구분)
     updated_at: datetime  # ISO 8601 UTC
+    version_type: LegalVersionType = "major"
 
 
 # --- 디스클레이머 (research 3.4 본문 정합) -----------------------------------
@@ -283,7 +291,9 @@ LEGAL_DOCUMENTS: dict[tuple[LegalDocType, LegalLang], LegalDocument] = {
         body=_TERMS_EN,
         updated_at=_BASELINE_UPDATED_AT,
     ),
-    # Story 3.8 bump — privacy 본문만 갱신.
+    # Story 3.8 bump — privacy 본문만 갱신. Story 3.9 AC4 ``version_type="minor"``로
+    # 분류 — LangSmith 운영 옵저버빌리티 처리 위탁 + 거부 권리 단락 추가는 정보주체
+    # 권리 영향이 낮아 강제 재동의(major) 회피, 헤더 banner로 안내만 강화.
     ("privacy", "ko"): LegalDocument(
         type="privacy",
         lang="ko",
@@ -291,6 +301,7 @@ LEGAL_DOCUMENTS: dict[tuple[LegalDocType, LegalLang], LegalDocument] = {
         title="개인정보 처리방침",
         body=_PRIVACY_KO,
         updated_at=_PRIVACY_UPDATED_AT,
+        version_type="minor",
     ),
     ("privacy", "en"): LegalDocument(
         type="privacy",
@@ -299,6 +310,7 @@ LEGAL_DOCUMENTS: dict[tuple[LegalDocType, LegalLang], LegalDocument] = {
         title="Privacy Policy",
         body=_PRIVACY_EN,
         updated_at=_PRIVACY_UPDATED_AT,
+        version_type="minor",
     ),
     # Story 1.4 — hyphen 키 통일(Literal/URL/SOT 키 1:1). 본문 미변경이라 baseline 유지.
     ("automated-decision", "ko"): LegalDocument(
@@ -341,3 +353,18 @@ CURRENT_VERSIONS: dict[str, str] = {
     # 갱신 시 본 키만 독립 bump 가능(``_VERSION_AUTOMATED_DECISION_KO`` 별도 const).
     "automated-decision": _BASELINE_VERSION_KO,
 }
+
+
+# Story 3.9 AC4 — version_type SOT (consents 키 → ``major``|``minor``).
+# ``sensitive_personal_info``는 ``privacy``와 동일 본문/version을 공유하므로 같은 분류
+# (minor) 적용. ``automated-decision``은 PIPA 22조의2 별도 동의 — major 강제 유지.
+CURRENT_VERSION_TYPES: dict[str, LegalVersionType] = {
+    "disclaimer": "major",
+    "terms": "major",
+    "privacy": "minor",
+    "sensitive_personal_info": "minor",
+    "automated-decision": "major",
+}
+
+
+X_CONSENT_UPDATE_AVAILABLE_HEADER: Final[str] = "X-Consent-Update-Available"

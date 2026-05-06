@@ -55,7 +55,11 @@ SAFE_REPLACEMENTS: Final[dict[str, str]] = {
 #
 # CR MJ-9 — 1-level nested paren 지원 패턴(`(출처: 기관 (2020) 문서)` 같은 한국 학술
 # 인용 형식에서 첫 `)`에서 끊어지면 본문 후반 leak). 추가 nested 깊이는 드물어 OUT.
-_CITATION_PATTERN: Final[re.Pattern[str]] = re.compile(r"\(출처:[^()]*(?:\([^)]*\)[^()]*)*\)")
+# Story 3.9 AC14 — fullwidth colon(:) + leading whitespace + 전각공백( ) 변형 수용.
+# 매트릭스: ``(출처:`` ``( 출처:`` ``(출처：`` ``( 출처 :`` — LLM 환각 출력 정상화.
+_CITATION_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"\(\s*출처\s*[:：][^()]*(?:\([^)]*\)[^()]*)*\)"
+)
 
 
 def _mask_citations(text: str) -> str:

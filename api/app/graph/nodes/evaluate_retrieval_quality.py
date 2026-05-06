@@ -24,7 +24,7 @@ from app.graph.nodes._wrapper import _node_wrapper
 from app.graph.state import EvaluationDecision, MealAnalysisState, get_state_field
 
 
-@_node_wrapper("evaluate_retrieval_quality")
+@_node_wrapper("evaluate_retrieval_quality", deterministic=True)
 async def evaluate_retrieval_quality(
     state: MealAnalysisState,
     *,

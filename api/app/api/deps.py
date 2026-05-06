@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Annotated
 
-from fastapi import Cookie, Depends, Header, Request
+from fastapi import Cookie, Depends, Header, Request, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,7 +31,11 @@ from app.core.security import (
 )
 from app.db.models.consent import Consent
 from app.db.models.user import User
-from app.domain.legal_documents import CURRENT_VERSIONS
+from app.domain.legal_documents import (
+    CURRENT_VERSION_TYPES,
+    CURRENT_VERSIONS,
+    X_CONSENT_UPDATE_AVAILABLE_HEADER,
+)
 
 
 def _extract_token(
@@ -133,7 +137,46 @@ def _has_all_basic_consents(row: Consent | None) -> bool:
     )
 
 
+# Story 3.9 AC4 — major / minor 버전 분기.
+# - 4 timestamp 중 하나라도 NULL → 동의 미진행, 차단(major).
+# - version mismatch 중 하나라도 ``CURRENT_VERSION_TYPES[doc]=="major"`` → 차단.
+# - 모든 mismatch가 ``"minor"`` → 통과 + ``X-Consent-Update-Available`` 헤더 첨부.
+def _check_basic_consents(row: Consent | None) -> tuple[bool, dict[str, str]]:
+    """``(passed, minor_updates)``. minor_updates: ``doc_key → latest_version``."""
+    if row is None:
+        return False, {}
+    if (
+        row.disclaimer_acknowledged_at is None
+        or row.terms_consent_at is None
+        or row.privacy_consent_at is None
+        or row.sensitive_personal_info_consent_at is None
+    ):
+        return False, {}
+
+    minor_updates: dict[str, str] = {}
+    has_major_mismatch = False
+    for doc_key, attr in (
+        ("disclaimer", "disclaimer_version"),
+        ("terms", "terms_version"),
+        ("privacy", "privacy_version"),
+        ("sensitive_personal_info", "sensitive_personal_info_version"),
+    ):
+        user_version = getattr(row, attr)
+        latest = CURRENT_VERSIONS[doc_key]
+        if user_version != latest:
+            # default ``"major"`` fallback — 키 누락 시 안전 측 차단.
+            if CURRENT_VERSION_TYPES.get(doc_key, "major") == "major":
+                has_major_mismatch = True
+            else:
+                minor_updates[doc_key] = latest
+
+    if has_major_mismatch:
+        return False, {}
+    return True, minor_updates
+
+
 async def require_basic_consents(
+    response: Response,
     db: DbSession,
     user: Annotated[User, Depends(current_user)],
 ) -> User:
@@ -152,8 +195,14 @@ async def require_basic_consents(
     """
     result = await db.execute(select(Consent).where(Consent.user_id == user.id))
     row = result.scalar_one_or_none()
-    if not _has_all_basic_consents(row):
+    passed, minor_updates = _check_basic_consents(row)
+    if not passed:
         raise BasicConsentMissingError("basic consents required")
+    if minor_updates:
+        # ``doc_key=version,...`` 인코딩(comma-separated). 모바일/Web 클라이언트가
+        # 헤더를 읽고 banner로 사용자 안내(banner UI는 Story 8.6 forward-compat).
+        encoded = ",".join(f"{k}={v}" for k, v in minor_updates.items())
+        response.headers[X_CONSENT_UPDATE_AVAILABLE_HEADER] = encoded
     return user
 
 

@@ -259,3 +259,54 @@ def test_nested_paren_citation_preserved() -> None:
     assert all(v[0] != "치료" for v in violations)
     replaced = apply_replacements(text)
     assert "치료 영양 섭취기준" in replaced  # 인용 본문 보존
+
+
+# ---------------------------------------------------------------------------
+# Story 3.9 AC14 — citation 패턴 fullwidth/whitespace 변형 수용 (5 케이스)
+# ---------------------------------------------------------------------------
+
+
+def test_citation_halfwidth_colon_baseline() -> None:
+    """AC14 케이스 ① — halfwidth colon ``(출처:`` baseline 정합 (회귀 가드)."""
+    text = "권장합니다 (출처: 식약처, 2020 한국인 영양소 섭취기준, 2020) 치료가 필요"
+    violations = find_violations(text)
+    # 인용 본문 안 토큰 mask, 인용 외 ``치료`` fire.
+    assert any(v[0] == "치료" for v in violations)
+
+
+def test_citation_fullwidth_colon_accepted() -> None:
+    """AC14 케이스 ② — fullwidth colon ``(출처：``  변형 매칭."""
+    text = "권장합니다 (출처：식약처, 치료법, 2020) 외부에서 치료가 필요"
+    replaced = apply_replacements(text)
+    # 인용 본문 안 ``치료법``은 보존.
+    assert "치료법" in replaced
+    # 인용 외 ``치료``는 안전 워딩으로 치환.
+    assert "치료가 필요" not in replaced
+
+
+def test_citation_leading_whitespace_accepted() -> None:
+    """AC14 케이스 ③ — `( 출처:` leading whitespace 변형."""
+    text = "권장합니다 ( 출처: 식약처, 치료법, 2020) 치료가 필요"
+    replaced = apply_replacements(text)
+    assert "치료법" in replaced  # 인용 보존
+    assert "치료가 필요" not in replaced  # 인용 외 변경
+
+
+def test_citation_leading_idea_space_accepted() -> None:
+    """AC14 케이스 ④ — `(　출처:` leading 전각공백 변형."""
+    text = "권장합니다 (　출처:　식약처,　치료법, 2020) 치료가 필요"
+    replaced = apply_replacements(text)
+    assert "치료법" in replaced
+    assert "치료가 필요" not in replaced
+
+
+def test_citation_baseline_match_no_regression() -> None:
+    """AC14 케이스 ⑤ — 기존 baseline ``(출처:`` 매칭 회귀 0건."""
+    text = "(출처: 보건복지부, 2020 KDRIs, 2020) 권장. 치료가 아닙니다"
+    violations = find_violations(text)
+    # 인용 본문 안에는 prohibited term 없음 → fire 0.
+    citations_only_text = "(출처: 보건복지부, 2020 KDRIs, 2020)"
+    inner_violations = find_violations(citations_only_text)
+    assert inner_violations == []
+    # 인용 외 ``치료``만 fire.
+    assert any(v[0] == "치료" for v in violations)

@@ -188,3 +188,14 @@ def test_is_quota_exceeded_handles_null_intermediate_fields() -> None:
     assert mfds_openapi._is_quota_exceeded(fake_response, {"resultCode": "22"}) is True
     # 정상 코드 — quota 아님.
     assert mfds_openapi._is_quota_exceeded(fake_response, {"header": {"resultCode": "00"}}) is False
+
+
+def test_max_pages_and_db_grp_cm_groups_sot() -> None:
+    """Story 3.9 AC8 회귀 가드 — ``MFDS_MAX_PAGES``와 ``DB_GRP_CM_GROUPS`` SOT 단언.
+
+    silent rollback 차단 — `max_pages=500` + `D|P` 양 그룹 결정이 후속 PR에서 묵묵히
+    뒤집히지 않도록 정확 값을 단언. 본 const 변경 시 테스트 fail로 PR 리뷰 강제.
+    """
+    assert mfds_openapi.MFDS_MAX_PAGES == 500
+    assert mfds_openapi.DB_GRP_CM_GROUPS == ("D", "P")
+    assert mfds_openapi.DB_GRP_CM_KEY == "DB_GRP_CM"
