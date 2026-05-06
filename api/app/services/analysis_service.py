@@ -142,14 +142,18 @@ class AnalysisService:
         sanitized: dict[str, Any] = {
             k: user_input[k] for k in user_input if k in _AURESUME_WHITELIST
         }
-        user_parsed_items = sanitized.get("parsed_items")  # 사용자 편집 항목(있으면).
+        # CR Gemini fix (2026-05-06) — falsy check(``if user_parsed_items``)는 빈 list
+        # ``[]``를 "absent"로 오해석해 사용자가 의도적으로 비운 항목을 LLM이 다시
+        # 채워버리는 회귀가 가능. ``is not None``으로 *명시 부재(None)*만 재parse 트리거.
+        user_parsed_items = sanitized.get("parsed_items")  # None or [] or [items]
 
         config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
         cmd: Command[Any] = Command(
             update={
                 "raw_text": clarified,
-                # 사용자 제공 parsed_items가 있으면 propagate, 없으면 None(parse_meal 재실행).
-                "parsed_items": user_parsed_items if user_parsed_items else None,
+                # ``user_parsed_items``는 None(부재) / [](명시 비움) / [items](명시 항목)
+                # 셋 모두 그대로 propagate — None만 parse_meal LLM 재실행 트리거.
+                "parsed_items": user_parsed_items,
                 "retrieval": None,
                 "rewrite_attempts": 0,
                 "node_errors": [],
@@ -157,8 +161,8 @@ class AnalysisService:
                 "clarification_options": [],
                 "evaluation_decision": None,
                 "rewritten_query": None,
-                # 사용자가 직접 parsed_items 제공한 경우 LLM parse 강제 불필요.
-                "force_llm_parse": not user_parsed_items,
+                # 사용자가 명시 list(빈 list 포함)를 넘긴 경우 LLM 재parse 불필요.
+                "force_llm_parse": user_parsed_items is None,
             },
             goto="parse_meal",
         )
