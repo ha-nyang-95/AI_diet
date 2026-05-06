@@ -138,7 +138,10 @@ def _classify_http_error(exc: requests.exceptions.HTTPError) -> ExpoPushError:
         return ExpoPushAuthError(f"expo_push.auth.{status_code}")
     if isinstance(status_code, int) and 500 <= status_code < 600:
         return ExpoPushUnavailableError(f"expo_push.server_error.{status_code}")
-    return ExpoPushError(f"expo_push.http_error.{status_code}")
+    # Gemini Code Assist (PR #30) — ``status_code``가 ``None``인 경우 ``http_error.None``
+    # 같은 비유익 라벨 대신 ``unknown`` fallback. ``_classify_server_error``의
+    # ``status_code or 'unknown'`` 패턴과 정합.
+    return ExpoPushError(f"expo_push.http_error.{status_code or 'unknown'}")
 
 
 def _classify_server_error(exc: PushServerError) -> ExpoPushError:
