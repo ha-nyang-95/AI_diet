@@ -11,13 +11,14 @@
 | LLM | `OPENAI_API_KEY` | OpenAI Platform | 분기 1회 | §1 |
 | LLM | `ANTHROPIC_API_KEY` | Anthropic Console | 분기 1회 | §2 |
 | 옵저버빌리티 | `LANGSMITH_API_KEY` | LangSmith UI | 분기 1회 | §3 (Story 3.8) |
-| OAuth | `GOOGLE_OAUTH_CLIENT_SECRET` | Google Console | 6개월 | §4 (Story 8.5) |
-| 결제 | `TOSS_SECRET_KEY` | Toss Payments | 12개월 (Sandbox 무회전) | §5 (Story 8.5) |
-| 모니터링 | `SENTRY_DSN` | Sentry UI | 12개월 | §6 (Story 8.5) |
-| 스토리지 | `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | Cloudflare Dashboard | 6개월 | §7 (Story 8.5) |
+| Push | `EXPO_ACCESS_TOKEN` | EAS Console | 6개월 | §4 (Story 4.2) |
+| OAuth | `GOOGLE_OAUTH_CLIENT_SECRET` | Google Console | 6개월 | §5 (Story 8.5) |
+| 결제 | `TOSS_SECRET_KEY` | Toss Payments | 12개월 (Sandbox 무회전) | §6 (Story 8.5) |
+| 모니터링 | `SENTRY_DSN` | Sentry UI | 12개월 | §7 (Story 8.5) |
+| 스토리지 | `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | Cloudflare Dashboard | 6개월 | §8 (Story 8.5) |
 
-§1 ~ §3은 본 시점(Story 3.8) SOT. §4 ~ §7은 placeholder — Story 8.5 운영 polish
-단계에서 채움.
+§1 ~ §4는 현 시점 SOT(Story 3.8 §1-§3 + Story 4.2 §4). §5 ~ §8은 placeholder — Story
+8.5 운영 polish 단계에서 채움.
 
 ---
 
@@ -85,7 +86,67 @@ LangSmith 트레이스 송신 + dataset 관리에 사용되는 API key. 분기 1
 
 ---
 
-## 4-7. 기타 secret 회전 (Story 8.5 polish 단계 채움)
+## 4. EXPO_ACCESS_TOKEN 회전 (Story 4.2 AC10)
+
+EAS Console에서 발급되는 access token으로 `app/adapters/expo_push.py`이 Expo Push API
+호출 시 `Authorization: Bearer ...` 헤더에 사용. EAS Console *enhanced security mode*
+활성 시 필수 — 6개월 1회 회전.
+
+### 4.1. 신규 token 발급
+
+1. [EAS Console](https://expo.dev/accounts/<account>/settings/access-tokens) 운영자 계정으로 로그인.
+2. `Settings` → `Access Tokens` → `Generate Token`.
+3. token 이름: `balancenote-prod-2026-Q4` 등 *환경+분기* 명명. scope는 *Push Notifications*.
+4. 발급된 token을 *임시 보안 노트*에 복사(이후 페이지 이탈 시 재조회 불가).
+
+### 4.2. Railway secrets 갱신 + 24h overlap
+
+1. [Railway Dashboard](https://railway.app) → BalanceNote 프로젝트 → 환경 선택
+   (staging 또는 prod).
+2. `Variables` 탭 → `EXPO_ACCESS_TOKEN` 항목 → 신규 token 붙여넣기 → `Update`.
+3. 자동 재배포 트리거 — 1-2분 대기 후 `https://<service>.railway.app/healthz`
+   200 OK 확인.
+4. **24h overlap 운영** — 구 token revoke 전에 in-flight cron sweep이 기존 token으로 send
+   진행 중일 수 있음. cron은 30분 주기라 24h는 충분한 grace.
+
+### 4.3. send 도착 검증
+
+신규 token 적용 후 다음 cron sweep tick(최대 30분 대기) 또는 직접 호출(SOP §8.3):
+
+```
+[info] nudge.sweep.start
+[info] nudge.sweep.eligible user_count=N
+[info] nudge.sent user_id=u_... ticket_id=...
+```
+
+`ticket.status="ok"` 응답 확인 — `Authorization` 헤더가 신규 token으로 정상 통과.
+
+### 4.4. 기존 token revoke
+
+1. §4.3 검증 통과 + 24h overlap 후 EAS Console → `Access Tokens` → 기존 token → `Revoke`.
+2. revoke 직후 cron 한 cycle 추가 모니터링 — `nudge.skipped reason=adapter_error:ExpoPushAuthError`
+   발생 시 즉시 §4.5 rollback.
+
+### 4.5. rollback 절차
+
+신규 token 적용 후 `ExpoPushAuthError`(401) 발생 시:
+
+1. EAS Console → 기존 token이 *아직 revoke되지 않았다면*(overlap 기간 내) 즉시
+   Railway secrets에서 기존 token으로 복구.
+2. 기존 token revoke 완료된 상태라면, 새 token *즉시 재발급* + §4.2-§4.3 다시 실행.
+3. 24h 안에 회복 불가 시 `EXPO_ACCESS_TOKEN=`(빈 문자열)로 강등 — Expo SDK 자체 무인증
+   모드는 *enhanced security mode 비활성*된 프로젝트에서만 동작. enhanced mode 활성 prod는
+   nudge 발송 자체가 차단됨 — 사용자 영향(NFR-R 정합) 검토 후 결정.
+
+### 4.6. 변경 트리거
+
+- 운영자 퇴사/권한 변경
+- token leak 의심
+- 6개월 정기 회전 (캘린더)
+
+---
+
+## 5-8. 기타 secret 회전 (Story 8.5 polish 단계 채움)
 
 본 단락은 placeholder — Story 8.5 운영 polish 단계에서 OpenAI / Anthropic /
 Google OAuth / Toss / Sentry / Cloudflare R2 회전 절차를 동일 패턴으로 채운다.

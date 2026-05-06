@@ -1,8 +1,8 @@
-# Push Notifications — Dev SOP (Story 4.1)
+# Push Notifications — Dev SOP (Story 4.1 / Story 4.2)
 
-**Audience**: 모바일 개발자.
-**Purpose**: Expo push 알림 token을 dev에서 발급·검증하기 위한 단계별 절차.
-**Last updated**: 2026-05-06 (Story 4.1).
+**Audience**: 모바일 / 백엔드 개발자.
+**Purpose**: Expo push 알림 token을 dev에서 발급·검증 + 백엔드 cron sweep 검증.
+**Last updated**: 2026-05-06 (Story 4.2 — APScheduler nudge cron + 딥링크 wire 추가).
 
 ---
 
@@ -83,7 +83,7 @@ token 발급 확인 후 [Expo Push Notifications Tool](https://expo.dev/notifica
 3. **Send a Notification** 클릭.
 4. device에 push 도달 — tap → 앱 진입 또는 background에서 알림 표시.
 
-서버 측 send는 Story 4.2에서 APScheduler cron + Python `exponent_server_sdk`로 일별 발송 (본 Story 4.1 OUT — token 등록까지만).
+서버 측 send는 **Story 4.2에서 도입됨** — `app/workers/nudge_scheduler.py` cron이 매 30분 KST sweep + Expo push send. 자세한 dev 검증 절차는 §8 *Cron sweep dev 검증* 참조.
 
 ---
 
@@ -111,8 +111,90 @@ OEM Android에서 `Linking.openSettings()` deep link가 silent fail하는 경우
 
 ---
 
+## 8. Cron sweep dev 검증 (Story 4.2)
+
+서버 측 `app/workers/nudge_scheduler.py` cron이 매 30분 KST sweep — *알림 ON + 권한 OK + 알림 시간 + 30분 경과 + 당일 식단 미입력* 사용자에게 push 발송. dev에서 자연 cron(30분 대기)이 부담스러우면 직접 호출로 검증.
+
+### 8.1 환경변수
+
+```
+EXPO_ACCESS_TOKEN=                   # EAS Console > Access Tokens (없으면 빈 문자열도 dev OK — Expo SDK 자체 무인증 모드 허용)
+ENVIRONMENT=dev                      # ci/test는 cron 자동 disable (`app/workers/scheduler.py` SOT)
+```
+
+prod에서 EAS *enhanced security mode* 활성 시 token 필수 — 401 응답 시 `ExpoPushAuthError` raise + Sentry alert. 키 회전: `docs/runbook/secret-rotation.md` §4 참조.
+
+### 8.2 사용자 fixture 셋업
+
+dev DB에 다음 조건 사용자 1건:
+
+```sql
+UPDATE users
+SET notifications_enabled = true,
+    notification_time = '20:00:00',          -- cron이 20:30 cycle에서 매칭(notification_time + 30min = 20:30)
+    expo_push_token = 'ExponentPushToken[<EAS dev build에서 발급한 실 token>]'
+WHERE id = '<your-user-id>';
+
+DELETE FROM meals
+WHERE user_id = '<your-user-id>'
+  AND ate_at AT TIME ZONE 'Asia/Seoul' >= CURRENT_DATE;
+```
+
+당일 식단 0건 + 동일 날 동일 kind ``notifications`` 행 미존재 보장.
+
+### 8.3 sweep 직접 호출
+
+```python
+# api/scripts/run_nudge_sweep_once.py (없으면 임시 작성 — 운영자용 SOP)
+import asyncio
+
+from app.main import app
+from app.workers.nudge_scheduler import sweep_unrecorded_meals
+
+async def main() -> None:
+    async with app.router.lifespan_context(app):
+        stats = await sweep_unrecorded_meals(app.state.session_maker)
+        print(stats)
+
+asyncio.run(main())
+```
+
+또는 Python REPL에서 동일 호출. 출력 stats:
+
+```
+{
+  "users_eligible_count": 1,
+  "nudges_sent_count": 1,
+  "device_not_registered_count": 0,
+  "transient_error_count": 0,
+}
+```
+
+### 8.4 자연 cron 검증
+
+`uv run uvicorn app.main:app`로 dev server 시작 → 30분 단위 cron이 자동 fire(`apscheduler --debug`로 backgrounnd 잡 trace 가능). lifespan log:
+
+```
+[info] scheduler.started timezone=Asia/Seoul
+[info] nudge.job.registered job_id=nudge_sweep_unrecorded_meals
+[info] nudge.sweep.start now_kst=2026-05-06T20:30:00+09:00
+[info] nudge.sweep.eligible user_count=1
+[info] nudge.sent user_id=u_abc12345 ticket_id=...
+```
+
+### 8.5 트러블슈팅
+
+| 증상 | 원인 | 해결 |
+|---|---|---|
+| `nudge.sweep.eligible user_count=0` | sweep query 미매칭 | 8.2 fixture 재확인 — `notification_time + 30min`이 sweep cycle 윈도우에 포함되는지 |
+| `nudge.skipped reason=device_not_registered` | EAS가 token revoke (앱 삭제 등) | 정상 — `expo_push_token` NULL set + 다음 cycle 자동 제외 |
+| `nudge.skipped reason=adapter_error:ExpoPushAuthError` | EAS access token 만료 | `docs/runbook/secret-rotation.md` §4 회전 SOP |
+| `scheduler.start.disabled_for_environment` | environment in {ci,test} | 정상 — pytest 격리 정합 |
+
+---
+
 ## See also
 
 - `docs/runbook/deployment.md` §4 — 배포 시 EAS credentials 검증.
-- Story 4.2 (APScheduler nudge 미기록 푸시) — 본 token을 소비해 일별 push 발송.
+- `docs/runbook/secret-rotation.md` §4 — `EXPO_ACCESS_TOKEN` 회전 5단계.
 - Story 8.5 클라우드 배포 hardening runbook — APNs 키 / FCM v1 prod 검증 절차.

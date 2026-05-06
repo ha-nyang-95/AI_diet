@@ -93,3 +93,55 @@ async def test_lifespan_graceful_when_setup_raises_generic_exception(
     async with lifespan(test_app):
         assert getattr(test_app.state, "graph", "missing") is None
         assert getattr(test_app.state, "analysis_service", "missing") is None
+
+
+# Story 4.2 — scheduler 5번째 자원 lifespan 검증 (AC4)
+
+
+async def test_lifespan_scheduler_disabled_in_test_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``environment="test"``는 scheduler init skip — ``app.state.scheduler is None``.
+
+    Story 4.2 AC2 — 분 단위 cron이 pytest 격리를 깨지 않도록 ci/test는 fail-closed 정합.
+    """
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "environment", "test")
+    test_app = FastAPI(lifespan=lifespan)
+    async with lifespan(test_app):
+        assert getattr(test_app.state, "scheduler", "missing") is None
+
+
+async def test_lifespan_scheduler_initializes_in_dev_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``environment="dev"``는 scheduler init + nudge job 등록 검증.
+
+    ``app.state.scheduler``가 존재 + ``nudge_sweep_unrecorded_meals`` 잡 등록.
+
+    CR P5 — 실 ``AsyncIOScheduler.start()``는 백그라운드 thread/loop을 띄워 lifespan exit
+    시 ``wait=False`` shutdown으로 leak 가능. ``start_scheduler`` 헬퍼를 monkeypatch로
+    no-op 처리해 thread 생성 자체를 차단(스케줄러 인스턴스 + job 등록만 검증).
+    """
+    from app.core.config import settings
+    from app.workers.nudge_scheduler import NUDGE_JOB_ID
+
+    monkeypatch.setattr(settings, "environment", "dev")
+
+    # CR P5 — ``start_scheduler``를 no-op로 monkeypatch — 백그라운드 thread leak 차단.
+    started_flag: dict[str, bool] = {"called": False}
+
+    async def _no_op_start(_app: FastAPI) -> None:
+        started_flag["called"] = True
+
+    monkeypatch.setattr("app.main.start_scheduler", _no_op_start)
+
+    test_app = FastAPI(lifespan=lifespan)
+    async with lifespan(test_app):
+        scheduler = getattr(test_app.state, "scheduler", None)
+        assert scheduler is not None
+        # ``start_scheduler``가 호출됐는지 검증(no-op이지만 lifespan flow 자체는 진입).
+        assert started_flag["called"] is True
+        jobs = scheduler.get_jobs()
+        assert any(job.id == NUDGE_JOB_ID for job in jobs)

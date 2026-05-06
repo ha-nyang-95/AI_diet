@@ -54,6 +54,8 @@ from app.graph.checkpointer import build_checkpointer, dispose_checkpointer
 from app.graph.deps import NodeDeps
 from app.graph.pipeline import compile_pipeline
 from app.services.analysis_service import AnalysisService
+from app.workers.nudge_scheduler import register_nudge_job
+from app.workers.scheduler import build_scheduler, shutdown_scheduler, start_scheduler
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -183,10 +185,37 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.graph = None
         app.state.analysis_service = None
 
+    # Story 4.2 — APScheduler 5번째 lifespan 자원. nudge sweep cron(매 30분 KST) 등록.
+    # Story 3.3/3.8 lifespan 패턴 정합 — 독립 try/except + graceful 분기. ci/test 환경은
+    # ``app.state.scheduler = None``으로 박고 잡 등록 skip.
+    app.state.scheduler = None
+    if settings.environment in _NON_PROD_ENVIRONMENTS:
+        log.info("app.startup.scheduler_disabled_for_environment", environment=settings.environment)
+    elif app.state.session_maker is None:
+        log.warning("app.startup.scheduler_skipped_no_session_maker")
+    else:
+        try:
+            scheduler = build_scheduler()
+            register_nudge_job(scheduler, app.state.session_maker, app.state.redis)
+            app.state.scheduler = scheduler
+            await start_scheduler(app)
+        except Exception as exc:  # noqa: BLE001
+            # SchedulerAlreadyRunningError / ImportError / 잡 등록 실패 등 — graceful.
+            log.error("app.startup.scheduler_init_failed", error=str(exc))
+            app.state.scheduler = None
+
     try:
         yield
     finally:
         # cleanup 자원별 독립 — 한쪽 실패가 나머지 cleanup을 막지 않음.
+
+        # Story 4.2 — scheduler 5번째 자원 cleanup. ``shutdown_scheduler`` 자체가
+        # ``app.state.scheduler is None`` 분기 + ``running=False`` 분기 graceful 처리.
+        try:
+            await shutdown_scheduler(app)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("app.shutdown.scheduler_dispose_failed", error=str(exc))
+
         cleanup_pool = getattr(app.state, "checkpointer_pool", None)
         if cleanup_pool is not None:
             try:
