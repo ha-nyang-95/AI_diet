@@ -248,6 +248,35 @@ export function resolveDeepLinkTarget(
 let _globalHandlerInstalled = false;
 let _tapSubscription: Notifications.Subscription | null = null;
 
+// CR P1 — cold-start `useLastNotificationResponse` 와 foreground tap listener가 동일
+// 알림에 대해 둘 다 fire 시 navigation 중복(`router.replace` + `router.push`) 발생 가능.
+// 처리된 notification identifier를 module-level Set에 기록 + 한쪽에서 처리됐으면 다른
+// 쪽이 skip. Set은 메모리 leak 방지 위해 ``_MAX_HANDLED_IDENTIFIERS`` 도달 시 oldest
+// 1개씩 자동 evict(FIFO).
+const _MAX_HANDLED_IDENTIFIERS = 64;
+const _handledIdentifiers = new Set<string>();
+
+function _markHandled(id: string | null | undefined): void {
+  if (!id) return;
+  _handledIdentifiers.add(id);
+  if (_handledIdentifiers.size > _MAX_HANDLED_IDENTIFIERS) {
+    const first = _handledIdentifiers.values().next().value;
+    if (first !== undefined) _handledIdentifiers.delete(first);
+  }
+}
+
+/**
+ * CR P1 — cold-start 분기에서 navigation 처리 직전에 호출 → 동일 identifier가 listener
+ * 분기에서 다시 fire되어도 skip하도록 표시. ``_layout.tsx``의 cold-start useEffect에서
+ * `router.replace` 호출 직전에 호출.
+ */
+export function markPushResponseHandled(
+  response: Notifications.NotificationResponse | null | undefined,
+): void {
+  if (!response) return;
+  _markHandled(response.notification?.request?.identifier);
+}
+
 /**
  * 앱 root mount 시점에 1회 호출 — foreground 알림 노출 + tap listener 등록.
  *
@@ -277,8 +306,12 @@ export function setupGlobalPushHandler(router: RouterLike): () => void {
     _tapSubscription = null;
   }
   _tapSubscription = Notifications.addNotificationResponseReceivedListener((response) => {
+    // CR P1 — cold-start hook이 이미 처리한 알림이면 skip(navigation 중복 차단).
+    const id = response.notification?.request?.identifier;
+    if (id && _handledIdentifiers.has(id)) return;
     const target = resolveDeepLinkTarget(response);
     if (!target) return;
+    _markHandled(id);
     try {
       router.push(target);
     } catch (error) {

@@ -1,6 +1,6 @@
 # Story 4.2: APScheduler nudge 미기록 푸시 + 딥링크
 
-Status: review
+Status: done
 
 <!-- Validation: Story 4.1에서 박은 baseline 4컬럼(`notifications_enabled`/`notification_time`/`notification_timezone`/`expo_push_token`) + 4 endpoint + 모바일 권한 흐름 + token 등록 SOT를 본 스토리가 *최초 소비*. 본 스토리에서 (1) `app/adapters/expo_push.py` 신규(Expo push send + receipts handling), (2) `app/workers/scheduler.py` AsyncIOScheduler SOT + lifespan wire, (3) `app/workers/nudge_scheduler.py` 미기록 sweep job, (4) `notifications` 테이블 0014 마이그레이션(멱등 가드), (5) 모바일 push tap → `(tabs)/meals/input` deep link wire, (6) DeviceNotRegistered receipts 처리(token 자동 NULL set + Story 4.1 `revoke_push_token` 재사용)을 박는다. 백엔드 신규 의존성 1건: `exponent-server-sdk>=2.2`. -->
 
@@ -417,7 +417,35 @@ claude-opus-4-7[1m] (Amelia / bmad-create-story workflow, 2026-05-06).
 - **AC13 — Architecture compliance**: `expo_push.py` (architecture.md:696/880/914) / `app/workers/scheduler.py` + `nudge_scheduler.py` (703-705/1088-1092) / `notifications` 테이블 (299/392/687) / FR31 mobile push handler + Expo Router deep link (988) — 모든 정합. alembic 0014 chain 충돌 0.
 - **DS 검증 SOT 게이트**: `pytest 867 passed/11 skipped/0 failed` + coverage `84.85%` + `ruff check` 0 에러 + `ruff format --check` 0 에러 + `mypy app` 0 에러 + `mobile pnpm tsc --noEmit` 0 에러 + `mobile pnpm lint` 0 에러 + `web pnpm tsc --noEmit` 0 에러. Story 1.x/2.x/3.x/4.1 회귀 0건.
 
-### File List
+### Review Findings
+
+**3-layer adversarial CR (2026-05-06)** — Blind Hunter 33 / Edge Case Hunter 30 / Acceptance Auditor 5 = **68 raw findings → 5 patch + 7 defer + 56 dismiss**.
+
+Patches (적용 완료 — 2026-05-06):
+
+- [x] [Review][Patch] P1 — cold-start `useLastNotificationResponse` + foreground tap listener가 동일 알림에 대해 `router.replace`/`router.push` double-fire — `_handledIdentifiers` Set + `markPushResponseHandled` export로 dedupe [`mobile/lib/push.ts` / `mobile/app/_layout.tsx`]
+- [x] [Review][Patch] P2 — `ticket.status` unknown 또는 `ticket.details` non-dict 시 AttributeError 가능 + None error_code Sentry 메시지 비유익 — `if ticket.status != "error"` 명시 분기 + `isinstance(ticket.details, dict)` 가드 + `error_code or 'unknown'` 라벨링 [`api/app/workers/nudge_scheduler.py:sweep_unrecorded_meals`]
+- [x] [Review][Patch] P3 — Sentry transaction이 sweep loop raise 시 status 미설정 — `except Exception: transaction.set_status("internal_error"); raise` 추가 [`api/app/workers/nudge_scheduler.py:sweep_unrecorded_meals`]
+- [x] [Review][Patch] P4 — `_record_notification`이 IntegrityError 외 transient DB 에러 미잡음 — post-send 블록을 `try/except Exception` 으로 감싸 per-user skip + `transient_error_count` 증가 + Sentry capture로 sweep loop 보존 [`api/app/workers/nudge_scheduler.py:sweep_unrecorded_meals`]
+- [x] [Review][Patch] P5 — `test_lifespan_scheduler_initializes_in_dev_environment` 실 scheduler thread leak — `start_scheduler`를 no-op `monkeypatch`로 교체해 thread 생성 자체 차단 [`api/tests/test_main_lifespan.py`]
+
+신규 회귀 가드 테스트 3건 추가(`test_nudge_scheduler.py`):
+- `test_sweep_unknown_ticket_status_handled_explicitly` — P2 unknown status 분기 + `capture_message` warning 레벨 검증
+- `test_sweep_ticket_details_non_dict_isinstance_guard` — P2 `details=None` + `error_code or 'unknown'` 라벨 검증
+- `test_sweep_record_notification_db_transient_does_not_break_loop` — P4 OperationalError raise 시 sweep loop 보존 + Sentry capture 검증
+
+Defer (deferred-work.md 등재):
+
+- [x] [Review][Defer] D1 — push-then-INSERT race window + multi-worker 동시 sweep 시 중복 알림 / shutdown wait=False in-flight 중단(reservation 패턴 도입) — Story 8.5 hardening forward [`api/app/workers/nudge_scheduler.py`]
+- [x] [Review][Defer] D2 — `fetch_receipts` 시그니처가 spec(`get_receipts(ticket_ids)`)과 SDK reality(`check_receipts(tickets)`) 차이 + 본 스토리에서 미호출(forward use) — Story 4.4 receipts polling wire-up 시점에 정리 [`api/app/adapters/expo_push.py:fetch_receipts`]
+- [x] [Review][Defer] D3 — Mobile jest 인프라 부재로 `setupGlobalPushHandler` / `resolveDeepLinkTarget` / cold-start hook 단위 테스트 0건(tsc + lint만) — Story 8.4 polish forward(Story 4.1 W1 정합) [`mobile/lib/push.ts` / `mobile/app/_layout.tsx`]
+- [x] [Review][Defer] D4 — `users` 테이블 sweep query에 `notification_time + INTERVAL '30 minutes'` expression partial index 부재(1k+ 사용자 시 sequential scan) — Story 8.5 performance hardening [`api/alembic/versions/0014_create_notifications.py`]
+- [x] [Review][Defer] D5 — `resolveDeepLinkTarget`가 `data.kind` 무시 + 모든 `balancenote://` URL을 `meals/input`로 라우팅 → 미래 `weekly_report_ready` kind 도입 시 misroute — Story 4.4 path 매핑 SOT 도입 시점 정리 [`mobile/lib/push.ts:resolveDeepLinkTarget`]
+- [x] [Review][Defer] D6 — receipts polling 미구현 → ticket OK 후 receipt 단계 DeviceNotRegistered 영구 미감지 → 영원히 발사 안 가는 푸시 매일 시도 — Story 4.4 receipt polling wire-up [`api/app/workers/nudge_scheduler.py`]
+- [x] [Review][Defer] D7 — `today_kst`가 wrap_midnight cycle(00:00 KST)에서 *발사 cycle 기준* day N+1로 박혀, notification_time=23:30 사용자가 day N에 식단 정상 기록했어도 day N+1 첫 cron tick에서 "오늘 저녁 미기록" 알림 수신. 멱등 가드(NOT EXISTS notifications + UNIQUE)는 정상이지만 *해당 cycle의 alarm semantic*이 "어제 알림 시간의 미기록"인지 "오늘 새 날의 시작"인지 spec 자체 모호. 수정 시 sweep window 범위 + target_kst 매핑 + 회귀 테스트 일괄 갱신 필요 — Story 8.4 polish forward(UX 의사결정 + boundary 테스트 정합) [`api/app/workers/nudge_scheduler.py:sweep_unrecorded_meals` / `_fetch_eligible_users`]
+
+Dismiss 56건 — 자세한 사유는 본 CR 세션 내(triage). 대표 분류: (a) 1인 8주 단일 노드 정합 acknowledged(`apscheduler-postgres` 외부 lock / SELECT FOR UPDATE 등 multi-replica 가드 — Story 8.5 forward); (b) 정합 의도(`_NON_PROD_ENVIRONMENTS == _DISABLED_ENVIRONMENTS` 동일 set / `revoke_push_token` SOT 재사용 / `priority="high"` Expo 표준); (c) cosmetic/over-engineering(useEffect deps 중복 / Fast Refresh leak / alembic CHECK explicit drop / kind magic string 중복); (d) spec wording 정합(`PushMessage` vs `ExpoPushPayload` / `redis is None` 가드 functional impact 0 / 테스트 24건 `~22` 초과 OK); (e) 멱등 SOT가 push API double-call 차단(BETWEEN inclusive boundary user는 `NOT EXISTS notifications` SQL filter가 다음 cycle 자동 제외 — defensive 가드 충분).
+
 
 **Backend 신규**:
 - `api/app/adapters/expo_push.py`
@@ -462,3 +490,4 @@ claude-opus-4-7[1m] (Amelia / bmad-create-story workflow, 2026-05-06).
 | Date | Author | Change |
 |---|---|---|
 | 2026-05-06 | Amelia (DS) | Story 4.2 DS 완료 — APScheduler nudge cron + Expo push adapter + notifications 테이블 + lifespan 5번째 자원 wire + mobile cold-start deep link migration. Status: ready-for-dev → in-progress → review. |
+| 2026-05-06 | Amelia (CR) | Story 4.2 CR 완료 — 3-layer adversarial(Blind 33 / Edge 30 / Auditor 5) → 5 patch + 7 defer + 56 dismiss. P1(cold-start dedupe) + P2(ticket defensive) + P3(Sentry status) + P4(DB transient guard) + P5(test thread leak). 회귀 0건: pytest 870/11/0 + coverage 84.91% + ruff/format/mypy 0 + mobile/web tsc 0 + mobile lint 0. Status: review → done. |

@@ -238,56 +238,96 @@ async def sweep_unrecorded_meals(
                 )
                 continue
 
-            if ticket.status == "ok":
-                inserted = await _record_notification(
-                    session_maker,
-                    user_id=user_id,
-                    today_kst=today_kst,
-                    expo_ticket_id=ticket.id,
-                )
-                if inserted:
-                    stats["nudges_sent_count"] += 1
-                    logger.info(
-                        "nudge.sent",
-                        user_id=masked,
-                        ticket_id=ticket.id,
+            # CR P4 — post-send block 전체를 try/except로 감싸 ``_record_notification`` /
+            # ``_revoke_token_for_user``의 ``IntegrityError`` 외 ``OperationalError`` /
+            # ``DBAPIError`` 등 DB transient 실패가 sweep loop 전체를 중단시키지 않도록.
+            try:
+                if ticket.status == "ok":
+                    inserted = await _record_notification(
+                        session_maker,
+                        user_id=user_id,
+                        today_kst=today_kst,
+                        expo_ticket_id=ticket.id,
                     )
-                else:
+                    if inserted:
+                        stats["nudges_sent_count"] += 1
+                        logger.info(
+                            "nudge.sent",
+                            user_id=masked,
+                            ticket_id=ticket.id,
+                        )
+                    else:
+                        logger.warning(
+                            "nudge.skipped",
+                            user_id=masked,
+                            reason="duplicate_unique",
+                        )
+                    continue
+
+                # CR P2 — ``ticket.status``가 ``"ok"`` / ``"error"``가 아닌 unknown
+                # 값(e.g., SDK 미래 버전 ``"warning"``)이면 명시 분기 처리. fall-through로
+                # error 분기 진입 시 ``error_code=None``이 silent하게 transient로 처리되어
+                # Sentry 노이즈 + 무한 retry 가능.
+                if ticket.status != "error":
+                    sentry_sdk.capture_message(
+                        f"nudge.ticket_unknown_status: {ticket.status!r}",
+                        level="warning",
+                    )
+                    stats["transient_error_count"] += 1
                     logger.warning(
                         "nudge.skipped",
                         user_id=masked,
-                        reason="duplicate_unique",
+                        reason=f"unknown_status:{ticket.status}",
                     )
-                continue
+                    continue
 
-            # ticket.status == "error" 분기
-            error_code = (ticket.details or {}).get("error") if ticket.details else None
-            if error_code == "DeviceNotRegistered":
-                # Story 4.1 SOT 재사용 — token NULL set + 다음 cycle 자동 제외.
-                await _revoke_token_for_user(session_maker, user_id=user_id)
-                stats["device_not_registered_count"] += 1
+                # CR P2 — ``ticket.details`` isinstance 가드. SDK type stub 부재라
+                # ``dict`` 가정이 깨진 케이스(``None`` / ``str`` / 미래 ``BaseModel`` 등)에서
+                # ``.get()`` AttributeError 차단.
+                details = ticket.details if isinstance(ticket.details, dict) else {}
+                error_code = details.get("error")
+                if error_code == "DeviceNotRegistered":
+                    # Story 4.1 SOT 재사용 — token NULL set + 다음 cycle 자동 제외.
+                    await _revoke_token_for_user(session_maker, user_id=user_id)
+                    stats["device_not_registered_count"] += 1
+                    logger.warning(
+                        "nudge.skipped",
+                        user_id=masked,
+                        reason="device_not_registered",
+                    )
+                    continue
+
+                # 그 외 ticket error (MessageTooBig / MessageRateExceeded / unknown 등).
+                # CR P2 — None error_code도 ``"unknown"`` 문자열로 노출해 Sentry 메시지에서
+                # ``nudge.ticket_error: None`` 같은 비유익 텍스트 대신 의미 있는 라벨 보존.
+                sentry_sdk.capture_message(
+                    f"nudge.ticket_error: {error_code or 'unknown'}",
+                    level="error",
+                )
+                stats["transient_error_count"] += 1
                 logger.warning(
                     "nudge.skipped",
                     user_id=masked,
-                    reason="device_not_registered",
+                    reason=f"ticket_error:{error_code or 'unknown'}",
                 )
-                continue
-
-            # 그 외 ticket error (MessageTooBig / MessageRateExceeded / 기타)
-            sentry_sdk.capture_message(
-                f"nudge.ticket_error: {error_code}",
-                level="error",
-            )
-            stats["transient_error_count"] += 1
-            logger.warning(
-                "nudge.skipped",
-                user_id=masked,
-                reason=f"ticket_error:{error_code}",
-            )
+            except Exception as exc:  # noqa: BLE001 — DB transient 또는 unexpected post-send.
+                sentry_sdk.capture_exception(exc)
+                stats["transient_error_count"] += 1
+                logger.warning(
+                    "nudge.skipped",
+                    user_id=masked,
+                    reason=f"post_send_error:{type(exc).__name__}",
+                )
 
         transaction.set_tag("nudges_sent_count", stats["nudges_sent_count"])
         transaction.set_tag("device_not_registered_count", stats["device_not_registered_count"])
         transaction.set_tag("transient_error_count", stats["transient_error_count"])
+    except Exception:
+        # CR P3 — sweep loop이 unhandled exception으로 중단된 경우 Sentry 대시보드에서
+        # internal_error로 식별 가능하도록 명시 set. ``finally``의 ``transaction.finish()``는
+        # 호출되지만 default status는 ``"ok"``라 실패율 0으로 보임.
+        transaction.set_status("internal_error")
+        raise
     finally:
         transaction.finish()
 

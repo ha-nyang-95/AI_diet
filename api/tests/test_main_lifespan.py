@@ -118,19 +118,30 @@ async def test_lifespan_scheduler_initializes_in_dev_environment(
 ) -> None:
     """``environment="dev"``는 scheduler init + nudge job 등록 검증.
 
-    ``app.state.scheduler``가 존재 + ``running=True`` + ``nudge_sweep_unrecorded_meals``
-    잡 등록.
+    ``app.state.scheduler``가 존재 + ``nudge_sweep_unrecorded_meals`` 잡 등록.
+
+    CR P5 — 실 ``AsyncIOScheduler.start()``는 백그라운드 thread/loop을 띄워 lifespan exit
+    시 ``wait=False`` shutdown으로 leak 가능. ``start_scheduler`` 헬퍼를 monkeypatch로
+    no-op 처리해 thread 생성 자체를 차단(스케줄러 인스턴스 + job 등록만 검증).
     """
     from app.core.config import settings
     from app.workers.nudge_scheduler import NUDGE_JOB_ID
 
     monkeypatch.setattr(settings, "environment", "dev")
+
+    # CR P5 — ``start_scheduler``를 no-op로 monkeypatch — 백그라운드 thread leak 차단.
+    started_flag: dict[str, bool] = {"called": False}
+
+    async def _no_op_start(_app: FastAPI) -> None:
+        started_flag["called"] = True
+
+    monkeypatch.setattr("app.main.start_scheduler", _no_op_start)
+
     test_app = FastAPI(lifespan=lifespan)
     async with lifespan(test_app):
         scheduler = getattr(test_app.state, "scheduler", None)
         assert scheduler is not None
-        assert scheduler.running is True
+        # ``start_scheduler``가 호출됐는지 검증(no-op이지만 lifespan flow 자체는 진입).
+        assert started_flag["called"] is True
         jobs = scheduler.get_jobs()
         assert any(job.id == NUDGE_JOB_ID for job in jobs)
-    # cleanup 후 running=False (lifespan exit 시 ``shutdown_scheduler`` 호출).
-    # Note: AsyncIOScheduler.shutdown은 event loop schedule이라 즉시 검증은 생략.

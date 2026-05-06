@@ -393,3 +393,132 @@ async def test_sweep_midnight_cross_matches_2330_at_midnight_cycle(
         )
         assert len(rows) == 1
         assert rows[0].kst_date == date(2026, 5, 7)
+
+
+# ---------------------------------------------------------------------------
+# 11) CR P2 — ticket.status가 "ok"/"error"가 아닌 unknown 값(SDK 미래 버전 대비)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_sweep_unknown_ticket_status_handled_explicitly(
+    session_maker: async_sessionmaker,
+    mock_now_kst: datetime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``ticket.status="warning"`` 같은 unknown 값이 fall-through로 error 분기 진입하지
+    않고 명시 ``unknown_status`` 분기에서 처리 + capture_message ``warning`` 레벨.
+    """
+    user = await _create_eligible_user(session_maker, notification_time=time(19, 30))
+    mock_send = AsyncMock(return_value=_make_ticket(status="warning", ticket_id="t-w"))
+    monkeypatch.setattr(expo_push, "send_nudge", mock_send)
+    capture_calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        nudge_module.sentry_sdk,
+        "capture_message",
+        lambda msg, level=None: capture_calls.append((msg, level or "")),
+    )
+
+    stats = await sweep_unrecorded_meals(session_maker)
+
+    assert stats["transient_error_count"] == 1
+    assert stats["nudges_sent_count"] == 0
+    # capture_message 호출 — message에 unknown_status 라벨 + level=warning.
+    assert len(capture_calls) == 1
+    assert "nudge.ticket_unknown_status" in capture_calls[0][0]
+    assert capture_calls[0][1] == "warning"
+    # notifications row INSERT 안 함 — 다음 cycle 재시도 정합.
+    async with session_maker() as session:
+        rows = (
+            (await session.execute(select(Notification).where(Notification.user_id == user.id)))
+            .scalars()
+            .all()
+        )
+        assert rows == []
+
+
+# ---------------------------------------------------------------------------
+# 12) CR P2 — ticket.details가 dict가 아닐 때(``None`` / 미래 객체) AttributeError 차단
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_sweep_ticket_details_non_dict_isinstance_guard(
+    session_maker: async_sessionmaker,
+    mock_now_kst: datetime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``ticket.status="error"`` + ``ticket.details=None`` 시 ``error_code``가 ``None``으로
+    안전 fall-through. 기존 ``(ticket.details or {}).get(...)``는 동작하지만, 미래 SDK가
+    str/객체를 details에 박는 경우(타입 stub 부재) AttributeError 발생 가능 — isinstance
+    가드로 명시 차단. ``error_code or 'unknown'`` 라벨도 함께 검증.
+    """
+    user = await _create_eligible_user(session_maker, notification_time=time(19, 30))
+    mock_send = AsyncMock(
+        return_value=_make_ticket(status="error", details=None, ticket_id="t-none")
+    )
+    monkeypatch.setattr(expo_push, "send_nudge", mock_send)
+    capture_calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        nudge_module.sentry_sdk,
+        "capture_message",
+        lambda msg, level=None: capture_calls.append((msg, level or "")),
+    )
+
+    stats = await sweep_unrecorded_meals(session_maker)
+
+    assert stats["transient_error_count"] == 1
+    assert stats["nudges_sent_count"] == 0
+    # ``error_code or 'unknown'`` 라벨이 message에 박힘.
+    assert len(capture_calls) == 1
+    assert "nudge.ticket_error: unknown" in capture_calls[0][0]
+    assert capture_calls[0][1] == "error"
+    async with session_maker() as session:
+        rows = (
+            (await session.execute(select(Notification).where(Notification.user_id == user.id)))
+            .scalars()
+            .all()
+        )
+        assert rows == []
+
+
+# ---------------------------------------------------------------------------
+# 13) CR P4 — _record_notification DB transient(OperationalError) → sweep loop 보존
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_sweep_record_notification_db_transient_does_not_break_loop(
+    session_maker: async_sessionmaker,
+    mock_now_kst: datetime,
+    monkeypatch: pytest.MonkeyPatch,
+    patch_send_nudge_ok: AsyncMock,
+) -> None:
+    """post-send 단계에서 DB transient(OperationalError 등 ``IntegrityError`` 외)가 raise
+    되면 한 사용자만 skip + ``transient_error_count`` 증가하고 sweep loop 자체는 다른
+    사용자로 진행. 본 테스트는 적격 1건이지만 raise 후 stats 갱신 + Sentry capture만
+    검증.
+    """
+    from sqlalchemy.exc import OperationalError
+
+    await _create_eligible_user(session_maker, notification_time=time(19, 30))
+
+    async def _raising_record_notification(*args: object, **kwargs: object) -> bool:
+        raise OperationalError("statement", {}, Exception("connection reset"))
+
+    monkeypatch.setattr(nudge_module, "_record_notification", _raising_record_notification)
+    capture_calls: list[Any] = []
+    monkeypatch.setattr(
+        nudge_module.sentry_sdk,
+        "capture_exception",
+        lambda exc: capture_calls.append(exc),
+    )
+
+    # CR P4 — sweep_unrecorded_meals이 OperationalError로 중단되지 않아야 함.
+    stats = await sweep_unrecorded_meals(session_maker)
+
+    assert stats["users_eligible_count"] == 1
+    assert stats["nudges_sent_count"] == 0  # _record_notification raise → INSERT 실패
+    assert stats["transient_error_count"] == 1
+    assert len(capture_calls) == 1
+    assert isinstance(capture_calls[0], OperationalError)

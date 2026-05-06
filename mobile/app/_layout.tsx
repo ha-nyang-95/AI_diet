@@ -6,6 +6,7 @@ import { useEffect } from 'react';
 
 import { AuthProvider, queryClient } from '@/lib/auth';
 import {
+  markPushResponseHandled,
   resolveDeepLinkTarget,
   setupGlobalPushHandler,
 } from '@/lib/push';
@@ -36,6 +37,9 @@ export default function RootLayout() {
   useEffect(() => {
     const target = resolveDeepLinkTarget(lastResponse);
     if (!target) return;
+    // CR P1 — cold-start이 알림을 처리했음을 표시 → ``setupGlobalPushHandler``의
+    // listener 콜백이 동일 identifier에 대해 추가 ``router.push``하지 않도록.
+    markPushResponseHandled(lastResponse);
     try {
       router.replace(target as Parameters<typeof router.replace>[0]);
     } catch (error) {
