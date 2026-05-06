@@ -103,6 +103,19 @@ async function fetchMeals(params: MealsListQuery | undefined): Promise<MealListR
   return (await response.json()) as MealListResponse;
 }
 
+/** Story 3.9 AC20 — 단건 ``GET /v1/meals/{meal_id}``. */
+async function fetchMealById(meal_id: string): Promise<MealResponse> {
+  // CR P9 (2026-05-06) — meal_id를 URL 경로에 보간 시 ``encodeURIComponent``로 escape.
+  // UUID는 통상 안전 문자만 포함하나 호출자(``[meal_id].tsx`` route param)가 잘못된
+  // 값을 넘길 가능성에 대비한 방어. path 변형 / cache key 오염 차단.
+  const response = await authFetch(`/v1/meals/${encodeURIComponent(meal_id)}`);
+  if (!response.ok) {
+    const problem = await _parseProblem(response);
+    throw new MealSubmitError(response.status, problem.code, problem.detail);
+  }
+  return (await response.json()) as MealResponse;
+}
+
 /**
  * Story 2.5 — `Idempotency-Key` 자동 첨부 (W46 흡수). UUID v4는 호출 측이 생성하거나
  * 미지정 시 기본 ``randomUUID()`` 1회 자동 생성. 서버 partial UNIQUE + 200 idempotent
@@ -260,6 +273,30 @@ export function useMealsQuery(params?: MealsListQuery) {
     // params를 query key에 직접 spread하지 않고 직렬화 가능한 plain object로 forward.
     queryKey: ['meals', params ?? {}],
     queryFn: () => fetchMeals(params),
+  });
+}
+
+/**
+ * Story 3.9 AC20 — 단건 식단 조회 hook (DF18, DF26 정착).
+ *
+ * detail 화면(``[meal_id].tsx``)이 7일 list cache의 over-fetch 회피용으로 본 hook 사용.
+ * queryKey ``['meals', meal_id]``는 ``useMealsQuery``(``['meals', {...}]``)와 prefix
+ * 공유 — list invalidation 시 단건 cache도 동시 invalidate 정합.
+ */
+export function useMealQuery(meal_id: string | null) {
+  // CR P10 (2026-05-06) — ``meal_id !== null``만 검사하면 빈 문자열도 enabled가 되어
+  // ``GET /v1/meals/`` (list endpoint)로 fallthrough → 응답 shape mismatch로 detail
+  // 화면 crash. 빈 문자열도 비활성으로 정정.
+  const isValid = meal_id != null && meal_id.length > 0;
+  return useQuery({
+    queryKey: ['meals', meal_id],
+    queryFn: () => {
+      if (!isValid) {
+        throw new Error('meal_id required');
+      }
+      return fetchMealById(meal_id);
+    },
+    enabled: isValid,
   });
 }
 

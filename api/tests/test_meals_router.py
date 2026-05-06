@@ -1686,3 +1686,97 @@ async def test_patch_meal_with_idempotency_key_header_ignored(
     )
     assert response.status_code == 200, response.text
     assert response.json()["raw_text"] == "수정"
+
+
+# ---------------------------------------------------------------------------
+# Story 3.9 AC17 — MealMacros upper bound (2 케이스)
+# ---------------------------------------------------------------------------
+
+
+def test_meal_macros_rejects_value_above_10000() -> None:
+    """AC17 케이스 ① — ``carbohydrate_g=10001`` 환각 데이터는 ValidationError raise."""
+    from pydantic import ValidationError
+
+    from app.api.v1.meals import MealMacros
+
+    with pytest.raises(ValidationError):
+        MealMacros(carbohydrate_g=10001.0, protein_g=20.0, fat_g=15.0, energy_kcal=400.0)
+
+
+def test_meal_macros_accepts_normal_range() -> None:
+    """AC17 케이스 ② — 정상 범위(예: 1식 매크로) 회귀 0건."""
+    from app.api.v1.meals import MealMacros
+
+    # 정상 1식: 100g 탄수, 30g 단백, 25g 지방, 750kcal — 모두 ≤10000.
+    macros = MealMacros(carbohydrate_g=100.0, protein_g=30.0, fat_g=25.0, energy_kcal=750.0)
+    assert macros.carbohydrate_g == 100.0
+    # 상한 boundary 자체는 통과.
+    boundary = MealMacros(
+        carbohydrate_g=10000.0, protein_g=10000.0, fat_g=10000.0, energy_kcal=10000.0
+    )
+    assert boundary.energy_kcal == 10000.0
+
+
+# ---------------------------------------------------------------------------
+# Story 3.9 AC20 — 단건 GET /v1/meals/{meal_id} (4+1 케이스)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_meal_owner_returns_200(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """AC20 케이스 ① — 자신의 meal 조회 200 + analysis_summary 슬롯."""
+    user = await user_factory()
+    await consent_factory(user)
+    meal = await _create_meal_for(user, raw_text="자기 식단")
+
+    response = await client.get(f"/v1/meals/{meal.id}", headers=auth_headers(user))
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == str(meal.id)
+    assert body["raw_text"] == "자기 식단"
+
+
+@pytest.mark.asyncio
+async def test_get_meal_other_user_returns_404(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """AC20 케이스 ② — 다른 사용자 meal 조회 404 (enumeration 차단)."""
+    user_a = await user_factory()
+    user_b = await user_factory()
+    await consent_factory(user_a)
+    meal = await _create_meal_for(user_a, raw_text="A 소유")
+
+    response = await client.get(f"/v1/meals/{meal.id}", headers=auth_headers(user_b))
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_meal_soft_deleted_returns_404(
+    client: AsyncClient,
+    user_factory: UserFactory,
+) -> None:
+    """AC20 케이스 ③ — soft-deleted meal 조회 404."""
+    user = await user_factory()
+    deleted_meal = await _create_meal_for(user, raw_text="삭제됨", deleted_at=datetime.now(UTC))
+
+    response = await client.get(f"/v1/meals/{deleted_meal.id}", headers=auth_headers(user))
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_meal_nonexistent_returns_404(
+    client: AsyncClient,
+    user_factory: UserFactory,
+) -> None:
+    """AC20 케이스 ④ — 미존재 meal 조회 404."""
+    user = await user_factory()
+    fake_id = uuid.uuid4()
+
+    response = await client.get(f"/v1/meals/{fake_id}", headers=auth_headers(user))
+    assert response.status_code == 404

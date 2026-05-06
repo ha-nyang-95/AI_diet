@@ -23,7 +23,6 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from slowapi import Limiter
-from slowapi.util import get_remote_address
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -48,6 +47,7 @@ from app.core.exceptions import (
 from app.core.logging import configure_logging
 from app.core.middleware import RequestIdMiddleware
 from app.core.observability import init_langsmith
+from app.core.proxy import get_real_client_ip, init_trusted_proxies
 from app.core.sentry import init_sentry
 from app.graph.checkpointer import build_checkpointer, dispose_checkpointer
 from app.graph.deps import NodeDeps
@@ -68,8 +68,11 @@ _NON_PROD_ENVIRONMENTS = {"ci", "test"}
 
 
 def _build_limiter(storage_uri: str) -> Limiter:
+    # Story 3.9 AC2 — slowapi default ``get_remote_address``는 X-Forwarded-For 첫 IP를
+    # *무조건* 신뢰해 client spoofing이 가능. ``get_real_client_ip``는 trust 검증
+    # (CF-Connecting-IP > 신뢰 proxy XFF > raw)으로 1지점 SOT.
     return Limiter(
-        key_func=get_remote_address,
+        key_func=get_real_client_ip,
         default_limits=[RATE_LIMIT_USER_PER_HOUR, RATE_LIMIT_USER_PER_MINUTE],
         storage_uri=storage_uri,
         # AC5의 LangGraph tier는 후속 스토리에서 라우트별 데코레이터로 적용.
@@ -84,6 +87,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     log = structlog.get_logger()
     log.info("app.startup", environment=settings.environment)
+
+    # Story 3.9 AC1/AC2 — Cloudflare + Railway proxy IP trust SOT 노출(state).
+    init_trusted_proxies(app)
 
     # Story 3.8 — LangSmith 외부 옵저버빌리티(NFR-O1). ``init_langsmith()`` 자체는
     # graceful(``settings.langchain_tracing_v2 is False`` 또는 missing api_key 시

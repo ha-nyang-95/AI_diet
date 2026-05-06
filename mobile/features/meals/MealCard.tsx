@@ -212,6 +212,10 @@ const styles = StyleSheet.create({
     color: '#1a73e8',
     minWidth: 56,
     lineHeight: 20,
+    // Story 3.9 AC18 — flexShrink 0 명시(NFR-A3 200% scale에서 시간 잘림 차단).
+    // ``minWidth: 56``과 결합 — 폰트 200% + allergen 라벨 동시 표시 시 시간이 grow
+    // 영역으로 흡수되지 않도록 강제(silent contraction 회귀 가드).
+    flexShrink: 0,
   },
   fitScoreBadge: {
     flexDirection: 'row',

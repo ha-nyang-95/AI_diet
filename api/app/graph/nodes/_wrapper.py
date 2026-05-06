@@ -47,13 +47,20 @@ _RETRY_TYPES: tuple[type[BaseException], ...] = (
 )
 
 
-def _node_wrapper(node_name: str) -> Callable[[NodeFn], NodeFn]:
+def _node_wrapper(node_name: str, *, deterministic: bool = False) -> Callable[[NodeFn], NodeFn]:
     """노드 함수를 (a) tenacity retry + (b) Sentry span + (c) NodeError fallback로 감싼다.
 
     노드 함수의 raw 시그니처는 `async def <name>(state, *, deps) -> dict`. wrapper는
     동일 시그니처 + `state["node_errors"]`를 *부분 갱신* dict로 반환(LangGraph
     dict-merge 정합).
+
+    Story 3.9 AC11 — ``deterministic=True``인 노드는 retry 0회(즉시 fallback). 결정적
+    노드(``parse_meal`` DB 분기 / ``evaluate_retrieval_quality`` / ``fetch_user_profile``)
+    는 같은 입력 2회 실패 시 의미 없는 1회 추가 호출(transient 의미 X). LLM 호출 노드
+    (``generate_feedback``/``rewrite_query``/``request_clarification``)는 기존 retry 유지.
     """
+    # AC11 — deterministic 노드는 즉시 실패(stop_after_attempt=1).
+    _stop = stop_after_attempt(1) if deterministic else stop_after_attempt(2)
 
     def _decorator(fn: NodeFn) -> NodeFn:
         @wraps(fn)
@@ -69,7 +76,7 @@ def _node_wrapper(node_name: str) -> Callable[[NodeFn], NodeFn]:
                 span.set_data("rewrite_attempts", state.get("rewrite_attempts", 0))
                 try:
                     async for attempt in AsyncRetrying(
-                        stop=stop_after_attempt(2),
+                        stop=_stop,
                         wait=wait_exponential(multiplier=1, min=1, max=4),
                         retry=retry_if_exception_type(_RETRY_TYPES),
                         reraise=True,

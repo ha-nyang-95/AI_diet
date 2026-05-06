@@ -104,6 +104,17 @@ class Settings(BaseSettings):
     # ~189s에 달함. ``asyncio.wait_for`` outer deadline로 차단(p95 mobile 4s 정합).
     llm_router_total_budget_seconds: int = 25
 
+    # --- Vision 비용·캐시·결정성 (Story 3.9 AC6, AC7) ---
+    # ``cache:llm:vision:{sha256(image_key)}`` Redis 24h TTL — 동일 image_key 재호출 시
+    # OpenAI Vision 호출 0회 + ``parse_meal_image`` 결정성 보장(LLM 환각 방지).
+    vision_cache_ttl_seconds: int = 86400
+    # ``cost:vision:daily:{YYYY-MM-DD}`` Redis 카운터 — KST 자정 기준 일일 cap.
+    # cap 도달 시 ``gpt-4o`` → ``gpt-4o-mini`` 다운그레이드 + Sentry warning.
+    vision_daily_cost_cap_usd: float = 5.0
+    # ``gpt-4o-mini`` 다운그레이드 후의 추가 cap — 도달 시 ``MealOCRUnavailableError``
+    # raise + 사용자에게 *"오늘은 사진 분석 한도에 도달했어요"* 안내.
+    vision_fallback_cost_cap_usd: float = 1.0
+
     # --- Analysis SSE / polling (Story 3.7) ---
     # SSE 본문 token chunking — 한국어 코칭 톤 평균 200-400자 + 24자 / 30ms로
     # 5-10초 자연 streaming UX(epic line 679 정합). True LLM-token streaming은

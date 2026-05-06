@@ -265,3 +265,58 @@ async def consent_factory(client: AsyncClient) -> ConsentFactory:
             return consent
 
     return _make
+
+
+# ---------------------------------------------------------------------------
+# Story 3.9 AC16 — LLM adapter mock SOT (DF101 from Story 3.4 → 3.6/3.7)
+#
+# 이전: 4 모듈(test_pipeline / test_self_rag / test_analysis_service / test_main_lifespan)이
+# 동일 mock 패턴을 복사. 신규 LLM adapter 도입 시 4 지점 일괄 갱신 부담.
+# 본 fixture는 *SOT factory* — 각 모듈 fixture가 import만 하면 patch 컨텍스트 발급.
+# ---------------------------------------------------------------------------
+
+
+from collections.abc import Iterator as _IteratorMockHelper  # noqa: E402
+from contextlib import contextmanager  # noqa: E402
+from unittest.mock import AsyncMock, patch  # noqa: E402
+
+
+@contextmanager
+def make_llm_adapter_mocks() -> _IteratorMockHelper[None]:
+    """4 LLM adapter(parse_meal_text/rewrite_food_query/generate_clarification_options)
+    deterministic mock SOT.
+
+    Story 3.9 AC16 — 4 모듈 fixture가 ``with make_llm_adapter_mocks(): yield``로 1줄 사용.
+    신규 LLM adapter 추가 시 본 함수 1지점만 갱신.
+
+    sentinel ``__test_low_confidence__``는 Story 3.3 self-rag perf 분기 전용 — 0.85 boost
+    경로 진입. 다른 raw_text는 graph nodes의 normal flow 통과.
+    """
+    from app.adapters.openai_adapter import (
+        ClarificationVariants,
+        ParsedMeal,
+        ParsedMealItem,
+        RewriteVariants,
+    )
+    from app.graph.state import ClarificationOption
+
+    parsed = ParsedMeal(
+        items=[ParsedMealItem(name="__test_low_confidence__", quantity="1인분", confidence=0.9)]
+    )
+    rewrite = RewriteVariants(variants=["__test_low_confidence___v1"])
+    clarify = ClarificationVariants(options=[ClarificationOption(label="옵션", value="옵션 1인분")])
+    with (
+        patch(
+            "app.graph.nodes.parse_meal.parse_meal_text",
+            new=AsyncMock(return_value=parsed),
+        ),
+        patch(
+            "app.graph.nodes.rewrite_query.rewrite_food_query",
+            new=AsyncMock(return_value=rewrite),
+        ),
+        patch(
+            "app.graph.nodes.request_clarification.generate_clarification_options",
+            new=AsyncMock(return_value=clarify),
+        ),
+    ):
+        yield

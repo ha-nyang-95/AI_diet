@@ -52,6 +52,7 @@ from app.core.exceptions import (
     RefreshTokenInvalidError,
     RefreshTokenReplayError,
 )
+from app.core.proxy import get_real_client_ip
 from app.core.security import (
     create_admin_token,
     create_refresh_token,
@@ -366,7 +367,7 @@ async def google_login(
             family_id=uuid.uuid4(),
             expires_at=expires_at,
             user_agent=request.headers.get("user-agent"),
-            ip_address=request.client.host if request.client else None,
+            ip_address=get_real_client_ip(request) or None,
         )
     )
     await db.commit()
@@ -444,7 +445,7 @@ async def refresh(
         family_id=row.family_id,
         expires_at=new_expires_at,
         user_agent=request.headers.get("user-agent"),
-        ip_address=request.client.host if request.client else None,
+        ip_address=get_real_client_ip(request) or None,
     )
     db.add(new_row)
     await db.flush()

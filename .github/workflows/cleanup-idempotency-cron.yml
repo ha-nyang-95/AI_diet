@@ -1,0 +1,35 @@
+name: cleanup-idempotency-keys
+
+# Story 3.9 AC5 — meals.idempotency_key 30일 TTL daily cron.
+# KST 02:00 = UTC 17:00 (전날) — schedule cron 표기는 UTC.
+on:
+  schedule:
+    - cron: "0 17 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    # cleanup 실패가 운영 차단을 막지 않도록 — DB 일시 장애 graceful 흐름.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        working-directory: api
+        run: uv sync --all-extras
+
+      - name: Run cleanup script
+        working-directory: .
+        env:
+          DATABASE_URL: ${{ secrets.RAILWAY_API_DATABASE_URL }}
+          ENVIRONMENT: prod
+        run: uv run --project api python scripts/cleanup_idempotency_keys.py

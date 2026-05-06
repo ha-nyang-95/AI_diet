@@ -66,9 +66,39 @@ _ANTHROPIC_HANDLED_TYPES: Final[tuple[type[BaseException], ...]] = (
     *_ANTHROPIC_TRANSIENT,
 )
 
+# Story 3.9 AC13 — used_llm Literal 확장 + env override 정확 attribution.
+# `_USED_LLM_OPENAI` / `_USED_LLM_CLAUDE`는 *baseline default* — env override 시
+# `_resolve_used_llm`이 raw model string을 Literal에 매핑.
 _USED_LLM_OPENAI: Final[str] = "gpt-4o-mini"
 _USED_LLM_CLAUDE: Final[str] = "claude"
-_VALID_USED_LLM_LABELS: Final[frozenset[str]] = frozenset({_USED_LLM_OPENAI, _USED_LLM_CLAUDE})
+_VALID_USED_LLM_LABELS: Final[frozenset[str]] = frozenset(
+    {"gpt-4o-mini", "gpt-4o", "claude-haiku-4-5", "claude", "stub"}
+)
+
+
+def _resolve_used_llm(model: str) -> str:
+    """``settings.llm_main_model``/``llm_fallback_model`` raw string → Literal 매핑.
+
+    매핑 규칙:
+    - ``"gpt-4o-mini"`` 또는 ``"gpt-4o-mini-*"`` → ``"gpt-4o-mini"`` (snapshot pin 호환).
+    - ``"gpt-4o"`` 또는 ``"gpt-4o-*"`` (mini 미포함) → ``"gpt-4o"``.
+    - ``"claude-haiku-4-5*"`` → ``"claude-haiku-4-5"``.
+    - 그 외 ``claude*`` → ``"claude"`` (기존 캐시 row 호환).
+    - 매칭 실패 → ``"stub"`` (LangSmith trace에서 mismatch 식별 가능).
+    """
+    if not model:
+        return "stub"
+    lowered = model.lower()
+    if lowered.startswith("gpt-4o-mini"):
+        return "gpt-4o-mini"
+    if lowered.startswith("gpt-4o"):
+        return "gpt-4o"
+    if lowered.startswith("claude-haiku-4-5"):
+        return "claude-haiku-4-5"
+    if lowered.startswith("claude"):
+        return "claude"
+    return "stub"
+
 
 # CR mn-5 — Redis network partition 시 indefinite hang 차단. ``redis.get``/``redis.set``
 # 자체 timeout이 SDK 레벨에서 보장되지 않을 수 있어 router 차원에서 명시적 cap.
@@ -155,7 +185,8 @@ async def _openai_then_anthropic(system: str, user: str) -> tuple[FeedbackLLMOut
         openai_exc = exc
         sentry_sdk.capture_exception(exc)
     else:
-        return primary, _USED_LLM_OPENAI
+        # Story 3.9 AC13 — env override 시 정확 attribution.
+        return primary, _resolve_used_llm(settings.llm_main_model)
 
     # OpenAI 실패 → Anthropic fallback.
     try:
@@ -175,7 +206,7 @@ async def _openai_then_anthropic(system: str, user: str) -> tuple[FeedbackLLMOut
             f"anthropic={type(anthropic_exc).__name__})"
         ) from anthropic_exc
 
-    return fallback, _USED_LLM_CLAUDE
+    return fallback, _resolve_used_llm(settings.llm_fallback_model)
 
 
 async def _route_feedback_inner(

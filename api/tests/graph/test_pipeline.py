@@ -9,48 +9,22 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterator
-from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.adapters.openai_adapter import (
-    ClarificationVariants,
-    ParsedMeal,
-    ParsedMealItem,
-    RewriteVariants,
-)
 from app.core.config import settings
 from app.graph.checkpointer import build_checkpointer, dispose_checkpointer
 from app.graph.deps import NodeDeps
 from app.graph.pipeline import compile_pipeline
-from app.graph.state import ClarificationOption
 from tests.conftest import UserFactory
 
 
 @pytest.fixture
 def _mock_llm_adapters() -> Iterator[None]:
-    """Story 3.4 — parse_meal_text/rewrite_food_query/generate_clarification_options
-    어댑터 deterministic mock(OPENAI_API_KEY 부재 환경 호환).
-    """
-    parsed = ParsedMeal(
-        items=[ParsedMealItem(name="__test_low_confidence__", quantity="1인분", confidence=0.9)]
-    )
-    rewrite = RewriteVariants(variants=["__test_low_confidence___v1"])
-    clarify = ClarificationVariants(options=[ClarificationOption(label="옵션", value="옵션 1인분")])
-    with (
-        patch(
-            "app.graph.nodes.parse_meal.parse_meal_text",
-            new=AsyncMock(return_value=parsed),
-        ),
-        patch(
-            "app.graph.nodes.rewrite_query.rewrite_food_query",
-            new=AsyncMock(return_value=rewrite),
-        ),
-        patch(
-            "app.graph.nodes.request_clarification.generate_clarification_options",
-            new=AsyncMock(return_value=clarify),
-        ),
-    ):
+    """Story 3.9 AC16 — conftest SOT(`make_llm_adapter_mocks`) 위임. 1지점 갱신."""
+    from tests.conftest import make_llm_adapter_mocks
+
+    with make_llm_adapter_mocks():
         yield
 
 

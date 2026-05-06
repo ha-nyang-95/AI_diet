@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import sentry_sdk
 
@@ -26,6 +26,16 @@ from app.graph.state import MealAnalysisState
 if TYPE_CHECKING:  # pragma: no cover
     from langchain_core.runnables import RunnableConfig
     from langgraph.graph.state import CompiledStateGraph
+
+
+# Story 3.9 AC10 sanitize layer SOT — module-level frozensets(CR P19 — 2026-05-06).
+# 호출자 주입 차단(managed) + 화이트리스트 외 silent drop(unknown). 함수 내 재선언 회피.
+_AURESUME_MANAGED_FIELDS: Final[frozenset[str]] = frozenset(
+    {"rewrite_attempts", "node_errors", "force_llm_parse"}
+)
+_AURESUME_WHITELIST: Final[frozenset[str]] = frozenset(
+    {"raw_text_clarified", "selected_value", "parsed_items"}
+)
 
 
 @dataclass(frozen=True)
@@ -94,27 +104,56 @@ class AnalysisService:
         를 *clean slate* 으로 reset. ``parse_meal``부터 새 흐름 진입(이번엔 사용자 정제
         텍스트 → LLM parse + alias 1차 hit 가능성 ↑).
 
-        ``user_input`` 는 ``{"raw_text_clarified"|"selected_value": "정제 텍스트"}``.
+        ``user_input`` 화이트리스트 키:
+        - ``raw_text_clarified`` — 사용자 정제 텍스트(legacy 명, Story 3.4 호환).
+        - ``selected_value`` — Story 3.4 ``ClarificationOption.value`` 정합 키.
+        - ``parsed_items`` — 사용자가 직접 편집한 ``ParsedMealItem`` list (forward-compat).
+
+        Story 3.9 AC10 sanitize layer — ``user_input``에 *managed field*(``rewrite_attempts``,
+        ``node_errors``, ``force_llm_parse``) 주입 시 ``ValueError`` raise(state corruption
+        차단). 화이트리스트 외 키는 silent drop(하위 호환).
+
         둘 다 비어있으면 ``ValueError`` raise — 라우터(Story 3.7)가 422로 변환.
 
-        CR fix #10 — thread_id 미존재 시 LangGraph는 update 필드를 첫 state로 사용해
-        ``goto="parse_meal"``에서 새 흐름 시작(checkpointer가 빈 snapshot 반환 + state
-        부분 dict-merge가 base가 되는 LangGraph SOT). 라우터(Story 3.7)는 일반적으로
-        ``aget_state``로 ``needs_clarification=True`` 확인한 thread_id를 그대로 전달함.
         CR fix #1 (BLOCKER) — ``force_llm_parse=True`` 주입 → ``parse_meal``이 DB stale
         ``parsed_items`` 무시하고 사용자 정제 텍스트를 LLM parse(alias 1차 hit 가능성 ↑).
         """
         from langgraph.types import Command
 
+        # Story 3.9 AC10 — sanitize layer: 호출자 주입 차단(CR P3/P6 강화 — 2026-05-06).
+        # ① managed field 주입 시 ValueError(state corruption 차단).
+        for managed_field in _AURESUME_MANAGED_FIELDS:
+            if managed_field in user_input:
+                raise ValueError(f"aresume rejects managed field injection: {managed_field}")
+
+        # ② clarified 입력은 str 강제 — dict/list 등 garbage 인입 시 즉시 거부(P6).
         clarified = user_input.get("raw_text_clarified") or user_input.get("selected_value")
-        if not clarified or not str(clarified).strip():
+        if clarified is not None and not isinstance(clarified, str):
+            raise ValueError(
+                "aresume rejects non-string clarified value (raw_text_clarified/selected_value)"
+            )
+        if not clarified or not clarified.strip():
             raise ValueError("aresume requires raw_text_clarified or selected_value (non-empty)")
+
+        # ③ 화이트리스트 외 키는 silent drop — log 출력 X(NFR-S5 raw_text 보호).
+        # CR P3 (2026-05-06) — 필터 결과를 *실제로* 사용. 사용자가 ``parsed_items``를
+        # 넘겨주면 graph state에 propagate(spec AC10 의도 — pre-edited items overwrite).
+        # 이전 구현(``_ = {...}``)은 결과를 버려 spec contract 미충족.
+        sanitized: dict[str, Any] = {
+            k: user_input[k] for k in user_input if k in _AURESUME_WHITELIST
+        }
+        # CR Gemini fix (2026-05-06) — falsy check(``if user_parsed_items``)는 빈 list
+        # ``[]``를 "absent"로 오해석해 사용자가 의도적으로 비운 항목을 LLM이 다시
+        # 채워버리는 회귀가 가능. ``is not None``으로 *명시 부재(None)*만 재parse 트리거.
+        user_parsed_items = sanitized.get("parsed_items")  # None or [] or [items]
 
         config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
         cmd: Command[Any] = Command(
             update={
-                "raw_text": str(clarified),
-                "parsed_items": None,
+                "raw_text": clarified,
+                # ``user_parsed_items``는 None(부재) / [](명시 비움) / [items](명시 항목)
+                # 셋 모두 그대로 propagate — None만 parse_meal LLM 재실행 트리거.
+                "parsed_items": user_parsed_items,
                 "retrieval": None,
                 "rewrite_attempts": 0,
                 "node_errors": [],
@@ -122,7 +161,8 @@ class AnalysisService:
                 "clarification_options": [],
                 "evaluation_decision": None,
                 "rewritten_query": None,
-                "force_llm_parse": True,
+                # 사용자가 명시 list(빈 list 포함)를 넘긴 경우 LLM 재parse 불필요.
+                "force_llm_parse": user_parsed_items is None,
             },
             goto="parse_meal",
         )

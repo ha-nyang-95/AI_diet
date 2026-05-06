@@ -374,3 +374,124 @@ async def test_get_consents_complete_false_when_only_basic(
     body = response.json()
     assert body["basic_consents_complete"] is True
     assert body["automated_decision_consent_complete"] is False
+
+
+# ---------------------------------------------------------------------------
+# Story 3.9 AC4 — 약관 major / minor bump 분기 (5 케이스)
+# ---------------------------------------------------------------------------
+
+
+async def _update_consent_version(user: User, *, field: str, value: str) -> None:
+    """test 헬퍼 — consents row의 단일 ``*_version`` 컬럼만 갱신.
+
+    ``consent_factory``는 4 version을 동시 set만 지원 — 본 헬퍼로 mixed mismatch 시나리오
+    (e.g. terms major bump + privacy 정합) 구성. ``app.state.session_maker`` 직접 사용.
+    """
+    from sqlalchemy import update
+
+    from app.main import app as _app
+
+    session_maker = _app.state.session_maker
+    async with session_maker() as session:
+        await session.execute(
+            update(Consent).where(Consent.user_id == user.id).values({field: value})
+        )
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_basic_consents_major_bump_blocks_with_403(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """AC4 케이스 ① — disclaimer (major) version mismatch는 403 차단."""
+    user = await user_factory()
+    await consent_factory(user)
+    # disclaimer 버전을 stale로 강제(major 분류).
+    await _update_consent_version(user, field="disclaimer_version", value="ko-1900-01-01")
+
+    # ``require_basic_consents`` wire 라우터 호출 — POST /v1/meals 사용.
+    response = await client.post(
+        "/v1/meals",
+        json={"raw_text": "사과 1개"},
+        headers=auth_headers(user),
+    )
+    assert response.status_code == 403
+    body = response.json()
+    assert body["code"] == "consent.basic.missing"
+
+
+@pytest.mark.asyncio
+async def test_basic_consents_minor_bump_passes_with_header(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """AC4 케이스 ② — privacy (minor) version mismatch만 있을 때 통과 + 헤더 첨부."""
+    user = await user_factory()
+    await consent_factory(user)
+    # privacy 버전을 stale로 강제(minor 분류). disclaimer/terms/sensitive_personal_info는 정합.
+    await _update_consent_version(user, field="privacy_version", value="ko-1900-01-01")
+    # Note: sensitive_personal_info는 privacy version을 공유 — 정합 유지를 위해 함께 stale.
+    await _update_consent_version(
+        user, field="sensitive_personal_info_version", value="ko-1900-01-01"
+    )
+
+    response = await client.post(
+        "/v1/meals",
+        json={"raw_text": "사과 1개"},
+        headers=auth_headers(user),
+    )
+    assert response.status_code == 201
+    # ``X-Consent-Update-Available`` 헤더에 stale doc_key=latest_version 인코딩.
+    update_header = response.headers.get("x-consent-update-available", "")
+    assert "privacy=" in update_header
+    assert CURRENT_VERSIONS["privacy"] in update_header
+
+
+@pytest.mark.asyncio
+async def test_legal_document_default_version_type_is_major() -> None:
+    """AC4 케이스 ③ — ``LegalDocument`` default ``version_type``는 안전 측 ``"major"``."""
+    from app.domain.legal_documents import LegalDocument
+
+    doc = LegalDocument(
+        type="terms",
+        lang="ko",
+        version="ko-test",
+        title="t",
+        body="b",
+        updated_at=__import__("datetime").datetime(2026, 5, 5, tzinfo=__import__("datetime").UTC),
+    )
+    assert doc.version_type == "major"
+
+
+@pytest.mark.asyncio
+async def test_basic_consents_ko_en_bump_symmetric() -> None:
+    """AC4 ④ — 한·영 동기 bump 시 KO/EN 모두 동일 ``version_type``."""
+    from app.domain.legal_documents import LEGAL_DOCUMENTS
+
+    for doc_type in ("disclaimer", "terms", "privacy", "automated-decision"):
+        ko = LEGAL_DOCUMENTS[(doc_type, "ko")]  # type: ignore[index]
+        en = LEGAL_DOCUMENTS[(doc_type, "en")]  # type: ignore[index]
+        # 한·영 양쪽 ``version_type`` 일치 — bump 시 양 언어 동기 갱신 강제.
+        assert ko.version_type == en.version_type
+
+
+@pytest.mark.asyncio
+async def test_basic_consents_existing_user_unaffected_baseline(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """AC4 케이스 ⑤ — 현 baseline 사용자는 회귀 0건(헤더 부재 + 200/201)."""
+    user = await user_factory()
+    await consent_factory(user)  # current SOT 정합 — mismatch 0건
+    response = await client.post(
+        "/v1/meals",
+        json={"raw_text": "사과 1개"},
+        headers=auth_headers(user),
+    )
+    assert response.status_code == 201
+    # 모든 doc 정합이라 헤더 *부재*.
+    assert "x-consent-update-available" not in response.headers

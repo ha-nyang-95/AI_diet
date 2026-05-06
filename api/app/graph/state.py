@@ -154,13 +154,19 @@ class Citation(BaseModel):
 
 
 class FeedbackOutput(BaseModel):
-    """`generate_feedback` 노드 *공식 출력* — Story 3.6 stub은 `used_llm="stub"`."""
+    """`generate_feedback` 노드 *공식 출력* — Story 3.6 stub은 `used_llm="stub"`.
+
+    Story 3.9 AC13 — ``used_llm`` Literal 확장. ``settings.llm_main_model`` env override
+    시 ``"gpt-4o"``로 운영자 승격 가능 + ``settings.llm_fallback_model`` env override 시
+    ``"claude-haiku-4-5"`` 명시(기존 ``"claude"`` 라벨도 유지 — 이전 캐시 row 호환). 미매칭
+    model id는 ``_resolve_used_llm`` 헬퍼가 ``"stub"`` fallback.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     text: str
     citations: list[Citation]
-    used_llm: Literal["gpt-4o-mini", "claude", "stub"] = "stub"
+    used_llm: Literal["gpt-4o-mini", "gpt-4o", "claude-haiku-4-5", "claude", "stub"] = "stub"
 
 
 class KnowledgeChunkContext(BaseModel):

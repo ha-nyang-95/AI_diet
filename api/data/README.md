@@ -31,8 +31,20 @@
    | `source_id`       | 식품코드         | 식약처 코드 (예: `K-115001`) |
 
 3. 변환된 CSV를 `api/data/mfds_food_nutrition_seed.csv`로 commit (UTF-8 + LF 개행).
-4. 현재 repo는 *placeholder* (헤더만)을 commit한 상태 — 운영 사용 시 실제 데이터로 교체.
-   분기 1회 갱신 권장.
+4. **현재 repo 상태(Story 3.9 AC9, 2026-05-05)**: 외식·배달·가공식품 50종 영업 데모
+   우선순위 메뉴를 수동 보강 (`source_id=manual:dining-001` ~ `manual:dining-050`).
+   짜장면/짬뽕/탕수육/마라탕/마라샹궈/떡볶이/순대/김밥(참치/계란/소고기 변형)/
+   햄버거/핫도그/치킨(양념/간장/마늘)/피자/파스타/비빔밥(육회/고추장/제육)/김치찌개/
+   된장찌개/부대찌개/갈비탕/삼계탕/냉면(물/비빔)/칼국수/우동/라면(신라면/안성탕면/
+   진라면/짜장/김치/치즈)/떡국/만두국/비빔국수/닭갈비/제육볶음/잡채/호떡/붕어빵/
+   김밥천국김밥/명동교자만두/육개장/스낵류 2종 — 데이터 출처: 농촌진흥청 식품성분 DB
+   (https://koreanfood.rda.go.kr) + 외식업체 영양정보 공시 (자료원). 1회 제공량
+   기준값(`serving_size_g` 컬럼)은 외식 1인분 평균 추정.
+
+   **자사 메뉴 customization**: 외주 인수 클라이언트는 본 50종 baseline에 자사 메뉴
+   별칭/공급량을 PR로 추가(`source_id=manual:custom-XXX` 네이밍). bootstrap_seed
+   재실행 시 idempotent UPSERT(`ON CONFLICT (source_id) DO UPDATE`)로 누적 보강.
+5. 분기 1회 식약처 OpenAPI fetch + manual CSV 갱신 권장.
 
 ## 외주 인수 클라이언트 — 자기 메뉴 별칭 추가 SOP (3 경로)
 

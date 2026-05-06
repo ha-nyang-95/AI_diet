@@ -106,7 +106,9 @@ async def test_openai_transient_final_anthropic_fallback(
         system="s", user="u", cache_key=None, redis=None
     )
     assert cache_hit is False
-    assert used_llm == "claude"
+    # Story 3.9 AC13 — env override 정확 attribution. settings.llm_fallback_model =
+    # ``claude-haiku-4-5-20251001`` → ``"claude-haiku-4-5"`` (이전: ``"claude"`` baseline).
+    assert used_llm == "claude-haiku-4-5"
     assert output.text == "fallback"
 
 
@@ -120,7 +122,7 @@ async def test_openai_payload_invalid_anthropic_fallback(
     monkeypatch.setattr(_LLM_ROUTER_MODULE, "call_claude_feedback", claude_mock)
 
     output, used_llm, _ = await route_feedback(system="s", user="u", cache_key=None, redis=None)
-    assert used_llm == "claude"
+    assert used_llm == "claude-haiku-4-5"
     assert output.text == "claude"
 
 
@@ -134,7 +136,7 @@ async def test_openai_unavailable_anthropic_success(
     monkeypatch.setattr(_LLM_ROUTER_MODULE, "call_claude_feedback", claude_mock)
 
     output, used_llm, _ = await route_feedback(system="s", user="u", cache_key=None, redis=None)
-    assert used_llm == "claude"
+    assert used_llm == "claude-haiku-4-5"
 
 
 async def test_dual_llm_exhausted_raises_and_capture_message(
@@ -194,3 +196,46 @@ async def test_cache_write_failure_graceful(monkeypatch: pytest.MonkeyPatch) -> 
     assert output.text == "ok"
     assert used_llm == "gpt-4o-mini"
     assert cache_hit is False
+
+
+# ---------------------------------------------------------------------------
+# Story 3.9 AC13 — _resolve_used_llm Literal 매핑 (3 케이스)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_used_llm_env_override_attribution() -> None:
+    """AC13 케이스 ① — env override 시 used_llm 정확 매핑(Literal 정합)."""
+    from app.adapters.llm_router import _resolve_used_llm
+
+    # 기본 baseline
+    assert _resolve_used_llm("gpt-4o-mini") == "gpt-4o-mini"
+    # env override → gpt-4o 승격
+    assert _resolve_used_llm("gpt-4o") == "gpt-4o"
+    # snapshot pin 호환
+    assert _resolve_used_llm("gpt-4o-mini-2024-07-18") == "gpt-4o-mini"
+    assert _resolve_used_llm("gpt-4o-2024-11-20") == "gpt-4o"
+    # claude haiku 4-5 명시
+    assert _resolve_used_llm("claude-haiku-4-5-20251001") == "claude-haiku-4-5"
+    assert _resolve_used_llm("claude-haiku-4-5") == "claude-haiku-4-5"
+
+
+def test_resolve_used_llm_unknown_falls_back_to_stub() -> None:
+    """AC13 케이스 ② — 미매칭 model id → ``"stub"`` fallback (LangSmith mismatch 식별)."""
+    from app.adapters.llm_router import _resolve_used_llm
+
+    assert _resolve_used_llm("llama-3-70b") == "stub"
+    assert _resolve_used_llm("") == "stub"
+    assert _resolve_used_llm("random-xxx") == "stub"
+    # claude-* 변형은 "claude" baseline로 떨어짐(이전 캐시 row 호환).
+    assert _resolve_used_llm("claude-sonnet-4-6-20251001") == "claude"
+
+
+def test_resolve_used_llm_default_baseline_regression_zero() -> None:
+    """AC13 케이스 ③ — settings 기본값(``gpt-4o-mini``/``claude-haiku-4-5``) 회귀 가드."""
+    from app.adapters.llm_router import _resolve_used_llm
+    from app.core.config import settings
+
+    # 현 settings baseline 유지 — env override 없이도 정확 매핑.
+    assert _resolve_used_llm(settings.llm_main_model) in {"gpt-4o-mini", "gpt-4o"}
+    # default `claude-haiku-4-5-20251001` → "claude-haiku-4-5"
+    assert _resolve_used_llm(settings.llm_fallback_model) == "claude-haiku-4-5"

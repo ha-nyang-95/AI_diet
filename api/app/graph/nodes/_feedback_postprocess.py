@@ -22,7 +22,12 @@ from app.graph.state import KnowledgeChunkContext
 
 # CR MJ-9 — 1-level nested paren 지원 (`(출처: 기관 (2020) 문서)` 같은 학술 인용).
 # 첫 ``)``에서 끊어지면 본문 후반부 leak 회귀 차단. ``ad_expression_guard`` 와 동일 패턴.
-_CITATION_PATTERN: Final[re.Pattern[str]] = re.compile(r"\(출처:[^()]*(?:\([^)]*\)[^()]*)*\)")
+# Story 3.9 AC14 — fullwidth colon(:) + leading whitespace + 전각공백( ) 변형 수용.
+_CITATION_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"\(\s*출처\s*[:：][^()]*(?:\([^)]*\)[^()]*)*\)"
+)
+# Body 추출 시 prefix 제거용 — 변형 정합.
+_CITATION_PREFIX_RE: Final[re.Pattern[str]] = re.compile(r"^\(\s*출처\s*[:：]\s*")
 _EVALUATION_HEADER: Final[re.Pattern[str]] = re.compile(r"(?m)^##\s*평가\b")
 _ACTION_HEADER: Final[re.Pattern[str]] = re.compile(r"(?m)^##\s*다음\s*행동\b")
 
@@ -42,8 +47,12 @@ def _extract_cited_sources(text: str) -> list[str]:
     예: ``(출처: 식약처)`` → ``[]`` (3-tuple 미충족 → 검증 실패 시그널).
     """
     sources: list[str] = []
+    # Story 3.9 AC14 — citation regex가 fullwidth colon/whitespace 변형을 매칭하므로
+    # body 추출도 ``(\s*출처\s*[:：]`` prefix를 regex 제거(이전 hardcoded ``(출처:`` 슬라이스).
     for match in _CITATION_PATTERN.finditer(text):
-        body = match.group(0)[len("(출처:") : -1].strip()
+        raw = match.group(0)
+        # prefix `(출처:` 제거(변형 포함) + 마지막 `)` 제거.
+        body = _CITATION_PREFIX_RE.sub("", raw[:-1]).strip()
         parts = [p.strip() for p in body.split(",") if p.strip()]
         # CR MJ-3 — 3-tuple 미충족(<3 토큰)이면 *유효 citation 아님*.
         if len(parts) < 3:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -14,7 +15,6 @@ from app.adapters.openai_adapter import (
     ClarificationVariants,
     ParsedMeal,
     ParsedMealItem,
-    RewriteVariants,
 )
 from app.core.config import settings
 from app.graph.checkpointer import build_checkpointer, dispose_checkpointer
@@ -27,26 +27,10 @@ from tests.conftest import UserFactory
 
 @pytest.fixture(autouse=True)
 def _mock_llm_adapters() -> Iterator[None]:
-    """LLM 어댑터 deterministic mock — 모든 테스트에 적용 (parse_meal/rewrite/clarify)."""
-    parsed = ParsedMeal(
-        items=[ParsedMealItem(name="__test_low_confidence__", quantity="1인분", confidence=0.9)]
-    )
-    rewrite = RewriteVariants(variants=["__test_low_confidence___v1"])
-    clarify = ClarificationVariants(options=[ClarificationOption(label="옵션", value="옵션 1인분")])
-    with (
-        patch(
-            "app.graph.nodes.parse_meal.parse_meal_text",
-            new=AsyncMock(return_value=parsed),
-        ),
-        patch(
-            "app.graph.nodes.rewrite_query.rewrite_food_query",
-            new=AsyncMock(return_value=rewrite),
-        ),
-        patch(
-            "app.graph.nodes.request_clarification.generate_clarification_options",
-            new=AsyncMock(return_value=clarify),
-        ),
-    ):
+    """Story 3.9 AC16 — conftest SOT(`make_llm_adapter_mocks`) 위임."""
+    from tests.conftest import make_llm_adapter_mocks
+
+    with make_llm_adapter_mocks():
         yield
 
 
@@ -220,3 +204,143 @@ async def test_aresume_clean_slate_resets_state_fields(
     assert decision is not None
     route = decision.route if hasattr(decision, "route") else decision.get("route")
     assert route == "continue"
+
+
+# ---------------------------------------------------------------------------
+# Story 3.9 AC10 — aresume sanitize layer (4 케이스)
+# ---------------------------------------------------------------------------
+
+
+async def test_aresume_rejects_managed_field_rewrite_attempts(
+    analysis_service: AnalysisService,
+) -> None:
+    """AC10 케이스 ② — ``rewrite_attempts`` 주입 시 ValueError(state corruption 차단)."""
+    with pytest.raises(ValueError, match="managed field"):
+        await analysis_service.aresume(
+            thread_id="thread-x",
+            user_input={
+                "selected_value": "테스트",
+                "rewrite_attempts": 99,
+            },
+        )
+
+
+async def test_aresume_rejects_managed_field_node_errors(
+    analysis_service: AnalysisService,
+) -> None:
+    """AC10 케이스 ② 변형 — ``node_errors`` 주입 시 ValueError."""
+    with pytest.raises(ValueError, match="managed field"):
+        await analysis_service.aresume(
+            thread_id="thread-x",
+            user_input={
+                "selected_value": "테스트",
+                "node_errors": [{"node_name": "fake"}],
+            },
+        )
+
+
+async def test_aresume_rejects_managed_field_force_llm_parse(
+    analysis_service: AnalysisService,
+) -> None:
+    """AC10 케이스 ② 변형 — ``force_llm_parse`` 주입 시 ValueError."""
+    with pytest.raises(ValueError, match="managed field"):
+        await analysis_service.aresume(
+            thread_id="thread-x",
+            user_input={
+                "selected_value": "테스트",
+                "force_llm_parse": False,  # 호출자가 force=False 강요 차단
+            },
+        )
+
+
+async def test_aresume_silently_drops_unknown_keys(
+    user_factory: UserFactory,
+    analysis_service: AnalysisService,
+) -> None:
+    """AC10 케이스 ③ — 화이트리스트 외 키는 silent drop(하위 호환)."""
+    user = await user_factory(profile_completed=True)
+    meal_id = uuid.uuid4()
+    thread_id = f"meal:{meal_id}"
+
+    # 첫 분석 — needs_clarification 진입 흐름 setup.
+    fake_low_conf = ParsedMeal(
+        items=[ParsedMealItem(name="모호메뉴", quantity="1인분", confidence=0.3)]
+    )
+    with patch(
+        "app.graph.nodes.parse_meal.parse_meal_text",
+        new=AsyncMock(return_value=fake_low_conf),
+    ):
+        await analysis_service.run(meal_id=meal_id, user_id=user.id, raw_text="모호메뉴 1인분")
+
+    fake_variants = ClarificationVariants(options=[ClarificationOption(label="x", value="x")])
+    with patch(
+        "app.graph.nodes.request_clarification.generate_clarification_options",
+        new=AsyncMock(return_value=fake_variants),
+    ):
+        # 화이트리스트 외 키 ``foo``/``debug_flag`` 포함 — silent drop, ValueError 미발생.
+        result = await analysis_service.aresume(
+            thread_id=thread_id,
+            user_input={
+                "selected_value": "__test_low_confidence__",
+                "foo": "ignore me",
+                "debug_flag": True,
+            },
+        )
+    assert result.get("rewrite_attempts") == 1
+
+
+# ---------------------------------------------------------------------------
+# Story 3.9 AC11 — deterministic 노드 retry opt-out (2 케이스)
+# ---------------------------------------------------------------------------
+
+
+async def test_node_wrapper_deterministic_no_retry() -> None:
+    """AC11 케이스 ① — ``deterministic=True`` 노드는 1회 실패 후 즉시 retry 0회."""
+    from app.graph.nodes._wrapper import _node_wrapper
+
+    call_count = 0
+
+    @_node_wrapper("test_deterministic_node", deterministic=True)
+    async def _failing_node(state, **_):  # type: ignore[no-untyped-def]
+        nonlocal call_count
+        call_count += 1
+
+        # PydanticValidationError는 retry 대상이지만 deterministic=True라 retry 0회.
+        from pydantic import BaseModel
+
+        class _F(BaseModel):
+            x: int
+
+        _F.model_validate({"x": "not-int"})  # raises ValidationError
+        return {}
+
+    state: Any = {"node_errors": [], "rewrite_attempts": 0, "needs_clarification": False}
+    result = await _failing_node(state)
+    # 결정적 노드는 재시도 없이 1회만 호출.
+    assert call_count == 1
+    # fallback 진입 — node_errors append.
+    assert len(result["node_errors"]) == 1
+
+
+async def test_node_wrapper_non_deterministic_retries_twice() -> None:
+    """AC11 케이스 ② — 기본 노드(deterministic=False)는 tenacity 2회 retry 정합."""
+    from app.graph.nodes._wrapper import _node_wrapper
+
+    call_count = 0
+
+    @_node_wrapper("test_normal_node")  # deterministic 미지정 — 기본 False
+    async def _failing_node(state, **_):  # type: ignore[no-untyped-def]
+        nonlocal call_count
+        call_count += 1
+        from pydantic import BaseModel
+
+        class _F(BaseModel):
+            x: int
+
+        _F.model_validate({"x": "not-int"})
+        return {}
+
+    state: Any = {"node_errors": [], "rewrite_attempts": 0, "needs_clarification": False}
+    await _failing_node(state)
+    # 비결정 노드는 stop_after_attempt(2) — 총 2회 호출.
+    assert call_count == 2

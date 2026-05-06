@@ -273,7 +273,20 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * Get Meal
+         * @description Story 3.9 AC20 — 단건 식단 조회 + ``analysis_summary`` JOIN.
+         *
+         *     PIPA Art.35 — 자기 데이터 *조회*는 인증만 요구(``require_basic_consents`` 미wire).
+         *     권한: 자신의 meal만 조회 가능. 다른 사용자/soft-deleted/미존재 모두 동일 404
+         *     (enumeration 차단).
+         *
+         *     모바일 ``[meal_id].tsx`` 단건 detail 화면이 본 endpoint를 ``useMealQuery(meal_id)``
+         *     로 호출 — 7일 list cache의 over-fetch 회피.
+         *
+         *     ``selectinload(Meal.analysis)`` — N+1 회피 + ``lazy="raise_on_sql"`` 정합.
+         */
+        get: operations["get_meal_v1_meals__meal_id__get"];
         put?: never;
         post?: never;
         /**
@@ -735,7 +748,7 @@ export interface components {
              * @enum {string}
              */
             fit_score_label: "allergen_violation" | "low" | "moderate" | "good" | "excellent";
-            macros: components["schemas"]["MealMacros"];
+            macros?: components["schemas"]["MealMacros"] | null;
             /** Feedback Summary */
             feedback_summary: string;
         };
@@ -846,6 +859,10 @@ export interface components {
          *     Story 2.4 — Epic 3 forward-compat. 모든 필드 ``ge=0`` non-negative 단언. 본 스토리
          *     baseline은 *항상 None*(서버 join X) — 실제 채움은 Story 3.3 (`meal_analyses` 테이블
          *     + LangGraph 노드 + ``app/domain/fit_score.py`` 알고리즘) / Story 3.5 (fit_score 룰).
+         *
+         *     Story 3.9 AC17 — 환각 데이터 cap. ``le=10000`` (10kg/10000kcal 단위)는 1식 매크로의
+         *     *최악 환각 상한* — Story 3.3+ LLM이 ``carbohydrate_g=99999`` 같은 환각 출력 시
+         *     Pydantic ValidationError로 차단(저장 시점에 graceful fallback macros None set).
          */
         MealMacros: {
             /** Carbohydrate G */
@@ -1530,6 +1547,55 @@ export interface operations {
             };
             /** @description Idempotency-Key collides with soft-deleted meal */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_meal_v1_meals__meal_id__get: {
+        parameters: {
+            query?: never;
+            header?: {
+                Authorization?: string | null;
+            };
+            path: {
+                meal_id: string;
+            };
+            cookie?: {
+                bn_access?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 단건 식단 조회 (analysis_summary JOIN) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MealResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Meal not found / not owned / soft-deleted */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

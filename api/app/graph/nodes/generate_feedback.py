@@ -64,7 +64,9 @@ from app.rag.guidelines.search import search_guideline_chunks
 
 log = structlog.get_logger()
 
-_VALID_USED_LLM_LABELS = frozenset({"gpt-4o-mini", "claude"})
+# Story 3.9 AC13 — used_llm Literal 확장 정합. router._resolve_used_llm 매핑 결과를
+# 그대로 수용 — env override 시 ``"gpt-4o"`` / ``"claude-haiku-4-5"``도 valid label.
+_VALID_USED_LLM_LABELS = frozenset({"gpt-4o-mini", "gpt-4o", "claude-haiku-4-5", "claude", "stub"})
 
 
 # ---------------------------------------------------------------------------
