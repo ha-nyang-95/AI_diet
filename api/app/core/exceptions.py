@@ -761,7 +761,8 @@ class WeeklyReportInvalidDateRangeError(ReportsError):
     """``from_date > to_date`` 또는 (to-from) > 30일 초과 — 400 Bad Request.
 
     Pydantic validator 1차 게이트가 type만 검증(``date`` ISO 8601), *논리* 검증은
-    라우터에서 수행 후 본 예외 raise(``code=reports.invalid_date_range``).
+    ``services/report_service.get_weekly_report`` SOT에서 수행 후 본 예외 raise
+    (``code=reports.invalid_date_range``). Story 4.3 CR P16 정합 — 라우터는 wrapper.
     """
 
     status: ClassVar[int] = 400

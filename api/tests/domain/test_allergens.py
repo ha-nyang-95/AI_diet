@@ -206,3 +206,47 @@ def test_contains_allergen_label_not_present() -> None:
     """라벨이 없는 텍스트는 False — happy 음성."""
     assert contains_allergen("바나나 1개", "우유") is False
     assert contains_allergen("바나나 1개", "메밀") is False
+
+
+# --- Story 4.3 CR DN-2 — negation marker false-positive 가드 ---
+
+
+def test_contains_allergen_negation_after_match() -> None:
+    """매칭 직후 윈도우(12자) 내 ``않``은 phantom 매칭 — Story 3.6 ``feedback_text``
+    부정문 false positive 차단(``우유는 들어있지 않아 안심하세요`` → False).
+    """
+    assert contains_allergen("우유는 들어있지 않아 안심하세요", "우유") is False
+
+
+def test_contains_allergen_negation_eobs() -> None:
+    """``없`` 마커 — ``우유 없음 표기 라떼`` → False."""
+    assert contains_allergen("우유 없음 표기 라떼", "우유") is False
+
+
+def test_contains_allergen_negation_anida() -> None:
+    """``아니`` 마커 — ``치즈 들어간 게 아닙니다 — 두유로 만든`` → False."""
+    assert contains_allergen("치즈 들어간 게 아닙니다 두유로 만든", "우유") is False
+
+
+def test_contains_allergen_negation_jeoeo() -> None:
+    """``제외`` 마커 — ``우유 제외 라떼 주문`` → False."""
+    assert contains_allergen("우유 제외 라떼 주문", "우유") is False
+
+
+def test_contains_allergen_negation_outside_window() -> None:
+    """negation marker가 윈도우 밖(>12자) → 매칭 유지(false negative 회귀 차단)."""
+    # "우유" 직후 30자 거리에 "않"이 있으면 윈도우 외 — True 유지.
+    text = "우유가 들어간 카페 라떼 한 잔 마시고 싶지 않아요"
+    assert contains_allergen(text, "우유") is True
+
+
+def test_contains_allergen_alias_negation() -> None:
+    """alias 매칭에도 negation 적용 — ``치즈 없음 메뉴`` → False (우유 alias)."""
+    assert contains_allergen("치즈 없음 메뉴", "우유") is False
+
+
+def test_contains_allergen_positive_with_long_text() -> None:
+    """긴 자연어 텍스트에 negation 없이 라벨 등장 → True (recall 보존 가드)."""
+    text = "오늘 점심으로 새우튀김과 우유 한 잔을 곁들여 먹었습니다"
+    assert contains_allergen(text, "우유") is True
+    assert contains_allergen(text, "새우") is True

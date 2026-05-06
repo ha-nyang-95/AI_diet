@@ -106,6 +106,23 @@ ALLERGEN_ALIAS_MAP: Final[dict[str, str]] = {
 }
 
 
+# Story 4.3 CR DN-2 — 알레르기 noise gate. Story 3.6 ``feedback_text``는 LLM 본문
+# coaching 톤으로 *부정문* 자주 포함(예: "우유는 들어있지 않아 안심하세요"). substring
+# 매칭만으로는 이런 phantom 노출을 차단할 수 없어 ``contains_allergen``의 매칭 직후
+# 윈도우 검사로 해소. ``feedback_text``가 광고 가드(Story 3.6) 통과한 신뢰 텍스트라
+# 안전한 KO negation marker 4종 휴리스틱 — 의미 분석 X(향후 NLP 도입은 Story 8.4 polish).
+_NEGATION_PATTERNS: Final[tuple[str, ...]] = (
+    "않",  # 않아/않다/않습니다/않은/않으
+    "없",  # 없다/없어/없습니다/없음
+    "아니",  # 아니다/아니에요/아니라/아니고
+    "아닙",  # 아닙니다 (NFC에서 "아니"가 "아닙"으로 fuse — 별도 패턴 필요)
+    "제외",  # 제외
+)
+# 매칭 위치 ± 윈도우 — 짧을수록 false negative ↑, 길수록 false positive ↑. 한국어
+# 어절 평균 ~3-5자 + 보조용언 1-2어절 → 12자가 안정적 trade-off.
+_NEGATION_WINDOW_CHARS: Final[int] = 12
+
+
 def is_valid_allergen(value: str) -> bool:
     """단일 알레르기 라벨이 22종 도메인 내 인지 확인 — Pydantic validator/route 검증에서 사용.
 
@@ -132,6 +149,19 @@ def normalize_allergens(values: list[str]) -> list[str]:
     return [a for a in KOREAN_22_ALLERGENS if a in seen]
 
 
+def _has_negation_after(text: str, pos: int, length: int) -> bool:
+    """매칭 위치 직후 윈도우(``_NEGATION_WINDOW_CHARS``자) 내 negation marker 검사.
+
+    Story 4.3 CR DN-2 — Story 3.6 ``feedback_text`` 본문에 "X는 들어있지 않아",
+    "X 없음", "X 아닙니다" 등 부정문이 자주 등장. substring 매칭만으로는 phantom
+    노출 카운트가 발생해 AllergyExposureChart 과대보고. 매칭 직후 윈도우에 negation
+    marker가 있으면 매칭 무효화.
+    """
+    window_end = min(len(text), pos + length + _NEGATION_WINDOW_CHARS)
+    window = text[pos + length : window_end]
+    return any(pattern in window for pattern in _NEGATION_PATTERNS)
+
+
 def contains_allergen(text: str, allergen: str) -> bool:
     """``text``의 NFC 정규화 후 ``allergen`` (22종 중 1) 노출 여부 검사 — Story 4.3.
 
@@ -141,6 +171,10 @@ def contains_allergen(text: str, allergen: str) -> bool:
     ``_ALIAS_TEXT_EXCLUSIONS`` / ``_SKIP_SUBSTRING_LABELS`` / ``ALLERGEN_ALIAS_MAP``)를
     그대로 재사용하여 *주간 리포트 알레르기 노출 횟수*와 *fit_score 단락* 양쪽이
     *동일* 매칭 결과를 갖도록.
+
+    Story 4.3 CR DN-2: 매칭 직후 윈도우(12자)에 negation marker(``않``/``없``/``아니``/
+    ``제외``)가 있으면 phantom 매칭으로 간주 — Story 3.6 ``feedback_text`` 부정문
+    false positive 차단(예: "우유는 들어있지 않아 안심하세요" → False).
 
     가드:
 
@@ -156,6 +190,7 @@ def contains_allergen(text: str, allergen: str) -> bool:
     - ``contains_allergen("기타 가공품", "기타")`` → ``False`` (``_SKIP_SUBSTRING_LABELS``)
     - ``contains_allergen("기타알레르기성분 함유", "기타")`` → ``True`` (explicit alias)
     - ``contains_allergen("치즈피자", "우유")`` → ``True`` (alias ``치즈``→``우유``)
+    - ``contains_allergen("우유는 들어있지 않아 안심", "우유")`` → ``False`` (DN-2 negation)
     """
     if text is None:
         raise ValueError("text must not be None")
@@ -172,7 +207,8 @@ def contains_allergen(text: str, allergen: str) -> bool:
         candidate = normalized_text
         for excl in _LABEL_SUBSTRING_EXCLUSIONS.get(normalized_label, ()):
             candidate = candidate.replace(excl, "")
-        if normalized_label in candidate:
+        pos = candidate.find(normalized_label)
+        if pos >= 0 and not _has_negation_after(candidate, pos, len(normalized_label)):
             return True
 
     # (2) ALLERGEN_ALIAS_MAP — alias substring → 22종 표준 라벨. 본 alias가 입력
@@ -183,7 +219,8 @@ def contains_allergen(text: str, allergen: str) -> bool:
         candidate = normalized_text
         for excl in _ALIAS_TEXT_EXCLUSIONS.get(alias, ()):
             candidate = candidate.replace(excl, "")
-        if alias in candidate:
+        pos = candidate.find(alias)
+        if pos >= 0 and not _has_negation_after(candidate, pos, len(alias)):
             return True
 
     return False

@@ -16,6 +16,18 @@ import type { components } from "@/lib/api-client";
 
 export type WeeklyReportResponse = components["schemas"]["WeeklyReportResponse"];
 
+// Story 4.3 CR P21 — 명시적 4xx retry 차단(invalid 파라미터 알면서도 3회 hammering
+// 회귀 가드) + staleTime 60s(spec Story 1.2 패턴 명시 정합 — TanStack Query 기본은 0).
+class WeeklyReportFetchError extends Error {
+  constructor(
+    public readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "WeeklyReportFetchError";
+  }
+}
+
 export function useWeeklyReportQuery(fromDate: string, toDate: string) {
   return useQuery({
     queryKey: ["weekly-report", fromDate, toDate],
@@ -25,9 +37,19 @@ export function useWeeklyReportQuery(fromDate: string, toDate: string) {
         method: "GET",
       });
       if (!response.ok) {
-        throw new Error(`weekly report fetch failed: ${response.status}`);
+        throw new WeeklyReportFetchError(
+          response.status,
+          `weekly report fetch failed: ${response.status}`,
+        );
       }
       return (await response.json()) as WeeklyReportResponse;
+    },
+    staleTime: 60_000,
+    retry: (failureCount, error) => {
+      if (error instanceof WeeklyReportFetchError && error.status >= 400 && error.status < 500) {
+        return false;
+      }
+      return failureCount < 1;
     },
   });
 }

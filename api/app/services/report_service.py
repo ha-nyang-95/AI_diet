@@ -10,13 +10,15 @@ import. 순환 import 회피.
 
 설계 정합:
 
-- **N+1 회피**: 단일 SQL JOIN 1회. Story 3.7 ``idx_meal_analyses_user_id_created_at``
-  forward-compat 인덱스 hit. 추가 라운드트립 0건(``current_user`` Dependency가 이미
-  hydrated User 모델을 forward).
-- **TDEE 계산**: ``compute_bmr_mifflin`` + ``compute_tdee`` SOT 재사용. 프로필 5컬럼
-  중 하나라도 None이면 graceful ``tdee=None`` (404 X — 빈 차트 fallback UX).
+- **N+1 회피**: 단일 SQL JOIN 1회 + KST 윈도우 SQL-side 필터(``ate_at`` UTC bracket).
+  Story 3.7 ``idx_meal_analyses_user_id_created_at`` forward-compat 인덱스 hit. 추가
+  라운드트립 0건(``current_user`` Dependency가 이미 hydrated User 모델을 forward).
+- **TDEE 계산**: ``users.sex`` 컬럼 부재로 본 스토리 baseline은 ``tdee=None`` 항상 송신.
+  Story 5.1 (건강 프로필 수정)에서 ``users.sex`` 컬럼 + 온보딩 흐름 추가 후 BMR 계산
+  활성화 — 현 시점 잘못된 sex 디폴트 (~166 kcal 어긋남) 회귀 차단. 차트는 빈 라인 fallback.
 - **Sentry transaction**: ``op="reports.weekly"`` + child span ``op="reports.aggregate"``
-  (Story 3.3 ``op="analysis.pipeline"`` 패턴 정합).
+  (Story 3.3 ``op="analysis.pipeline"`` 패턴 정합) + unhandled 예외 시 ``set_status(
+  "internal_error")`` (Story 4.2 retro 정합).
 - **structlog**: ``report.weekly.start``/``report.weekly.complete`` 2 이벤트 — masked
   ``user_id u_{8char}``, ``from_date``/``to_date``/``meals_count``/``analyzed_meals_count``/
   ``allergen_exposures_count``/``latency_ms``. NFR-S5 정합 — raw allergies/parsed_items/
@@ -28,7 +30,7 @@ from __future__ import annotations
 
 import time as time_module
 from collections import defaultdict
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Literal, get_args
 from zoneinfo import ZoneInfo
@@ -39,10 +41,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
+from app.core.exceptions import WeeklyReportInvalidDateRangeError
 from app.db.models.meal import Meal
 from app.db.models.user import User
 from app.domain.allergens import KOREAN_22_ALLERGENS, contains_allergen
-from app.domain.bmr import compute_bmr_mifflin, compute_tdee
 from app.domain.health_profile import HealthGoal, get_protein_target
 
 if TYPE_CHECKING:
@@ -52,6 +54,11 @@ if TYPE_CHECKING:
 log = structlog.get_logger(__name__)
 
 _KST = ZoneInfo("Asia/Seoul")
+_UTC = UTC
+
+# Story 4.3 일반화 cap — 본 스토리는 7일 default, Story 4.4 인사이트가 14일 trailing
+# window 활용 가능. 30일 초과는 Postgres index hit 효과 감소 + UX 가독성 저하 → 거부.
+_MAX_REPORT_DAYS = 30
 
 
 # Story 4.3 — 22종 알레르기 SOT는 ``KOREAN_22_ALLERGENS`` 순서. 응답 ``allergen_exposures``
@@ -82,10 +89,12 @@ AllergenLiteral = Literal[
 ]
 
 # 22종 SOT 무결성 가드 — ``AllergenLiteral`` Literal과 ``KOREAN_22_ALLERGENS`` tuple
-# 순서 정합 검증(import 시점 fail-fast). ``typing.get_args`` SOT 사용.
-assert get_args(AllergenLiteral) == KOREAN_22_ALLERGENS, (
-    "AllergenLiteral mismatch with KOREAN_22_ALLERGENS — Story 1.5 SOT 정합 깨짐"
-)
+# 순서 정합 검증(import 시점 fail-fast). ``typing.get_args`` SOT 사용. ``assert``는
+# ``python -O`` 시 strip되어 silent SOT drift 위험 — explicit ``raise``로 변경.
+if get_args(AllergenLiteral) != KOREAN_22_ALLERGENS:
+    raise RuntimeError(
+        "AllergenLiteral mismatch with KOREAN_22_ALLERGENS — Story 1.5 SOT 정합 깨짐"
+    )
 
 
 # --- Pydantic 응답 모델 -------------------------------------------------------
@@ -198,12 +207,18 @@ async def get_weekly_report(
         ``WeeklyReportResponse`` — 라우터가 그대로 응답.
 
     Raises:
-        ValueError: ``from_date > to_date`` (라우터에서 RFC 7807 ``code=
-            reports.invalid_date_range`` 변환). 본 service는 fail-fast 가드만 — *날짜
-            범위 cap*은 라우터 책임.
+        WeeklyReportInvalidDateRangeError: ``from_date > to_date`` 또는 (to-from)>30일.
+            라우터의 글로벌 핸들러가 RFC 7807 ``code=reports.invalid_date_range``로 변환.
+            본 service가 SOT — 라우터는 wrapper.
     """
     if from_date > to_date:
-        raise ValueError("from_date must be <= to_date")
+        raise WeeklyReportInvalidDateRangeError(
+            f"from_date ({from_date}) must be <= to_date ({to_date})"
+        )
+    if (to_date - from_date).days > _MAX_REPORT_DAYS:
+        raise WeeklyReportInvalidDateRangeError(
+            f"date range exceeds {_MAX_REPORT_DAYS} days (got {(to_date - from_date).days})"
+        )
 
     masked_user_id = _mask_user_id(user.id)
     log.info(
@@ -215,61 +230,63 @@ async def get_weekly_report(
 
     started_at = time_module.perf_counter()
 
-    with sentry_sdk.start_transaction(op="reports.weekly", name="weekly_report"):
-        # 1) TDEE / 단백질 target 계산 — 5 BMR 입력 모두 not None일 때만 ``tdee`` set.
-        weight_kg = _to_float_or_none(user.weight_kg)
-        height_cm = _to_float_or_none(user.height_cm)
-        age_value = user.age
-        activity_level = user.activity_level
-        health_goal = user.health_goal
+    transaction = sentry_sdk.start_transaction(op="reports.weekly", name="weekly_report")
+    with transaction:
+        try:
+            # 1) TDEE / 단백질 target 계산 — ``users.sex`` 컬럼 부재(Story 5.1/8.4 polish
+            # forward)이므로 ``tdee`` 항상 None 송신. spec AC1 ``BMR 입력 5건 중 하나라도
+            # None이면 tdee=None graceful`` 정합 — 잘못된 sex 디폴트로 50% 사용자에게
+            # ~166 kcal 어긋난 TDEE 송신 회귀 차단.
+            weight_kg = _to_float_or_none(user.weight_kg)
+            health_goal = user.health_goal
 
-        tdee_int: int | None = None
-        if (
-            weight_kg is not None
-            and height_cm is not None
-            and age_value is not None
-            and activity_level is not None
-        ):
-            try:
-                # Story 3.5 ``UserProfileSnapshot.sex`` 부재 정합 — default ``"female"``
-                # (데모 페르소나 *지수* 정합, ``data/README.md`` SOP). ``users.sex`` 컬럼
-                # 추가는 Story 8.4 polish forward.
-                bmr = compute_bmr_mifflin(
-                    sex="female",
-                    age=age_value,
-                    weight_kg=weight_kg,
-                    height_cm=height_cm,
+            tdee_int: int | None = None
+            # NOTE: Story 5.1에서 ``users.sex`` 컬럼 추가 후 본 분기 활성화.
+            # ``compute_bmr_mifflin`` + ``compute_tdee`` 호출은 sex/age/weight/height/
+            # activity_level 5건 모두 not None일 때만.
+
+            protein_target = get_protein_target(health_goal)
+            protein_lower = protein_target[0] if protein_target else None
+            protein_upper = protein_target[1] if protein_target else None
+
+            # 2) 단일 SQL — meals + LEFT JOIN meal_analyses(``selectinload`` SOT, Story 3.7
+            # 패턴 정합) + KST 윈도우 SQL-side 필터(NFR-P8: 사용자 전체 history 로드 회피).
+            # KST 윈도우 → UTC bracket 변환: from_date 00:00 KST = (from-9h) UTC,
+            # to_date+1 00:00 KST = (to+1-9h) UTC. ``ate_at < to_exclusive_utc``로 inclusive
+            # 종료일 정합.
+            from_dt_utc = datetime.combine(from_date, time.min, tzinfo=_KST).astimezone(_UTC)
+            to_dt_exclusive_utc = datetime.combine(
+                to_date + timedelta(days=1), time.min, tzinfo=_KST
+            ).astimezone(_UTC)
+
+            with sentry_sdk.start_span(op="reports.aggregate"):
+                stmt = (
+                    select(Meal)
+                    .options(selectinload(Meal.analysis))
+                    .where(
+                        Meal.user_id == user.id,
+                        Meal.deleted_at.is_(None),
+                        Meal.ate_at >= from_dt_utc,
+                        Meal.ate_at < to_dt_exclusive_utc,
+                    )
+                    .order_by(Meal.ate_at.asc())
                 )
-                tdee_int = round(compute_tdee(bmr=bmr, activity_level=activity_level))
-            except ValueError:
-                # CHECK 제약 통과한 row가 ``compute_bmr_mifflin``에서 ValueError —
-                # graceful None 송신, 차트는 빈 라인.
-                tdee_int = None
+                result = await db.execute(stmt)
+                all_meals = list(result.scalars().all())
 
-        protein_target = get_protein_target(health_goal)
-        protein_lower = protein_target[0] if protein_target else None
-        protein_upper = protein_target[1] if protein_target else None
-
-        # 2) 단일 SQL — meals + LEFT JOIN meal_analyses(``selectinload`` SOT, Story 3.7
-        # 패턴 정합). KST 변환은 Python 측에서 group(zoneinfo).
-        with sentry_sdk.start_span(op="reports.aggregate"):
-            stmt = (
-                select(Meal)
-                .options(selectinload(Meal.analysis))
-                .where(
-                    Meal.user_id == user.id,
-                    Meal.deleted_at.is_(None),
-                )
-                .order_by(Meal.ate_at.asc())
-            )
-            result = await db.execute(stmt)
-            all_meals = list(result.scalars().all())
-
-            grouped: dict[date, list[Meal]] = defaultdict(list)
-            for meal in all_meals:
-                kst_date = meal.ate_at.astimezone(_KST).date()
-                if from_date <= kst_date <= to_date:
-                    grouped[kst_date].append(meal)
+                grouped: dict[date, list[Meal]] = defaultdict(list)
+                for meal in all_meals:
+                    # Defensive: ``Meal.ate_at`` ORM은 TIMESTAMPTZ이지만 legacy 시드/테스트
+                    # fixture가 naive datetime을 인입할 수 있어 ``astimezone()`` ValueError
+                    # 회귀 차단(endpoint 500 방지).
+                    ate_at = (
+                        meal.ate_at
+                        if meal.ate_at.tzinfo is not None
+                        else meal.ate_at.replace(tzinfo=_UTC)
+                    )
+                    kst_date = ate_at.astimezone(_KST).date()
+                    if from_date <= kst_date <= to_date:
+                        grouped[kst_date].append(meal)
 
             # 3) 일별 enumerate(빈 날 포함) + aggregation.
             user_allergies_normalized: list[str] = list(user.allergies or [])
@@ -309,7 +326,10 @@ async def get_weekly_report(
                         (_to_float_or_none(a.protein_g) or 0.0) for a in analyses
                     )
                     sum_fat: float = sum((_to_float_or_none(a.fat_g) or 0.0) for a in analyses)
-                    sum_kcal: int = sum(int(a.energy_kcal) for a in analyses)
+                    # ``a.energy_kcal``은 ORM ``Mapped[int]``지만 legacy NULL row 또는
+                    # 미래 schema drift 방어 — ``or 0`` graceful + ``round(float(...))``로
+                    # 절단(int(399.99)=399) 회귀 차단.
+                    sum_kcal: int = sum(round(float(a.energy_kcal or 0)) for a in analyses)
 
                     avg_carb = sum_carb / analyzed_count
                     avg_protein = sum_protein / analyzed_count
@@ -317,18 +337,22 @@ async def get_weekly_report(
 
                     protein_per_kg: float | None = None
                     if weight_kg is not None and weight_kg > 0:
-                        protein_per_kg = round(avg_protein / weight_kg, 3)
+                        protein_per_kg = max(0.0, round(avg_protein / weight_kg, 3))
 
+                    # ``Field(ge=0)`` ValidationError 회귀 차단(``round(-0.0001, 2) = -0.0``
+                    # 등 부동소수 경계). ``max(0.0, ...)`` clamp.
                     macros = WeeklyMacros(
-                        carbohydrate_g=round(avg_carb, 2),
-                        protein_g=round(avg_protein, 2),
-                        fat_g=round(avg_fat, 2),
+                        carbohydrate_g=max(0.0, round(avg_carb, 2)),
+                        protein_g=max(0.0, round(avg_protein, 2)),
+                        fat_g=max(0.0, round(avg_fat, 2)),
                         protein_g_per_kg=protein_per_kg,
                     )
                     energy_kcal_total = float(sum_kcal)
 
-                # 4) 알레르기 노출 매칭 — parsed_items[].name + feedback_text + raw_text를
-                # substring 입력으로(NFR-S5 raw 텍스트 로깅 X). 사용자 ``allergies`` 22종
+                # 4) 알레르기 노출 매칭 — ``parsed_items[].name`` + ``feedback_text``
+                # substring 입력(NFR-S5 raw 텍스트 로깅 X). spec AC1 정합 — ``raw_text``는
+                # 광고 가드 미통과 자유 입력이라 false-positive 벡터(예: "도넛 알레르기 없음"
+                # → 호두/도넛 트리거)이므로 매칭 입력에서 제외. 사용자 ``allergies`` 22종
                 # 부분집합만 검사 — 22종 전체 검사는 미설정 알레르기 노출 노이즈.
                 exposure_counts: dict[str, int] = defaultdict(int)
                 if user_allergies_valid:
@@ -341,9 +365,6 @@ async def get_weekly_report(
                                     meal_texts.append(name)
                         if meal.analysis is not None and meal.analysis.feedback_text:
                             meal_texts.append(meal.analysis.feedback_text)
-                        # raw_text 포함 — 텍스트-only 입력(parsed_items None) 케이스 보장.
-                        if meal.raw_text:
-                            meal_texts.append(meal.raw_text)
 
                         joined = " ".join(meal_texts)
                         if not joined:
@@ -373,26 +394,34 @@ async def get_weekly_report(
                 )
                 current += timedelta(days=1)
 
-        latency_ms = int((time_module.perf_counter() - started_at) * 1000)
-        log.info(
-            "report.weekly.complete",
-            user_id=masked_user_id,
-            meals_count=total_meals_count,
-            analyzed_meals_count=total_analyzed_count,
-            allergen_exposures_count=total_allergen_exposures,
-            latency_ms=latency_ms,
-        )
+            latency_ms = int((time_module.perf_counter() - started_at) * 1000)
+            log.info(
+                "report.weekly.complete",
+                user_id=masked_user_id,
+                from_date=str(from_date),
+                to_date=str(to_date),
+                meals_count=total_meals_count,
+                analyzed_meals_count=total_analyzed_count,
+                allergen_exposures_count=total_allergen_exposures,
+                latency_ms=latency_ms,
+            )
 
-        return WeeklyReportResponse(
-            from_date=from_date,
-            to_date=to_date,
-            tdee=tdee_int,
-            health_goal=health_goal,
-            protein_target_g_per_kg_lower=protein_lower,
-            protein_target_g_per_kg_upper=protein_upper,
-            weight_kg=weight_kg,
-            daily_summaries=daily_summaries,
-        )
+            return WeeklyReportResponse(
+                from_date=from_date,
+                to_date=to_date,
+                tdee=tdee_int,
+                health_goal=health_goal,
+                protein_target_g_per_kg_lower=protein_lower,
+                protein_target_g_per_kg_upper=protein_upper,
+                weight_kg=weight_kg,
+                daily_summaries=daily_summaries,
+            )
+        except Exception:
+            # Story 4.2 retro 패턴 — unhandled 예외 시 Sentry 대시보드에 명시적 실패 기록
+            # (``with`` exit 전에 ``set_status`` 호출해야 effect). re-raise 후 글로벌
+            # 핸들러가 RFC 7807 응답 변환.
+            transaction.set_status("internal_error")
+            raise
 
 
 __all__ = [

@@ -34,14 +34,15 @@ function useMounted(): boolean {
 
 export interface WeeklyReportProps {
   report: WeeklyReportResponse;
-  userAllergies: readonly string[];
+  // Story 4.3 CR P10 — null = fetch 실패(차트 비활성), [] = 알레르기 미설정.
+  userAllergies: readonly string[] | null;
 }
 
 /**
  * 7-요소 ``daily_summaries``의 ``meal_count`` 합 — 0이면 빈 화면.
  */
 function isEmpty(report: WeeklyReportResponse): boolean {
-  return (report.daily_summaries ?? []).every((d) => d.meal_count === 0);
+  return report.daily_summaries.every((d) => d.meal_count === 0);
 }
 
 export function WeeklyReport({ report, userAllergies }: WeeklyReportProps) {
@@ -61,19 +62,58 @@ export function WeeklyReport({ report, userAllergies }: WeeklyReportProps) {
       </header>
 
       {empty ? (
-        <section className="rounded-lg border border-slate-200 bg-white p-12 text-center">
-          <p className="text-base text-slate-700">
-            이번 주 기록이 없습니다 — 모바일에서 첫 식단을 입력하세요.
-          </p>
-          <p className="mt-3 text-sm text-slate-500">
-            <a
-              href="balancenote://meals/input"
-              className="text-blue-600 underline-offset-4 hover:underline"
-            >
-              앱 열기
-            </a>
-          </p>
-        </section>
+        <>
+          <section className="rounded-lg border border-slate-200 bg-white p-12 text-center">
+            <p className="text-base text-slate-700">
+              이번 주 기록이 없습니다 — 모바일에서 첫 식단을 입력하세요.
+            </p>
+            <p className="mt-3 text-sm text-slate-500">
+              <a
+                href="balancenote://meals/input"
+                className="text-blue-600 underline-offset-4 hover:underline"
+              >
+                앱 열기
+              </a>
+            </p>
+          </section>
+          {/* Story 4.3 CR P11 — 빈 주에도 NFR-A5 데이터 테이블 fallback 노출.
+              스크린리더 사용자가 "0 카운트" 정보 자체를 인식 가능. */}
+          <section
+            className="mt-6 rounded-lg border border-slate-200 bg-white p-4"
+            aria-label="주간 데이터 요약"
+          >
+            <h2 className="text-base font-semibold text-slate-900">
+              일별 데이터
+            </h2>
+            <details className="mt-2 text-sm text-slate-700">
+              <summary className="cursor-pointer text-slate-600 hover:text-slate-900">
+                데이터 표 보기
+              </summary>
+              <table className="mt-2 w-full text-left">
+                <thead>
+                  <tr className="border-b border-slate-200 text-xs text-slate-500">
+                    <th scope="col" className="py-1 pr-2">
+                      날짜
+                    </th>
+                    <th scope="col" className="py-1 text-right">
+                      식단 수
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {report.daily_summaries.map((d) => (
+                    <tr key={d.kst_date} className="border-b border-slate-100">
+                      <td className="py-1 pr-2">{d.kst_date}</td>
+                      <td className="py-1 text-right text-slate-400">
+                        {d.meal_count}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </details>
+          </section>
+        </>
       ) : (
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
           <MacroChart

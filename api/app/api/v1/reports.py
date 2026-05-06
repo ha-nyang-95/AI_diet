@@ -31,12 +31,11 @@ endpoint 진입/종료 로그 X(서비스 책임 분리).
 from __future__ import annotations
 
 from datetime import date
-from typing import Annotated, Final
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
 
 from app.api.deps import DbSession, require_basic_consents
-from app.core.exceptions import WeeklyReportInvalidDateRangeError
 from app.db.models.user import User
 from app.services.report_service import (
     WeeklyReportResponse,
@@ -44,11 +43,6 @@ from app.services.report_service import (
 )
 
 router = APIRouter()
-
-
-# Story 4.3 일반화 cap — 본 스토리는 7일 default, Story 4.4 인사이트가 14일 trailing
-# window 활용 가능. 30일 초과는 Postgres index hit 효과 감소 + UX 가독성 저하 → 거부.
-_MAX_REPORT_DAYS: Final[int] = 30
 
 
 # --- Endpoints -----------------------------------------------------------------
@@ -76,17 +70,10 @@ async def get_weekly_report_endpoint(
     """7일 주간 리포트 — meals + meal_analyses LEFT JOIN aggregation.
 
     ``from_date``/``to_date`` 모두 필수(default X) — 클라이언트가 KST 7일 윈도우를
-    명시 결정. (to-from)>30일 또는 from>to는 ``reports.invalid_date_range``(400).
+    명시 결정. 날짜 범위 검증은 ``service/report_service.py``가 SOT —
+    ``WeeklyReportInvalidDateRangeError``를 raise해 글로벌 핸들러가
+    ``reports.invalid_date_range``(400) 응답 생성.
     """
-    if from_date > to_date:
-        raise WeeklyReportInvalidDateRangeError(
-            f"from_date ({from_date}) must be <= to_date ({to_date})"
-        )
-    if (to_date - from_date).days > _MAX_REPORT_DAYS:
-        raise WeeklyReportInvalidDateRangeError(
-            f"date range exceeds {_MAX_REPORT_DAYS} days (got {(to_date - from_date).days})"
-        )
-
     return await get_weekly_report(
         user=user,
         from_date=from_date,

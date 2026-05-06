@@ -57,7 +57,7 @@ ACTIVITY_LEVEL_VALUES: tuple[ActivityLevel, ...] = (
 #   상담 — 본 SOT는 *일반 권장 baseline*만 노출(disclaimer FR7 정합).
 #
 # ``MappingProxyType`` — runtime 변경 차단. 신규 enum 추가 시 본 dict 갱신 강제
-# (``get_protein_target``의 KeyError 안전성 의존).
+# (import-time SOT drift 가드 — 아래 ``if`` 블록 참조).
 PROTEIN_TARGET_BY_GOAL: Final[Mapping[HealthGoal, tuple[float, float]]] = MappingProxyType(
     {
         "weight_loss": (1.2, 1.6),
@@ -67,6 +67,15 @@ PROTEIN_TARGET_BY_GOAL: Final[Mapping[HealthGoal, tuple[float, float]]] = Mappin
     }
 )
 
+# SOT drift fail-fast — 미래 ``HEALTH_GOAL_VALUES`` 신규 enum 추가 시 본 dict 매핑
+# 누락이면 import 시점 즉시 실패. ``assert``는 ``python -O``에서 strip되므로 explicit
+# ``raise`` (Story 4.3 CR P7/P18 정합).
+if set(PROTEIN_TARGET_BY_GOAL.keys()) != set(HEALTH_GOAL_VALUES):
+    raise RuntimeError(
+        "PROTEIN_TARGET_BY_GOAL keys mismatch with HEALTH_GOAL_VALUES — "
+        f"goals={set(HEALTH_GOAL_VALUES)} vs lookup={set(PROTEIN_TARGET_BY_GOAL.keys())}"
+    )
+
 
 def get_protein_target(health_goal: HealthGoal | None) -> tuple[float, float] | None:
     """``health_goal`` → ``(lower, upper)`` g/kg/day 권장 범위 또는 ``None``.
@@ -75,10 +84,10 @@ def get_protein_target(health_goal: HealthGoal | None) -> tuple[float, float] | 
     (사용자 프로필 미완성)이면 ``None`` 반환 — 차트는 권장 영역 미렌더 + 캡션 *"권장
     범위는 프로필 + 목표 설정 후 노출"*.
 
-    ``HealthGoal`` Literal 타입이 컴파일타임 enum 차단 — 4 enum 외 입력은 mypy 단계
-    실패. runtime KeyError는 ``PROTEIN_TARGET_BY_GOAL``에 빠진 신규 enum 정합성
-    fail-fast(SOT drift 가드).
+    Story 4.3 CR P18 — ``.get()`` graceful: import-time SOT 가드가 정합성 보장하지만
+    legacy DB 데이터에서 unknown enum이 들어오면 endpoint 500 회피(``None`` 반환 →
+    차트 빈 영역).
     """
     if health_goal is None:
         return None
-    return PROTEIN_TARGET_BY_GOAL[health_goal]
+    return PROTEIN_TARGET_BY_GOAL.get(health_goal)

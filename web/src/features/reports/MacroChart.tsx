@@ -40,6 +40,9 @@ function formatMmDd(isoDate: string): string {
   return `${mm}-${dd}`;
 }
 
+// Story 4.3 CR DN-3 — `aria-describedby` SOT (chart wrapper ↔ data table 연결).
+const TABLE_ID = "macro-chart-table";
+
 export function MacroChart({ dailySummaries, mounted }: MacroChartProps) {
   const chartData = dailySummaries.map((d) => ({
     date: formatMmDd(d.kst_date),
@@ -54,6 +57,7 @@ export function MacroChart({ dailySummaries, mounted }: MacroChartProps) {
       className="rounded-lg border border-slate-200 bg-white p-4"
       role="img"
       aria-label="매크로 비율 추이 차트 — 자세한 데이터는 아래 표 참조"
+      aria-describedby={TABLE_ID}
       tabIndex={0}
     >
       <h2 className="text-base font-semibold text-slate-900">매크로 비율 추이</h2>
@@ -82,7 +86,7 @@ export function MacroChart({ dailySummaries, mounted }: MacroChartProps) {
         <summary className="cursor-pointer text-slate-600 hover:text-slate-900">
           데이터 표 보기
         </summary>
-        <table className="mt-2 w-full text-left">
+        <table id={TABLE_ID} className="mt-2 w-full text-left">
           <thead>
             <tr className="border-b border-slate-200 text-xs text-slate-500">
               <th scope="col" className="py-1 pr-2">날짜</th>

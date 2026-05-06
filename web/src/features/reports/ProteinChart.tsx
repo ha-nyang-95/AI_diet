@@ -38,6 +38,9 @@ function formatMmDd(isoDate: string): string {
   return `${mm}-${dd}`;
 }
 
+// Story 4.3 CR DN-3 — `aria-describedby` SOT.
+const TABLE_ID = "protein-chart-table";
+
 export function ProteinChart({
   dailySummaries,
   healthGoal,
@@ -66,6 +69,7 @@ export function ProteinChart({
       className="rounded-lg border border-slate-200 bg-white p-4"
       role="img"
       aria-label="단백질 g/kg 추이 차트 — 자세한 데이터는 아래 표 참조"
+      aria-describedby={TABLE_ID}
       tabIndex={0}
     >
       <h2 className="text-base font-semibold text-slate-900">단백질 g/kg 추이</h2>
@@ -88,12 +92,13 @@ export function ProteinChart({
                   fillOpacity={0.15}
                 />
               ) : null}
+              {/* Story 4.3 CR P12 — `connectNulls` 제거: 비기록일을 직선 보간하면 가짜
+                  트렌드로 misleading. 실 데이터 누락은 끊긴 segment로 정직 표시. */}
               <Line
                 dataKey="proteinPerKg"
                 name="단백질 (g/kg)"
                 stroke="#2563eb"
                 strokeWidth={2}
-                connectNulls
               />
             </LineChart>
           </ResponsiveContainer>
@@ -106,7 +111,7 @@ export function ProteinChart({
         <summary className="cursor-pointer text-slate-600 hover:text-slate-900">
           데이터 표 보기
         </summary>
-        <table className="mt-2 w-full text-left">
+        <table id={TABLE_ID} className="mt-2 w-full text-left">
           <thead>
             <tr className="border-b border-slate-200 text-xs text-slate-500">
               <th scope="col" className="py-1 pr-2">날짜</th>

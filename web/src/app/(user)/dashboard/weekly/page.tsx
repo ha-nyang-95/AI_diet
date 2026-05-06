@@ -27,18 +27,27 @@ interface UserHealthProfile {
   allergies: string[] | null;
 }
 
-async function fetchUserAllergies(): Promise<readonly string[]> {
+/**
+ * Story 4.3 CR P10 — 401은 redirect로 명시(silently `[]` 차단), 그 외 non-ok는
+ * `null` 반환해 UI가 "fetch 실패"와 "알레르기 미설정"을 구분.
+ */
+async function fetchUserAllergies(): Promise<readonly string[] | null> {
   // ``/v1/users/me/profile`` GET — 인증만, 동의 게이트 X (PIPA Art.35 정합).
   const { cookies } = await import("next/headers");
   const store = await cookies();
   const access = store.get("bn_access")?.value;
-  if (!access) return [];
+  if (!access) {
+    redirect("/api/auth/cleanup");
+  }
   const apiBase = process.env.API_BASE_URL ?? "http://localhost:8000";
   const response = await fetch(`${apiBase}/v1/users/me/profile`, {
     headers: { Cookie: `bn_access=${access}` },
     cache: "no-store",
   });
-  if (!response.ok) return [];
+  if (response.status === 401) {
+    redirect("/api/auth/cleanup");
+  }
+  if (!response.ok) return null;
   const profile = (await response.json()) as UserHealthProfile;
   return profile.allergies ?? [];
 }
@@ -67,7 +76,8 @@ export default async function WeeklyReportPage() {
   ]);
 
   if (report === null) {
-    // 401 -> redirect 처리, 4xx -> null. error boundary 회피하고 빈 화면.
+    // ``getServerSideWeeklyReport``가 non-ok 시 null 반환(getServerSideUser 패턴 정합).
+    // 페이지 측에서 빈 화면 fallback 결정 — error boundary 회피.
     return (
       <main className="mx-auto max-w-6xl px-4 py-8">
         <h1 className="text-2xl font-semibold tracking-tight text-slate-900">

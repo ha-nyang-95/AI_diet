@@ -70,8 +70,8 @@ async def test_get_weekly_report_empty_week_200(
         assert d["allergen_exposures"] == []
     # forward-compat — insights 필드는 항상 None
     assert body["insights"] is None
-    # TDEE / health_goal — 프로필 완비 시 set
-    assert body["tdee"] is not None
+    # Story 4.3 CR DN-1 — ``users.sex`` 컬럼 부재로 TDEE 항상 None (Story 5.1 polish forward).
+    assert body["tdee"] is None
     assert body["health_goal"] == "maintenance"
 
 
