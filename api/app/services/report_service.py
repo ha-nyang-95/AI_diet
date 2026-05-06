@@ -44,8 +44,15 @@ from sqlalchemy.orm import selectinload
 from app.core.exceptions import WeeklyReportInvalidDateRangeError
 from app.db.models.meal import Meal
 from app.db.models.user import User
+from app.domain.ad_expression_guard import (
+    apply_replacements as _ad_apply_replacements,
+)
+from app.domain.ad_expression_guard import (
+    find_violations as _ad_find_violations,
+)
 from app.domain.allergens import KOREAN_22_ALLERGENS, contains_allergen
 from app.domain.health_profile import HealthGoal, get_protein_target
+from app.domain.insights import InsightCard, generate_weekly_insights
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -143,12 +150,12 @@ class DailySummary(BaseModel):
 
 
 class WeeklyReportResponse(BaseModel):
-    """``GET /v1/reports/weekly`` 응답 — Story 4.4 forward-compat ``insights`` 슬롯 포함.
+    """``GET /v1/reports/weekly`` 응답 — Story 4.4 ``insights`` type narrow.
 
-    ``insights`` 본 스토리 baseline: *항상 None*. Story 4.4가 ``list[InsightCard]``로
-    type narrow + 단백질 평균 vs 목표 미달 인사이트 1차 출처 인용. Story 2.4
-    ``analysis_summary`` forward-compat 패턴 정합 — *항상 None*만 송신해 잘못된 값
-    노출 차단.
+    Story 4.3 forward-compat 슬롯 ``insights: None = None``을 본 스토리에서
+    ``list[InsightCard] | None``으로 type narrow. 빈 list는 *생성 룰 모두 미충족*,
+    None은 *fetch 실패 fallback*. 클라이언트 분기는 둘 다 미렌더 정합(빈 list와
+    None은 동일 시각 행동).
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -161,8 +168,8 @@ class WeeklyReportResponse(BaseModel):
     protein_target_g_per_kg_upper: float | None
     weight_kg: float | None
     daily_summaries: list[DailySummary]
-    # Story 4.4 forward-compat — *baseline 항상 None*. type narrow는 Story 4.4 책임.
-    insights: None = None
+    # Story 4.4 type narrow — Story 4.3 forward-compat 슬롯 채움.
+    insights: list[InsightCard] | None = None
 
 
 # --- helpers ------------------------------------------------------------------
@@ -171,6 +178,42 @@ class WeeklyReportResponse(BaseModel):
 def _mask_user_id(user_id: object) -> str:
     """UUID → ``u_{8char}`` 마스킹 (Story 3.x/4.2 패턴 정합)."""
     return f"u_{str(user_id).replace('-', '')[:8]}"
+
+
+def _apply_ad_guard_to_insights(
+    insights: list[InsightCard],
+    *,
+    user_id_masked: str,
+) -> list[InsightCard]:
+    """Story 4.4 AC9 — InsightCard.title/body에 광고 가드 *2차 defensive* 적용.
+
+    템플릿 import-time SOT 가드(``insights.py``)가 1차 — 정상 흐름에서 trigger 0건.
+    본 함수는 *사용자 substitution* 후 본문에 잔존 위반 가능성에 대한 fallback 치환
+    (``apply_replacements`` SOT 재사용). 치환 발생 시 structlog 1 이벤트
+    ``insight.ad_guard.replaced`` (kind + count, 본문 X — NFR-S5 정합).
+    """
+    cleaned: list[InsightCard] = []
+    replaced_count = 0
+    replaced_kinds: list[str] = []
+    for card in insights:
+        title_violations = _ad_find_violations(card.title)
+        body_violations = _ad_find_violations(card.body)
+        if not title_violations and not body_violations:
+            cleaned.append(card)
+            continue
+        new_title = _ad_apply_replacements(card.title) if title_violations else card.title
+        new_body = _ad_apply_replacements(card.body) if body_violations else card.body
+        replaced_count += len(title_violations) + len(body_violations)
+        replaced_kinds.append(card.kind)
+        cleaned.append(card.model_copy(update={"title": new_title, "body": new_body}))
+    if replaced_count > 0:
+        log.warning(
+            "insight.ad_guard.replaced",
+            user_id=user_id_masked,
+            replaced_count=replaced_count,
+            kinds=replaced_kinds,
+        )
+    return cleaned
 
 
 def _to_float_or_none(value: object) -> float | None:
@@ -394,6 +437,37 @@ async def get_weekly_report(
                 )
                 current += timedelta(days=1)
 
+            # 5) Story 4.4 — 인사이트 카드 생성. 결정성 룰 + LLM 호출 0건. 광고 가드는
+            # 템플릿 import-time SOT 가드가 1차(``app/domain/insights.py``의
+            # ``_TEMPLATE_SAMPLES_FOR_AD_GUARD``), 본 service에서 *사용자 입력 substitution*
+            # 후 본문에 잔존 위반 가능성이 있어 *defensive 2차 가드* 적용 후
+            # ``apply_replacements``로 안전 워딩 치환.
+            with sentry_sdk.start_span(op="reports.insights") as span:
+                insights_raw = generate_weekly_insights(
+                    daily_summaries=[d.model_dump() for d in daily_summaries],
+                    weight_kg=weight_kg,
+                    health_goal=health_goal,
+                    macro_goal=user.macro_goal,
+                )
+                insights = _apply_ad_guard_to_insights(insights_raw, user_id_masked=masked_user_id)
+                span.set_data("insights_count", len(insights))
+                span.set_data(
+                    "protein_deficit_present",
+                    any(c.kind == "protein_deficit" for c in insights),
+                )
+                span.set_data(
+                    "calorie_diff_present",
+                    any(c.kind == "calorie_diff" for c in insights),
+                )
+                span.set_data(
+                    "macro_ratio_drift_present",
+                    any(c.kind == "macro_ratio_drift" for c in insights),
+                )
+                span.set_data(
+                    "allergen_exposure_present",
+                    any(c.kind == "allergen_exposure" for c in insights),
+                )
+
             latency_ms = int((time_module.perf_counter() - started_at) * 1000)
             log.info(
                 "report.weekly.complete",
@@ -403,6 +477,7 @@ async def get_weekly_report(
                 meals_count=total_meals_count,
                 analyzed_meals_count=total_analyzed_count,
                 allergen_exposures_count=total_allergen_exposures,
+                insights_count=len(insights),
                 latency_ms=latency_ms,
             )
 
@@ -415,6 +490,7 @@ async def get_weekly_report(
                 protein_target_g_per_kg_upper=protein_upper,
                 weight_kg=weight_kg,
                 daily_summaries=daily_summaries,
+                insights=insights,
             )
         except Exception:
             # Story 4.2 retro 패턴 — unhandled 예외 시 Sentry 대시보드에 명시적 실패 기록

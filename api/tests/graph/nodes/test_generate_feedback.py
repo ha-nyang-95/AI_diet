@@ -465,3 +465,42 @@ async def test_cache_hit_zero_llm_calls(
     fb = out["feedback"]
     assert fb["used_llm"] == "claude"
     assert call_count["n"] == 1  # router 1회 호출 — 내부에서 cache hit 처리
+
+
+# Story 4.4 — _build_profile_hash macro_goal 확장 (AC8)
+
+
+def test_profile_hash_changes_when_macro_goal_set(
+    sample_profile: UserProfileSnapshot,
+) -> None:
+    """Story 4.4 AC8 — macro_goal 변경 시 profile_hash sha256 자동 변경.
+
+    cache key의 모든 입력 필드 sha256 SOT — 사용자가 macro_goal 갱신 시 hash 변경 →
+    다음 분석 cache miss → 새 LLM 호출 자동 트리거.
+    """
+    from app.domain.macro_goal import MacroGoal
+    from app.graph.nodes.generate_feedback import _build_profile_hash
+
+    hash_no_goal = _build_profile_hash(sample_profile)
+
+    profile_with_goal = sample_profile.model_copy(
+        update={"macro_goal": MacroGoal(protein_target_g_per_meal=25)}
+    )
+    hash_with_goal = _build_profile_hash(profile_with_goal)
+
+    assert hash_no_goal != hash_with_goal
+
+
+def test_profile_hash_stable_for_macro_goal_none(
+    sample_profile: UserProfileSnapshot,
+) -> None:
+    """Story 4.4 AC8 — macro_goal=None 사용자(기존)는 hash 안정성 보장.
+
+    Once-set hash invariant — 동일 입력 → 동일 hash. macro_goal=None 사용자는 1회
+    cache miss(``"null"`` 추가)만 발생 후 안정.
+    """
+    from app.graph.nodes.generate_feedback import _build_profile_hash
+
+    h1 = _build_profile_hash(sample_profile)
+    h2 = _build_profile_hash(sample_profile)
+    assert h1 == h2

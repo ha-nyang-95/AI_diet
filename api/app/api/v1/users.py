@@ -14,17 +14,19 @@ from __future__ import annotations
 import contextlib
 import uuid
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Any
 
 import structlog
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import func, update
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from sqlalchemy import func, text, update
 
 from app.api.deps import DbSession, current_user, require_basic_consents
+from app.core.exceptions import MacroGoalInvalidError
 from app.db.models.user import User
 from app.domain.allergens import normalize_allergens
 from app.domain.health_profile import ActivityLevel, HealthGoal
+from app.domain.macro_goal import MacroGoal, MacroGoalPatchRequest
 
 logger = structlog.get_logger(__name__)
 
@@ -217,3 +219,124 @@ async def get_health_profile(
     ``allergies=[]`` + ``profile_completed_at=null``. 404 미사용.
     """
     return _build_profile_response(user)
+
+
+# --- Story 4.4 — Macro Goal endpoints --------------------------------------
+
+
+def _build_macro_goal_response(raw: dict[str, Any] | None) -> MacroGoal:
+    """User row의 macro_goal JSONB → MacroGoal 응답.
+
+    미설정 사용자는 빈 ``MacroGoal()`` 반환(``model_dump(exclude_none=True)``로 ``{}``
+    응답). 잘못된 legacy shape는 ValidationError → 빈 ``MacroGoal()`` graceful
+    fallback(404 X — 사용자가 항상 존재).
+    """
+    if not raw:
+        return MacroGoal()
+    try:
+        return MacroGoal.model_validate(raw)
+    except ValidationError:
+        return MacroGoal()
+
+
+@router.get("/me/macro_goal")
+async def get_macro_goal(
+    user: Annotated[User, Depends(current_user)],
+) -> dict[str, Any]:
+    """``users.macro_goal`` JSONB 조회 — 인증만(자기 데이터 조회는 동의 무관).
+
+    미설정 사용자 → 200 + ``{}`` 빈 object(404 X). 폼 prefill 입력(AC4).
+    응답은 ``model_dump(exclude_none=True)`` — None 필드 미포함.
+    """
+    response = _build_macro_goal_response(user.macro_goal)
+    return response.model_dump(exclude_none=True)
+
+
+@router.patch("/me/macro_goal")
+async def patch_macro_goal(
+    body: dict[str, Any],
+    db: DbSession,
+    user: Annotated[User, Depends(require_basic_consents)],
+) -> dict[str, Any]:
+    """``users.macro_goal`` JSONB partial update — 5 필드 partial.
+
+    ``MacroGoalPatchRequest`` Pydantic 1차 게이트(ratio all-or-none + sum=100 +
+    at-least-one). DB CHECK ``ck_users_macro_goal_shape``가 2차 게이트(shape).
+    Pydantic ``ValueError``는 ``MacroGoalInvalidError``로 변환 → RFC 7807 400 +
+    ``code=user.macro_goal.invalid``.
+
+    JSONB merge 룰: dict의 *not None* 필드만 ``COALESCE(macro_goal, '{}'::jsonb) ||
+    :patch`` (set 또는 갱신). ``None`` 명시 송신은 *해당 키 삭제* 분기로 ``- 'key'``
+    operator. 결과 응답은 갱신된 전체 ``MacroGoal``(빈 응답 가능 — 모든 필드 삭제).
+
+    Profile cache invalidate: architecture.md:296 ``cache:user:{user_id}:profile``
+    Redis 캐시 *미구현* — Story 8.4 polish forward. LLM cache invalidate는
+    ``_build_profile_hash`` body 확장으로 자동(macro_goal 변경 → sha256 변경 → 다음
+    분석 cache miss → 새 LLM 호출).
+    """
+    # 1) Pydantic 1차 게이트 — body raw dict를 MacroGoalPatchRequest로 검증.
+    try:
+        patch_req = MacroGoalPatchRequest.model_validate(body)
+    except ValidationError as exc:
+        raise MacroGoalInvalidError(detail=str(exc.errors()[0].get("msg", "invalid"))) from exc
+
+    # 2) ``exclude_unset=True`` — *명시 송신* 필드만 처리. 미송신 필드는 기존 값 보존
+    # (JSONB merge 정합). 명시 송신 ``None`` → key 삭제 SQL operator (``-``).
+    raw_dump = patch_req.model_dump(exclude_unset=True)
+    keys_to_remove = [k for k, v in raw_dump.items() if v is None]
+    keys_to_set = {k: v for k, v in raw_dump.items() if v is not None}
+
+    # 3) UPDATE ... RETURNING으로 race-free 갱신 + commit 전 응답 build.
+    # 단계별 SQL: COALESCE → || patch → 각 key 삭제. 다중 keys_to_remove를 단일 SQL
+    # 안에서 chained ``- 'key'`` 처리.
+    set_jsonb_param = keys_to_set or {}
+    sql_remove_chain = ""
+    for k in keys_to_remove:
+        # key 이름은 enum-like(MacroGoal field 5종)이라 SQL injection 안전. 명시 화이트리스트
+        # 가드는 keys_to_remove가 model_dump 출력만 수용한다는 사실로 SOT.
+        if k not in {
+            "daily_calorie_target_kcal",
+            "protein_target_g_per_meal",
+            "macro_ratio_carb_pct",
+            "macro_ratio_protein_pct",
+            "macro_ratio_fat_pct",
+        }:
+            continue
+        sql_remove_chain += f" - '{k}'"
+
+    import json as _json
+
+    sql = text(
+        f"UPDATE users SET macro_goal = ("
+        f"COALESCE(macro_goal, '{{}}'::jsonb) || CAST(:patch AS jsonb)"
+        f"){sql_remove_chain}, updated_at = now() "
+        f"WHERE id = :user_id "
+        f"RETURNING macro_goal"
+    )
+    result = await db.execute(
+        sql,
+        {
+            "patch": _json.dumps(set_jsonb_param),
+            "user_id": user.id,
+        },
+    )
+    updated_row = result.first()
+    if updated_row is None:
+        # current_user Dependency를 통과한 user는 항상 존재 — 본 분기는 race(soft-delete
+        # 동시 발생) 외 미진입.
+        raise MacroGoalInvalidError(detail="user not found")
+    updated_macro_goal: dict[str, Any] | None = updated_row[0]
+
+    # 4) 결과 검증 — 빈 dict {}는 응답에서도 빈 object(미설정과 동일).
+    response = _build_macro_goal_response(updated_macro_goal)
+    await db.commit()
+
+    with contextlib.suppress(Exception):
+        logger.info(
+            "users.macro_goal.updated",
+            user_id=str(user.id),
+            keys_set=sorted(keys_to_set.keys()),
+            keys_removed=sorted(keys_to_remove),
+        )
+
+    return response.model_dump(exclude_none=True)

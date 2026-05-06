@@ -26,6 +26,7 @@ from __future__ import annotations
 import unicodedata
 from typing import Final
 
+from app.domain.macro_goal import MacroGoal
 from app.graph.state import (
     FitEvaluation,
     FoodItem,
@@ -140,6 +141,30 @@ def build_system_prompt(*, knowledge_chunks: list[KnowledgeChunkContext]) -> str
     )
 
 
+def format_macro_goal_summary(macro_goal: MacroGoal) -> str:
+    """Story 4.4 AC8 — 사용자 매크로 목표를 LLM 프롬프트용 한 줄 요약.
+
+    예: ``"하루 1800 kcal / 매끼 단백질 25g / 탄단지 50/25/25"``. 미설정 필드는
+    omit(빈 문자열 결합 회피). 모든 필드 미설정이면 ``"-"`` placeholder.
+    """
+    parts: list[str] = []
+    if macro_goal.daily_calorie_target_kcal is not None:
+        parts.append(f"하루 {macro_goal.daily_calorie_target_kcal} kcal")
+    if macro_goal.protein_target_g_per_meal is not None:
+        parts.append(f"매끼 단백질 {macro_goal.protein_target_g_per_meal}g")
+    if (
+        macro_goal.macro_ratio_carb_pct is not None
+        and macro_goal.macro_ratio_protein_pct is not None
+        and macro_goal.macro_ratio_fat_pct is not None
+    ):
+        parts.append(
+            f"탄단지 {macro_goal.macro_ratio_carb_pct}/"
+            f"{macro_goal.macro_ratio_protein_pct}/"
+            f"{macro_goal.macro_ratio_fat_pct}"
+        )
+    return " / ".join(parts) if parts else "-"
+
+
 def _format_food_item(item: FoodItem) -> str:
     quantity = item.quantity if item.quantity else "양 미상"
     return f"- {item.name} ({quantity})"
@@ -171,9 +196,19 @@ def build_user_prompt(
         else "- 사유 없음"
     )
     capped_raw_text = (raw_text or "")[:_RAW_TEXT_CAP_CHARS]
+    # Story 4.4 AC8 — 사용자 매크로 목표 conditional 블록. macro_goal=None이면 블록 미포함
+    # (기존 사용자 프롬프트 변경 0 — 회귀 가드).
+    macro_goal_block = ""
+    if user_profile.macro_goal is not None:
+        macro_goal_summary = format_macro_goal_summary(user_profile.macro_goal)
+        if macro_goal_summary != "-":
+            macro_goal_block = (
+                f"\n- 사용자 매크로 목표: {macro_goal_summary} "
+                f"(사용자가 설정 — 이 값을 권장 표시의 기준으로 우선 사용하세요)"
+            )
     return f"""[사용자 정보]
 - 건강 목표: {user_profile.health_goal}
-- 활동 수준: {user_profile.activity_level}
+- 활동 수준: {user_profile.activity_level}{macro_goal_block}
 
 [현재 식사 평가 결과]
 - fit_score: {fit_evaluation.fit_score}
@@ -201,4 +236,5 @@ __all__ = [
     "USER_INPUT_GUARD_RULE",
     "build_system_prompt",
     "build_user_prompt",
+    "format_macro_goal_summary",
 ]

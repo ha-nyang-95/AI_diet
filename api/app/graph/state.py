@@ -27,6 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.domain.fit_score import FitScoreComponents
 from app.domain.fit_score import to_summary_label as to_summary_label  # noqa: PLC0414
 from app.domain.health_profile import ActivityLevel, HealthGoal
+from app.domain.macro_goal import MacroGoal
 
 # CR D-2: `to_summary_label`은 `app.graph.state`에서도 직접 참조 가능하도록
 # explicit re-export(PEP 484 `as` 구문). Story 3.6 `MealAnalysisSummary` 영속화
@@ -109,7 +110,13 @@ class ClarificationOption(BaseModel):
 
 
 class UserProfileSnapshot(BaseModel):
-    """`fetch_user_profile` 노드 출력 — Story 1.5 enum 재활용."""
+    """`fetch_user_profile` 노드 출력 — Story 1.5 enum 재활용.
+
+    Story 4.4 — ``macro_goal`` optional 필드 추가. ``UserProfileSnapshot``은 cache key
+    + LLM 프롬프트의 *모든 사용자 입력*을 표현하는 SOT — macro_goal 변경 시
+    ``_build_profile_hash`` body 자동 변경 → 다음 분석 cache miss → 새 LLM 호출
+    자동 트리거(LLM cache invalidate가 별도 redis.delete 불필요).
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -120,6 +127,9 @@ class UserProfileSnapshot(BaseModel):
     height_cm: float
     activity_level: ActivityLevel
     allergies: list[str]
+    # Story 4.4 — 사용자 매크로 목표(``users.macro_goal`` JSONB). nullable — 미설정
+    # 사용자(default)는 None. ``fetch_user_profile`` 노드가 변환 분기.
+    macro_goal: MacroGoal | None = None
 
 
 class FitEvaluation(BaseModel):

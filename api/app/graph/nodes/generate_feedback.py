@@ -162,15 +162,27 @@ def _coerce_fit_evaluation(raw: object) -> FitEvaluation | None:
 
 def _build_profile_hash(profile: UserProfileSnapshot) -> str:
     """프로필 해시 — Story 3.6 AC10 cache key 입력 (sha256). 입력 형식:
-    ``f"{user_id}|{health_goal}|{age}|{weight_kg:.1f}|{height_cm:.1f}|{activity_level}|{sorted_allergies_csv}"``.
+    ``f"{user_id}|{health_goal}|{age}|{weight_kg:.1f}|{height_cm:.1f}|{activity_level}|{sorted_allergies_csv}|{macro_goal_json}"``.
 
     CR MJ-10 — allergy 문자열 NFC 정규화 (NFD 입력의 cache miss 회귀 차단).
+    Story 4.4 — body에 ``macro_goal_serialized`` 추가. 사용자가 macro_goal 갱신 시
+    sha256 변경 → 다음 분석 *cache miss → 새 LLM 호출* 자동 트리거(redis.delete
+    불필요). 기존 사용자(macro_goal=None)는 ``"null"`` 추가로 1회 cache miss 후 안정.
     """
+    import json as _json
+
     sorted_allergies = ",".join(sorted(unicodedata.normalize("NFC", a) for a in profile.allergies))
+    if profile.macro_goal is None:
+        macro_goal_serialized = "null"
+    else:
+        macro_goal_serialized = _json.dumps(
+            profile.macro_goal.model_dump(exclude_none=True),
+            sort_keys=True,
+        )
     body = (
         f"{profile.user_id}|{profile.health_goal}|{profile.age}|"
         f"{profile.weight_kg:.1f}|{profile.height_cm:.1f}|"
-        f"{profile.activity_level}|{sorted_allergies}"
+        f"{profile.activity_level}|{sorted_allergies}|{macro_goal_serialized}"
     )
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
