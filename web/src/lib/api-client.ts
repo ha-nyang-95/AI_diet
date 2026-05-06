@@ -527,6 +527,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/reports/weekly": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Weekly Report Endpoint
+         * @description 7일 주간 리포트 — meals + meal_analyses LEFT JOIN aggregation.
+         *
+         *     ``from_date``/``to_date`` 모두 필수(default X) — 클라이언트가 KST 7일 윈도우를
+         *     명시 결정. 날짜 범위 검증은 ``service/report_service.py``가 SOT —
+         *     ``WeeklyReportInvalidDateRangeError``를 raise해 글로벌 핸들러가
+         *     ``reports.invalid_date_range``(400) 응답 생성.
+         */
+        get: operations["get_weekly_report_endpoint_v1_reports_weekly_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/healthz": {
         parameters: {
             query?: never;
@@ -586,6 +611,20 @@ export interface components {
             admin_access_token: string | null;
             /** Expires In Seconds */
             expires_in_seconds: number;
+        };
+        /**
+         * AllergenExposure
+         * @description 일별 알레르기 노출 카운트. ``count``는 매칭된 meal 수(같은 알레르기·같은 날
+         *     다중 식단 매칭 시 식단별 1 count). 0 entry는 응답에 미포함(UI 빈 차트 분기 단순화).
+         */
+        AllergenExposure: {
+            /**
+             * Allergen
+             * @enum {string}
+             */
+            allergen: "우유" | "메밀" | "땅콩" | "대두" | "밀" | "고등어" | "게" | "새우" | "돼지고기" | "아황산류" | "복숭아" | "토마토" | "호두" | "닭고기" | "난류(가금류)" | "쇠고기" | "오징어" | "조개류(굴/전복/홍합 포함)" | "잣" | "아몬드" | "잔류 우유 단백" | "기타";
+            /** Count */
+            count: number;
         };
         /**
          * AnalysisClarifyRequest
@@ -662,6 +701,27 @@ export interface components {
             privacy_version: string;
             /** Sensitive Personal Info Version */
             sensitive_personal_info_version: string;
+        };
+        /**
+         * DailySummary
+         * @description 일별 7-요소 entry — 빈 날 포함(``meal_count=0`` + ``macros=None``).
+         *
+         *     ``energy_kcal_total``는 *총합*(평균 X) — CalorieChart의 일별 칼로리 vs TDEE 비교
+         *     입력. 분석된 식단 ``ma.energy_kcal`` 합산.
+         */
+        DailySummary: {
+            /**
+             * Kst Date
+             * Format: date
+             */
+            kst_date: string;
+            /** Meal Count */
+            meal_count: number;
+            macros: components["schemas"]["WeeklyMacros"] | null;
+            /** Energy Kcal Total */
+            energy_kcal_total?: number | null;
+            /** Allergen Exposures */
+            allergen_exposures: components["schemas"]["AllergenExposure"][];
         };
         /** GoogleLoginRequest */
         GoogleLoginRequest: {
@@ -1148,6 +1208,58 @@ export interface components {
             input?: unknown;
             /** Context */
             ctx?: Record<string, never>;
+        };
+        /**
+         * WeeklyMacros
+         * @description 일별 평균 매크로 — 분석된 식단(``meal_analyses`` row 존재) 평균.
+         *
+         *     ``protein_g_per_kg`` SOT: 평균 ``protein_g`` / ``users.weight_kg``. ``weight_kg``
+         *     미설정 시 ``None`` — ProteinChart 권장 영역 미렌더 신호.
+         */
+        WeeklyMacros: {
+            /** Carbohydrate G */
+            carbohydrate_g: number;
+            /** Protein G */
+            protein_g: number;
+            /** Fat G */
+            fat_g: number;
+            /** Protein G Per Kg */
+            protein_g_per_kg?: number | null;
+        };
+        /**
+         * WeeklyReportResponse
+         * @description ``GET /v1/reports/weekly`` 응답 — Story 4.4 forward-compat ``insights`` 슬롯 포함.
+         *
+         *     ``insights`` 본 스토리 baseline: *항상 None*. Story 4.4가 ``list[InsightCard]``로
+         *     type narrow + 단백질 평균 vs 목표 미달 인사이트 1차 출처 인용. Story 2.4
+         *     ``analysis_summary`` forward-compat 패턴 정합 — *항상 None*만 송신해 잘못된 값
+         *     노출 차단.
+         */
+        WeeklyReportResponse: {
+            /**
+             * From Date
+             * Format: date
+             */
+            from_date: string;
+            /**
+             * To Date
+             * Format: date
+             */
+            to_date: string;
+            /** Tdee */
+            tdee: number | null;
+            /** Health Goal */
+            health_goal: ("weight_loss" | "muscle_gain" | "maintenance" | "diabetes_management") | null;
+            /** Protein Target G Per Kg Lower */
+            protein_target_g_per_kg_lower: number | null;
+            /** Protein Target G Per Kg Upper */
+            protein_target_g_per_kg_upper: number | null;
+            /** Weight Kg */
+            weight_kg: number | null;
+            /** Daily Summaries */
+            daily_summaries: components["schemas"]["DailySummary"][];
+            /** Insights */
+            insights?: null;
         };
     };
     responses: never;
@@ -2250,6 +2362,65 @@ export interface operations {
         responses: {
             /** @description Successful Response */
             204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_weekly_report_endpoint_v1_reports_weekly_get: {
+        parameters: {
+            query: {
+                /** @description 시작 날짜 (KST, ISO 8601) */
+                from_date: string;
+                /** @description 종료 날짜 (KST, ISO 8601, ``from_date <= to_date``) */
+                to_date: string;
+            };
+            header?: {
+                Authorization?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                bn_access?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 주간 리포트 — 7일 매크로/칼로리/단백질/알레르기 노출 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WeeklyReportResponse"];
+                };
+            };
+            /** @description 잘못된 날짜 범위 (`reports.invalid_date_range`) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description 인증 토큰 부재/만료 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description 기본 동의 미부여 (`consent.basic.missing`) */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };

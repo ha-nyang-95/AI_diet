@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { redirect } from "next/navigation";
 
 import { getServerSideUser } from "@/lib/auth";
@@ -40,9 +41,12 @@ export default async function DashboardPage() {
       <h1 className="text-2xl font-semibold tracking-tight">
         안녕하세요, {user.display_name ?? user.email}
       </h1>
-      <p className="mt-2 text-sm text-zinc-500">
-        (Story 4.3에서 채워짐 — 주간 리포트 차트)
-      </p>
+      <Link
+        href="/dashboard/weekly"
+        className="mt-4 rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+      >
+        주간 리포트 보기
+      </Link>
       <LogoutButton />
     </main>
   );

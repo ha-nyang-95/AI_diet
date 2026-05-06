@@ -41,7 +41,13 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.domain.allergens import KOREAN_22_ALLERGENS
+from app.domain.allergens import (
+    _ALIAS_TEXT_EXCLUSIONS,
+    _LABEL_SUBSTRING_EXCLUSIONS,
+    _SKIP_SUBSTRING_LABELS,
+    ALLERGEN_ALIAS_MAP,
+    KOREAN_22_ALLERGENS,
+)
 from app.domain.bmr import compute_bmr_mifflin, compute_tdee
 from app.domain.kdris import (
     MacroTargets,
@@ -58,25 +64,6 @@ _KOREAN_SERVING_GRAMS_ESTIMATE: float = 250.0
 _KOREAN_22_ALLERGENS_NFC: tuple[str, ...] = tuple(
     unicodedata.normalize("NFC", a) for a in KOREAN_22_ALLERGENS
 )
-
-# CR B-3: 22-라벨 substring 매칭에서 *제외* 할 라벨 — `기타`는 generic placeholder로
-# 식약처 카테고리 `기타가공식품` 같은 광범 텍스트에 false positive 발화. 본 라벨은
-# `ALLERGEN_ALIAS_MAP`의 explicit alias 경로로만 매칭(아래 `기타알레르기성분`).
-_SKIP_SUBSTRING_LABELS: frozenset[str] = frozenset({"기타"})
-
-# CR B-1: 22-라벨 substring 매칭 시 텍스트에서 먼저 제거할 *neighbor* 부분 문자열.
-# 메밀(buckwheat, Fagopyrum)과 밀(wheat, Triticum)은 taxonomy/clinic 모두 별개 —
-# `밀 in 메밀국수` false positive를 차단해 cross-allergen 오발화를 방지.
-_LABEL_SUBSTRING_EXCLUSIONS: dict[str, tuple[str, ...]] = {
-    "밀": ("메밀",),
-}
-
-# CR B-2: ALLERGEN_ALIAS_MAP substring 매칭 시 텍스트에서 먼저 제거할 부분 문자열.
-# `넛 → 호두` alias가 `도넛`(donut, no walnut), `코코넛`(coconut, *Cocos nucifera* —
-# 호두/Juglans와 별개) 같은 비 호두 단어에 false positive 발화하지 않도록.
-_ALIAS_TEXT_EXCLUSIONS: dict[str, tuple[str, ...]] = {
-    "넛": ("도넛", "코코넛"),
-}
 
 if TYPE_CHECKING:
     from app.graph.state import (
@@ -119,28 +106,6 @@ class FitScoreComponents(BaseModel):
     def allergen_violation(cls) -> FitScoreComponents:
         """단락 케이스 표준 직렬화 — 매크로/칼로리/균형 산출 X 의미."""
         return cls(macro=0, calorie=0, allergen=0, balance=0, coverage_ratio=0.0)
-
-
-# 한국 외식·배달 메뉴 alias → 22종 표준 라벨 baseline (8-13건).
-# 외주 인수 시 클라이언트가 자사 메뉴별 보강 — SOP는 ``api/data/README.md``.
-# CR B-3: `기타알레르기성분` → `기타` alias 추가 — 22-라벨 substring 매칭에서
-# `기타`를 제외(generic substring false positive 차단)하면서도 explicit 음식명을
-# 통한 매칭은 유지하기 위함.
-ALLERGEN_ALIAS_MAP: dict[str, str] = {
-    "계란": "난류(가금류)",
-    "달걀": "난류(가금류)",
-    "오믈렛": "난류(가금류)",
-    "마요네즈": "난류(가금류)",
-    "치즈": "우유",
-    "요구르트": "우유",
-    "버터": "우유",
-    "쉬림프": "새우",
-    "포크": "돼지고기",
-    "비프": "쇠고기",
-    "치킨": "닭고기",
-    "넛": "호두",
-    "기타알레르기성분": "기타",
-}
 
 
 class MealMacros(BaseModel):
