@@ -71,3 +71,48 @@ async def test_fetch_user_profile_incomplete_profile_appends_node_error(
     errs = out["node_errors"]
     assert len(errs) == 1
     assert "profile_incomplete" in errs[0].message
+
+
+# Story 4.4 — macro_goal JSONB 변환 분기 (AC8)
+
+
+async def test_fetch_user_profile_macro_goal_set(
+    user_factory: UserFactory,
+    db_deps: NodeDeps,
+) -> None:
+    """Story 4.4 AC8 — ``users.macro_goal`` JSONB → MacroGoal Pydantic 변환."""
+    from sqlalchemy import update
+
+    from app.db.models.user import User
+
+    user = await user_factory(profile_completed=True)
+    # macro_goal SET — 직접 SQL UPDATE.
+    async with db_deps.session_maker() as session:
+        await session.execute(
+            update(User)
+            .where(User.id == user.id)
+            .values(
+                macro_goal={
+                    "daily_calorie_target_kcal": 1800,
+                    "protein_target_g_per_meal": 25,
+                }
+            )
+        )
+        await session.commit()
+
+    out = await fetch_user_profile(_state(user.id), deps=db_deps)
+    snap = out["user_profile"]
+    assert snap.macro_goal is not None
+    assert snap.macro_goal.daily_calorie_target_kcal == 1800
+    assert snap.macro_goal.protein_target_g_per_meal == 25
+
+
+async def test_fetch_user_profile_macro_goal_none_default(
+    user_factory: UserFactory,
+    db_deps: NodeDeps,
+) -> None:
+    """Story 4.4 AC8 — macro_goal=NULL 사용자(기존)는 snapshot.macro_goal=None."""
+    user = await user_factory(profile_completed=True)
+    out = await fetch_user_profile(_state(user.id), deps=db_deps)
+    snap = out["user_profile"]
+    assert snap.macro_goal is None

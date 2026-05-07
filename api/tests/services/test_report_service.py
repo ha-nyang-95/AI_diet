@@ -469,6 +469,175 @@ async def test_negation_text_does_not_count_as_exposure(session_maker, user_fact
     )
 
 
+# --- Story 4.4 — 인사이트 통합 (AC #3, #7) ---
+
+
+@pytest.mark.asyncio
+async def test_insights_field_present_in_response(session_maker, user_factory) -> None:
+    """Story 4.4 AC7 — ``insights`` 필드가 항상 list (None 아님)."""
+    user = await user_factory(profile_completed=True)
+    today = date(2026, 5, 1)
+    async with session_maker() as session:
+        loaded = await session.get(User, user.id)
+        result = await get_weekly_report(
+            user=loaded,
+            from_date=today - timedelta(days=6),
+            to_date=today,
+            db=session,
+        )
+    # 빈 데이터 → 빈 list (None 아님).
+    assert result.insights == []
+
+
+@pytest.mark.asyncio
+async def test_insights_protein_deficit_card_generated(session_maker, user_factory) -> None:
+    """Story 4.4 AC3 — user macro_goal protein 25g × 3끼 = 75g 대비 평균 미달 시 카드 생성."""
+    user = await user_factory(
+        profile_completed=True,
+        weight_kg=Decimal("60.0"),
+        health_goal="weight_loss",
+    )
+    # macro_goal SET — DB UPDATE.
+    async with session_maker() as session:
+        loaded = await session.get(User, user.id)
+        loaded.macro_goal = {"protein_target_g_per_meal": 25}
+        await session.commit()
+
+    today = date(2026, 5, 1)
+    async with session_maker() as session:
+        loaded = await session.get(User, user.id)
+    # 7일 중 3일에 식단 + 분석 — 평균 protein 20g/끼 < 75g(80% 미달).
+    for offset in [0, 2, 5]:
+        target_date = today - timedelta(days=offset)
+        ate_at = datetime.combine(target_date, datetime.min.time(), tzinfo=UTC).replace(hour=12)
+        await _insert_meal(
+            session_maker,
+            loaded,
+            ate_at=ate_at,
+            raw_text="샐러드",
+            analysis={"protein_g": 20.0, "carbohydrate_g": 30.0, "fat_g": 5.0, "energy_kcal": 200},
+        )
+
+    async with session_maker() as session:
+        loaded = await session.get(User, user.id)
+        result = await get_weekly_report(
+            user=loaded,
+            from_date=today - timedelta(days=6),
+            to_date=today,
+            db=session,
+        )
+    assert result.insights is not None
+    kinds = [c.kind for c in result.insights]
+    assert "protein_deficit" in kinds
+
+
+@pytest.mark.asyncio
+async def test_insights_total_cap_4(session_maker, user_factory) -> None:
+    """Story 4.4 AC3 — 카드 총 cap 4."""
+    user = await user_factory(profile_completed=True, allergies=["우유", "새우", "메밀"])
+    async with session_maker() as session:
+        loaded = await session.get(User, user.id)
+        loaded.macro_goal = {
+            "daily_calorie_target_kcal": 1800,
+            "protein_target_g_per_meal": 25,
+            "macro_ratio_carb_pct": 50,
+            "macro_ratio_protein_pct": 25,
+            "macro_ratio_fat_pct": 25,
+        }
+        await session.commit()
+
+    today = date(2026, 5, 1)
+    async with session_maker() as session:
+        loaded = await session.get(User, user.id)
+    # 알레르기 다중 + macro 모두 drift 시나리오.
+    for offset in range(7):
+        target_date = today - timedelta(days=offset)
+        ate_at = datetime.combine(target_date, datetime.min.time(), tzinfo=UTC).replace(hour=12)
+        await _insert_meal(
+            session_maker,
+            loaded,
+            ate_at=ate_at,
+            raw_text="치즈피자 + 새우튀김 + 메밀국수",
+            parsed_items=[
+                {"name": "치즈피자", "quantity": "1조각", "confidence": 0.9},
+                {"name": "새우튀김", "quantity": "1인분", "confidence": 0.85},
+                {"name": "메밀국수", "quantity": "1인분", "confidence": 0.85},
+            ],
+            analysis={
+                "protein_g": 10.0,
+                "carbohydrate_g": 200.0,
+                "fat_g": 30.0,
+                "energy_kcal": 2500,
+            },
+        )
+
+    async with session_maker() as session:
+        loaded = await session.get(User, user.id)
+        result = await get_weekly_report(
+            user=loaded,
+            from_date=today - timedelta(days=6),
+            to_date=today,
+            db=session,
+        )
+    assert result.insights is not None
+    assert len(result.insights) <= 4
+
+
+@pytest.mark.asyncio
+async def test_insights_no_macro_goal_kdris_protein_card(session_maker, user_factory) -> None:
+    """Story 4.4 AC3 — macro_goal 미설정 시 KDRIs 우선순위 ②로 단백질 카드 생성."""
+    user = await user_factory(
+        profile_completed=True,
+        weight_kg=Decimal("60.0"),
+        health_goal="weight_loss",
+    )
+    today = date(2026, 5, 1)
+    async with session_maker() as session:
+        loaded = await session.get(User, user.id)
+    # 평균 protein 30g/일 (목표 60×1.2=72g, 41% — 80% 미달).
+    for offset in range(7):
+        target_date = today - timedelta(days=offset)
+        ate_at = datetime.combine(target_date, datetime.min.time(), tzinfo=UTC).replace(hour=12)
+        await _insert_meal(
+            session_maker,
+            loaded,
+            ate_at=ate_at,
+            raw_text="현미밥",
+            analysis={"protein_g": 30.0, "carbohydrate_g": 50.0, "fat_g": 1.0, "energy_kcal": 230},
+        )
+    async with session_maker() as session:
+        loaded = await session.get(User, user.id)
+        result = await get_weekly_report(
+            user=loaded,
+            from_date=today - timedelta(days=6),
+            to_date=today,
+            db=session,
+        )
+    assert result.insights is not None
+    protein_card = next((c for c in result.insights if c.kind == "protein_deficit"), None)
+    assert protein_card is not None
+    assert "보건복지부 2020 KDRIs" in protein_card.citation
+
+
+@pytest.mark.asyncio
+async def test_insights_ad_guard_pass_clean_templates(session_maker, user_factory) -> None:
+    """Story 4.4 AC9 — 정상 흐름 카드는 광고 가드 trigger 0건 (replaced_count=0)."""
+    user = await user_factory(profile_completed=True)
+    today = date(2026, 5, 1)
+    async with session_maker() as session:
+        loaded = await session.get(User, user.id)
+        result = await get_weekly_report(
+            user=loaded,
+            from_date=today - timedelta(days=6),
+            to_date=today,
+            db=session,
+        )
+    # 정상 카드 본문 inspecting — 광고 표현 미포함.
+    for card in result.insights or []:
+        assert "치료" not in card.title and "치료" not in card.body
+        assert "처방" not in card.title and "처방" not in card.body
+
+
 @pytest.mark.asyncio
 async def test_kst_boundary_meal_at_midnight_utc(session_maker, user_factory) -> None:
     """Story 4.3 AC1 — UTC 자정(=KST 09:00) 식단은 KST 날짜로 group."""

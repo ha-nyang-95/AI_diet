@@ -70,6 +70,8 @@ def _build_eligible_users_query(*, wrap_midnight: bool) -> str:
 
     `wrap_midnight=True`면 자정 cross 윈도우(``lower > upper``) 처리 — OR 분기. False면
     표준 BETWEEN.
+
+    Story 4.4 — ``u.macro_goal`` JSONB 컬럼 select 추가(nudge body customize 입력).
     """
     if wrap_midnight:
         time_predicate = (
@@ -82,7 +84,7 @@ def _build_eligible_users_query(*, wrap_midnight: bool) -> str:
             "BETWEEN :lower_time AND :upper_time)"
         )
     return (
-        "SELECT u.id, u.expo_push_token, u.notification_time "
+        "SELECT u.id, u.expo_push_token, u.notification_time, u.macro_goal "
         "FROM users u "
         "WHERE u.deleted_at IS NULL "
         "  AND u.notifications_enabled = true "
@@ -107,11 +109,13 @@ async def _fetch_eligible_users(
     session_maker: async_sessionmaker[AsyncSession],
     *,
     now_kst: datetime,
-) -> list[tuple[uuid.UUID, str, time]]:
+) -> list[tuple[uuid.UUID, str, time, dict[str, Any] | None]]:
     """30분 윈도우 + 당일 미기록 + 미발사 사용자 SELECT.
 
     ``now_kst``는 호출 시점의 KST datetime. 윈도우 = ``[now - 30min, now]``. 자정 cross
     처리는 lower > upper 분기. ``today_kst``는 ``now_kst.date()``.
+
+    Story 4.4 — return tuple 4-요소(``macro_goal`` jsonb 추가). nudge body customize 입력.
     """
     upper_time = now_kst.time().replace(second=0, microsecond=0)
     lower_time = (
@@ -130,7 +134,25 @@ async def _fetch_eligible_users(
                 "today_kst": today_kst,
             },
         )
-        return [(row.id, row.expo_push_token, row.notification_time) for row in result]
+        return [
+            (row.id, row.expo_push_token, row.notification_time, row.macro_goal) for row in result
+        ]
+
+
+def _build_nudge_body(macro_goal: dict[str, Any] | None) -> str:
+    """Story 4.4 AC6 — macro_goal에서 ``protein_target_g_per_meal`` 챌린지 카피 빌드.
+
+    Pydantic 1차 게이트 + DB CHECK 2차 가드를 통과한 macro_goal이 입력. 본 함수는
+    *fail-soft* 정합 — invalid shape(legacy / type mismatch)는 default ``NUDGE_BODY``로
+    fallback(nudge 발사 자체는 보존, body customize만 미적용).
+
+    epics.md:773 — ``오늘 저녁 단백질 25g 챌린지 진행 중 — 입력하세요``.
+    """
+    if macro_goal:
+        protein_target = macro_goal.get("protein_target_g_per_meal")
+        if isinstance(protein_target, int) and 5 <= protein_target <= 200:
+            return f"오늘 저녁 단백질 {protein_target}g 챌린지 진행 중 — 입력하세요"
+    return NUDGE_BODY
 
 
 async def _record_notification(
@@ -207,15 +229,16 @@ async def sweep_unrecorded_meals(
         logger.info("nudge.sweep.eligible", user_count=len(eligible))
         transaction.set_tag("users_eligible_count", len(eligible))
 
-        for user_id, token, _notification_time in eligible:
+        for user_id, token, _notification_time, macro_goal in eligible:
             masked = _mask_user_id(user_id)
             try:
                 with sentry_sdk.start_span(op="nudge.send", name="nudge.send") as span:
                     span.set_tag("user_id_masked", masked)
+                    body_text = _build_nudge_body(macro_goal)
                     ticket = await expo_push.send_nudge(
                         token=token,
                         title=NUDGE_TITLE,
-                        body=NUDGE_BODY,
+                        body=body_text,
                         data=NUDGE_DATA,
                     )
             except ExpoPushError as exc:
@@ -365,6 +388,7 @@ __all__ = [
     "NUDGE_DATA",
     "NUDGE_JOB_ID",
     "NUDGE_TITLE",
+    "_build_nudge_body",
     "register_nudge_job",
     "sweep_unrecorded_meals",
 ]

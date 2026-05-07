@@ -768,3 +768,27 @@ class WeeklyReportInvalidDateRangeError(ReportsError):
     status: ClassVar[int] = 400
     code: ClassVar[str] = "reports.invalid_date_range"
     title: ClassVar[str] = "Reports invalid date range"
+
+
+# --- User MacroGoal 계층 (Story 4.4 — 매크로 목표 조정 endpoint) ---
+
+
+class UserError(BalanceNoteError):
+    """Story 4.4 사용자 도메인 예외 base. 직접 raise 회피 — 서브클래스만 사용."""
+
+    status: ClassVar[int] = 400
+    code: ClassVar[str] = "user.error"
+    title: ClassVar[str] = "User Error"
+
+
+class MacroGoalInvalidError(UserError):
+    """``PATCH /v1/users/me/macro_goal`` body Pydantic 검증 실패 — 400 Bad Request.
+
+    Pydantic ``MacroGoalPatchRequest``의 ``ValueError``(ratio partial / sum != 100 /
+    empty body)를 라우터가 catch 후 본 예외로 변환. Story 4.1
+    ``notification.time.invalid_format`` RFC 7807 패턴 정합.
+    """
+
+    status: ClassVar[int] = 400
+    code: ClassVar[str] = "user.macro_goal.invalid"
+    title: ClassVar[str] = "Macro goal invalid"

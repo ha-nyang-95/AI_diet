@@ -8,10 +8,15 @@
  * flag 패턴으로 hydration 후만 차트 렌더(SSR-Hydration mismatch 회피).
  */
 
+import Link from "next/link";
 import { useSyncExternalStore } from "react";
 
 import { AllergyExposureChart } from "@/features/reports/AllergyExposureChart";
 import { CalorieChart } from "@/features/reports/CalorieChart";
+import {
+  InsightCardList,
+} from "@/features/reports/InsightCardList";
+import type { InsightCardData } from "@/features/reports/InsightCard";
 import { MacroChart } from "@/features/reports/MacroChart";
 import { ProteinChart } from "@/features/reports/ProteinChart";
 import type { WeeklyReportResponse } from "@/lib/reports";
@@ -141,25 +146,23 @@ export function WeeklyReport({ report, userAllergies }: WeeklyReportProps) {
         </div>
       )}
 
-      {/* Story 4.4 forward-compat — insights 카드 영역. baseline에서는 항상 None이라
-          미렌더. */}
-      {report.insights ? (
-        <section className="mt-6 rounded-lg border border-slate-200 bg-white p-6">
-          {/* Story 4.4 인사이트 카드 컴포넌트가 본 영역에 mount. */}
-        </section>
-      ) : null}
+      {/* Story 4.4 — 인사이트 카드 영역. 빈 list/null 시 자식 컴포넌트가 미렌더. */}
+      <div className="mt-6">
+        <InsightCardList
+          insights={
+            report.insights as readonly InsightCardData[] | null | undefined
+          }
+        />
+      </div>
 
-      {/* Story 4.4 forward-compat CTA placeholder — 본 스토리는 비활성. */}
+      {/* Story 4.4 — CTA 활성 링크(매크로 목표 폼 진입). */}
       <section className="mt-6 flex justify-end">
-        <button
-          type="button"
-          disabled
-          aria-disabled="true"
-          title="Story 4.4에서 활성화"
-          className="cursor-not-allowed rounded-md border border-slate-300 bg-slate-100 px-4 py-2 text-sm text-slate-400"
+        <Link
+          href="/settings/macro-goal"
+          className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-blue-700"
         >
-          다음 주 권장 매크로 조정 (준비 중)
-        </button>
+          다음 주 권장 매크로 조정
+        </Link>
       </section>
     </main>
   );

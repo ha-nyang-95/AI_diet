@@ -487,6 +487,54 @@ async def test_sweep_ticket_details_non_dict_isinstance_guard(
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Story 4.4 — _build_nudge_body + macro_goal 자동 반영 (3건)
+# ---------------------------------------------------------------------------
+
+
+def test_build_nudge_body_default_when_macro_goal_none() -> None:
+    """Story 4.4 AC6 — macro_goal=None → default ``NUDGE_BODY``."""
+    from app.workers.nudge_scheduler import NUDGE_BODY, _build_nudge_body
+
+    assert _build_nudge_body(None) == NUDGE_BODY
+
+
+def test_build_nudge_body_default_when_macro_goal_empty_dict() -> None:
+    """Story 4.4 AC6 — 빈 dict → default fallback."""
+    from app.workers.nudge_scheduler import NUDGE_BODY, _build_nudge_body
+
+    assert _build_nudge_body({}) == NUDGE_BODY
+
+
+def test_build_nudge_body_protein_target_challenge() -> None:
+    """Story 4.4 AC6 — ``protein_target_g_per_meal=25`` → 챌린지 카피."""
+    from app.workers.nudge_scheduler import _build_nudge_body
+
+    body = _build_nudge_body({"protein_target_g_per_meal": 25})
+    assert "단백질 25g 챌린지" in body
+    assert "오늘 저녁" in body
+
+
+@pytest.mark.asyncio
+async def test_sweep_uses_macro_goal_protein_challenge(
+    session_maker: async_sessionmaker,
+    mock_now_kst: datetime,
+    patch_send_nudge_ok: AsyncMock,
+) -> None:
+    """Story 4.4 AC6 — sweep loop이 macro_goal에서 protein 챌린지 body 생성 후 발사."""
+    user = await _create_eligible_user(session_maker, notification_time=time(19, 30))
+    async with session_maker() as session:
+        loaded = await session.get(User, user.id)
+        loaded.macro_goal = {"protein_target_g_per_meal": 25}
+        await session.commit()
+
+    stats = await sweep_unrecorded_meals(session_maker)
+    assert stats["nudges_sent_count"] == 1
+    # send_nudge body argument 검증.
+    call_kwargs = patch_send_nudge_ok.await_args.kwargs
+    assert "단백질 25g 챌린지" in call_kwargs["body"]
+
+
 @pytest.mark.asyncio
 async def test_sweep_record_notification_db_transient_does_not_break_loop(
     session_maker: async_sessionmaker,

@@ -68,8 +68,8 @@ async def test_get_weekly_report_empty_week_200(
         assert d["meal_count"] == 0
         assert d["macros"] is None
         assert d["allergen_exposures"] == []
-    # forward-compat — insights 필드는 항상 None
-    assert body["insights"] is None
+    # Story 4.4 type narrow — 빈 데이터 시 insights는 빈 list ([]), None 아님.
+    assert body["insights"] == []
     # Story 4.3 CR DN-1 — ``users.sex`` 컬럼 부재로 TDEE 항상 None (Story 5.1 polish forward).
     assert body["tdee"] is None
     assert body["health_goal"] == "maintenance"
@@ -184,10 +184,14 @@ async def test_get_weekly_report_missing_query_params_400(
 
 
 @pytest.mark.asyncio
-async def test_get_weekly_report_insights_always_none_forward_compat(
+async def test_get_weekly_report_insights_type_narrowed_to_list(
     client: AsyncClient, user_factory, consent_factory
 ) -> None:
-    """Story 4.3 AC10 — ``insights`` 필드 baseline 항상 ``None`` (4.4 forward-compat)."""
+    """Story 4.4 — ``insights`` 필드 type narrow ``list[InsightCard] | None``.
+
+    빈 데이터 시 빈 list (None 아님). 정상 데이터 시 카드 list. None은 fetch 실패
+    fallback(현 happy-path에서 미진입).
+    """
     user = await user_factory(profile_completed=True)
     await consent_factory(user)
     response = await client.get(
@@ -198,4 +202,4 @@ async def test_get_weekly_report_insights_always_none_forward_compat(
     assert response.status_code == 200
     body = response.json()
     assert "insights" in body
-    assert body["insights"] is None
+    assert isinstance(body["insights"], list)

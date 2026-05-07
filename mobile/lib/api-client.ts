@@ -136,6 +136,47 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/users/me/macro_goal": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Macro Goal
+         * @description ``users.macro_goal`` JSONB 조회 — 인증만(자기 데이터 조회는 동의 무관).
+         *
+         *     미설정 사용자 → 200 + ``{}`` 빈 object(404 X). 폼 prefill 입력(AC4).
+         *     응답은 ``model_dump(exclude_none=True)`` — None 필드 미포함.
+         */
+        get: operations["get_macro_goal_v1_users_me_macro_goal_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Patch Macro Goal
+         * @description ``users.macro_goal`` JSONB partial update — 5 필드 partial.
+         *
+         *     ``MacroGoalPatchRequest`` Pydantic 1차 게이트(ratio all-or-none + sum=100 +
+         *     at-least-one). DB CHECK ``ck_users_macro_goal_shape``가 2차 게이트(shape).
+         *     Pydantic ``ValueError``는 ``MacroGoalInvalidError``로 변환 → RFC 7807 400 +
+         *     ``code=user.macro_goal.invalid``.
+         *
+         *     JSONB merge 룰: dict의 *not None* 필드만 ``COALESCE(macro_goal, '{}'::jsonb) ||
+         *     :patch`` (set 또는 갱신). ``None`` 명시 송신은 *해당 키 삭제* 분기로 ``- 'key'``
+         *     operator. 결과 응답은 갱신된 전체 ``MacroGoal``(빈 응답 가능 — 모든 필드 삭제).
+         *
+         *     Profile cache invalidate: architecture.md:296 ``cache:user:{user_id}:profile``
+         *     Redis 캐시 *미구현* — Story 8.4 polish forward. LLM cache invalidate는
+         *     ``_build_profile_hash`` body 확장으로 자동(macro_goal 변경 → sha256 변경 → 다음
+         *     분석 cache miss → 새 LLM 호출).
+         */
+        patch: operations["patch_macro_goal_v1_users_me_macro_goal_patch"];
+        trace?: never;
+    };
     "/v1/users/me/consents": {
         parameters: {
             query?: never;
@@ -814,6 +855,45 @@ export interface components {
             /** Allergies */
             allergies?: string[];
         };
+        /**
+         * InsightCard
+         * @description 주간 인사이트 단일 카드 — Story 4.4 SOT.
+         *
+         *     ``citation``은 FR24 ``(출처: ...)`` 패턴 contain 검증 — 모듈 import 시점에
+         *     ``_CITATION_*`` 5 상수 모두 ``^\(출처: .+\)$`` regex 매칭으로 fail-fast 가드.
+         */
+        InsightCard: {
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "protein_deficit" | "calorie_diff" | "macro_ratio_drift" | "allergen_exposure";
+            /**
+             * Severity
+             * @enum {string}
+             */
+            severity: "info" | "warning";
+            /** Title */
+            title: string;
+            /** Body */
+            body: string;
+            /** Citation */
+            citation: string;
+            cta?: components["schemas"]["InsightCta"] | null;
+        };
+        /**
+         * InsightCta
+         * @description 카드 행동 유도 — 매크로 목표 조정 페이지로 라우팅.
+         */
+        InsightCta: {
+            /**
+             * Action
+             * @constant
+             */
+            action: "adjust_macro_goal";
+            /** Label */
+            label: string;
+        };
         /** LegalDocumentResponse */
         LegalDocumentResponse: {
             /**
@@ -1228,12 +1308,12 @@ export interface components {
         };
         /**
          * WeeklyReportResponse
-         * @description ``GET /v1/reports/weekly`` 응답 — Story 4.4 forward-compat ``insights`` 슬롯 포함.
+         * @description ``GET /v1/reports/weekly`` 응답 — Story 4.4 ``insights`` type narrow.
          *
-         *     ``insights`` 본 스토리 baseline: *항상 None*. Story 4.4가 ``list[InsightCard]``로
-         *     type narrow + 단백질 평균 vs 목표 미달 인사이트 1차 출처 인용. Story 2.4
-         *     ``analysis_summary`` forward-compat 패턴 정합 — *항상 None*만 송신해 잘못된 값
-         *     노출 차단.
+         *     Story 4.3 forward-compat 슬롯 ``insights: None = None``을 본 스토리에서
+         *     ``list[InsightCard] | None``으로 type narrow. 빈 list는 *생성 룰 모두 미충족*,
+         *     None은 *fetch 실패 fallback*. 클라이언트 분기는 둘 다 미렌더 정합(빈 list와
+         *     None은 동일 시각 행동).
          */
         WeeklyReportResponse: {
             /**
@@ -1259,7 +1339,7 @@ export interface components {
             /** Daily Summaries */
             daily_summaries: components["schemas"]["DailySummary"][];
             /** Insights */
-            insights?: null;
+            insights?: components["schemas"]["InsightCard"][] | null;
         };
     };
     responses: never;
@@ -1497,6 +1577,82 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HealthProfileResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_macro_goal_v1_users_me_macro_goal_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                Authorization?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                bn_access?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    patch_macro_goal_v1_users_me_macro_goal_patch: {
+        parameters: {
+            query?: never;
+            header?: {
+                Authorization?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                bn_access?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
                 };
             };
             /** @description Validation Error */

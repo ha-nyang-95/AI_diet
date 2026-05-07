@@ -301,3 +301,9 @@ NOW-ACTIONABLE 일괄 CLOSED. 20 AC + 10 Task로 그룹화 처리.
 - **DF127 — chartData `formatMmDd` 연도 경계** [MacroChart/CalorieChart/ProteinChart] — 7일 윈도우가 12-29 ~ 01-04 걸칠 때 라벨 정렬 비sortable + 연도 정보 누락. **재검토 시점**: 연말 윈도우 첫 실배포 시점 직전.
 - **DF128 — `docs/runbook/web-perf-check.md` Lighthouse 실측** [docs/runbook/web-perf-check.md] — DS는 SOP만 명시. NFR-P8 1.5초 실측은 CR/QA 단계 책임 — 본 CR에서 environment 부재로 미수행. **재검토 시점**: Story 8.4 클라우드 배포 hardening 또는 영업 데모 직전.
 
+## Deferred from: code review of 4-4-인사이트-카드-매크로-목표-조정 (2026-05-07)
+
+- **DF129 — JSONB merge race: 동일 사용자 동시 PATCH 충돌** [api/app/api/v1/users.py:309-322] — `COALESCE(macro_goal, '{}'::jsonb) || :patch` merge는 optimistic concurrency 미적용. 두 PATCH가 동시에 다른 키를 갱신해도 `RETURNING`은 최후 commit 결과를 반환 → 일부 클라이언트 응답이 stale. 단일 사용자 환경에서 빈도 매우 낮아 본 스토리 미수정. **재검토 시점**: 동시 편집 UX(Story 7.x — 가족 공유 기능 또는 admin 패널) 도입 시.
+- **DF130 — Mobile/web `lib/api-client.ts` SOT 중복** [mobile/lib/api-client.ts + web/src/lib/api-client.ts] — 두 파일 모두 `pnpm gen:api` 출력으로 byte-identical하나 별도 위치. 향후 백엔드 OpenAPI 변경 시 양쪽 동시 regen 책임이 휴먼 프로세스에 의존. **재검토 시점**: monorepo codegen 통합(Epic 5 또는 Epic 6 인프라 hardening).
+- **DF131 — `fetch_user_profile`이 ValidationError만 catch (TypeError 경로 무방어)** [api/app/graph/nodes/fetch_user_profile.py:54-58] — `MacroGoal.model_validate(row.macro_goal)`이 dict가 아닌 입력에 대해 TypeError/AttributeError를 raise할 가능성. 0015 CHECK 제약이 `jsonb_typeof = 'object'` 강제로 진입 차단하므로 현재 위험 0. **재검토 시점**: legacy 마이그레이션(Pre-0015 row 존재 가능성) 또는 schema drift 점검 스토리.
+

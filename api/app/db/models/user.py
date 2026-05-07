@@ -19,7 +19,7 @@ from decimal import Decimal
 
 from sqlalchemy import ARRAY, CheckConstraint, Index, Integer, Numeric, String, Text, text
 from sqlalchemy.dialects.postgresql import ENUM as PG_ENUM
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import Boolean, DateTime, Time
 
@@ -31,6 +31,7 @@ from app.domain.health_profile import (
     ActivityLevel,
     HealthGoal,
 )
+from app.domain.macro_goal import MACRO_GOAL_CHECK_SQL
 
 # 22종 도메인 CHECK 제약 SQL — alembic 0005 revision의 SQL과 *동일 SOT*.
 # 변경 시 ``app/domain/allergens.py:KOREAN_22_ALLERGENS`` 만 갱신 → 본 식 + alembic
@@ -129,6 +130,13 @@ class User(Base):
     # 사용자 swap 회귀 차단.
     expo_push_token: Mapped[str | None] = mapped_column(String, nullable=True)
 
+    # Story 4.4 — 사용자 매크로 목표 JSONB 컬럼(0015 마이그레이션). nullable — 기존
+    # 사용자는 모두 NULL(default). DB CHECK ``ck_users_macro_goal_shape``가 shape 가드,
+    # Pydantic ``MacroGoal`` 모델이 ratio sum 가드(double gate). 변경 시
+    # ``app/domain/macro_goal.py:MACRO_GOAL_CHECK_SQL`` SOT만 갱신 → 새 alembic
+    # revision drop+recreate(Story 1.5 R8 SOP 정합).
+    macro_goal: Mapped[dict[str, int] | None] = mapped_column(JSONB, nullable=True)
+
     __table_args__ = (
         CheckConstraint("role IN ('user','admin')", name="ck_users_role"),
         # Story 1.5 — 건강 프로필 도메인 CHECK 제약 4건.
@@ -155,6 +163,10 @@ class User(Base):
             "notification_time IS NULL OR EXTRACT(SECOND FROM notification_time) = 0",
             name="ck_users_notification_time_kst_format",
         ),
+        # Story 4.4 — macro_goal JSONB shape 가드(0015 alembic SQL과 *동일 SOT*).
+        # ratio all-or-none + sum=100은 Pydantic 1차 가드만(SQL JSONB 다중 키 expression
+        # 복잡성 회피).
+        CheckConstraint(MACRO_GOAL_CHECK_SQL, name="ck_users_macro_goal_shape"),
         # admin 사용자는 소수 — partial index로 lookup 비용 최소화 (Story 7.1+에서 활용).
         Index(
             "idx_users_role_admin",
