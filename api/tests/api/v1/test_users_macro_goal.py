@@ -176,3 +176,49 @@ async def test_patch_macro_goal_empty_body_400(
     )
     assert response.status_code == 400
     assert response.json()["code"] == "user.macro_goal.invalid"
+
+
+async def test_patch_macro_goal_null_removes_single_ratio_rejected_400(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """CR Patch #1 회귀 가드 — 3 ratio 모두 set된 상태에서 단 하나만 null 송신해 키 삭제
+    시도 → merged 결과는 partial-set state(2 of 3) 위반 → 400 + 기존 row 보존(rollback).
+
+    Pydantic 1차 게이트는 *patch payload*만 검증하므로 단일 null 송신은 통과(model_fields_set
+    1건 + ratios 모두 None → all-null 분기). SQL UPDATE 후 merged macro_goal을
+    ``MacroGoal.model_validate``로 재검증해 invariant 위반 시 rollback + 400.
+    """
+    user = await user_factory()
+    await consent_factory(user)
+    # 1) 첫 PATCH — 3 ratio 모두 set + protein/calorie 함께 저장.
+    setup = await client.patch(
+        "/v1/users/me/macro_goal",
+        json={
+            "macro_ratio_carb_pct": 50,
+            "macro_ratio_protein_pct": 25,
+            "macro_ratio_fat_pct": 25,
+            "protein_target_g_per_meal": 25,
+        },
+        headers=auth_headers(user),
+    )
+    assert setup.status_code == 200, setup.text
+
+    # 2) carb만 null 송신 → 단일 ratio 키 삭제 시도.
+    response = await client.patch(
+        "/v1/users/me/macro_goal",
+        json={"macro_ratio_carb_pct": None},
+        headers=auth_headers(user),
+    )
+    assert response.status_code == 400, response.text
+    assert response.json()["code"] == "user.macro_goal.invalid"
+
+    # 3) 기존 row가 그대로 보존됐는지 확인 — rollback 정합.
+    after = await client.get("/v1/users/me/macro_goal", headers=auth_headers(user))
+    assert after.status_code == 200
+    body = after.json()
+    assert body["macro_ratio_carb_pct"] == 50
+    assert body["macro_ratio_protein_pct"] == 25
+    assert body["macro_ratio_fat_pct"] == 25
+    assert body["protein_target_g_per_meal"] == 25

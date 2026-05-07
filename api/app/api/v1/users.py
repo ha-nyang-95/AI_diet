@@ -224,6 +224,11 @@ async def get_health_profile(
 # --- Story 4.4 — Macro Goal endpoints --------------------------------------
 
 
+def _mask_user_id(user_id: object) -> str:
+    """UUID → ``u_{8char}`` 마스킹 (Story 3.x/4.2/4.3 패턴 정합 — NFR-S5)."""
+    return f"u_{str(user_id).replace('-', '')[:8]}"
+
+
 def _build_macro_goal_response(raw: dict[str, Any] | None) -> MacroGoal:
     """User row의 macro_goal JSONB → MacroGoal 응답.
 
@@ -324,17 +329,30 @@ async def patch_macro_goal(
     if updated_row is None:
         # current_user Dependency를 통과한 user는 항상 존재 — 본 분기는 race(soft-delete
         # 동시 발생) 외 미진입.
+        await db.rollback()
         raise MacroGoalInvalidError(detail="user not found")
     updated_macro_goal: dict[str, Any] | None = updated_row[0]
 
-    # 4) 결과 검증 — 빈 dict {}는 응답에서도 빈 object(미설정과 동일).
+    # 4) Merged 결과 invariant 재검증 — Pydantic 1차 게이트는 *patch payload*만 본다.
+    # null-removal 단일 ratio 키 PATCH 시 DB가 partial-set state로 진행될 수 있으므로
+    # 기존 row와 merge된 결과를 ``MacroGoal``로 재검증해 ratio all-or-none + sum=100
+    # invariant를 사후 강제. 위반 시 commit 전 rollback + RFC 7807 400.
+    if updated_macro_goal:
+        try:
+            MacroGoal.model_validate(updated_macro_goal)
+        except ValidationError as exc:
+            await db.rollback()
+            raise MacroGoalInvalidError(
+                detail=str(exc.errors()[0].get("msg", "merged macro_goal invalid"))
+            ) from exc
+
     response = _build_macro_goal_response(updated_macro_goal)
     await db.commit()
 
     with contextlib.suppress(Exception):
         logger.info(
             "users.macro_goal.updated",
-            user_id=str(user.id),
+            user_id=_mask_user_id(user.id),
             keys_set=sorted(keys_to_set.keys()),
             keys_removed=sorted(keys_to_remove),
         )

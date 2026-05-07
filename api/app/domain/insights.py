@@ -21,6 +21,7 @@ Story 4.3 CR P22 정합 — 주간 평균 분모는 *비기록일 제외*(``meal
 
 from __future__ import annotations
 
+import re
 from typing import Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -71,8 +72,8 @@ class InsightCta(BaseModel):
 class InsightCard(BaseModel):
     """주간 인사이트 단일 카드 — Story 4.4 SOT.
 
-    ``citation``은 FR24 ``(출처: ...)`` 패턴 contain 검증 — 카드 생성 시점
-    ``_validate_citation_format`` 가드.
+    ``citation``은 FR24 ``(출처: ...)`` 패턴 contain 검증 — 모듈 import 시점에
+    ``_CITATION_*`` 5 상수 모두 ``^\\(출처: .+\\)$`` regex 매칭으로 fail-fast 가드.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -477,6 +478,26 @@ for _sample in _TEMPLATE_SAMPLES_FOR_AD_GUARD:
         raise RuntimeError(
             f"insights template contains prohibited ad expression: "
             f"sample={_sample!r}, violations={_violations}"
+        )
+
+
+# --- FR24 인용 패턴 SOT 가드 -------------------------------------------------
+#
+# 5 인용 상수 모두 ``(출처: ...)`` 패턴 강제 — import 시점 fail-fast. 향후 SOT 갱신 시
+# regex 위반 즉시 ImportError(template 코드 버그 차단).
+
+_CITATION_PATTERN: Final[re.Pattern[str]] = re.compile(r"^\(출처: .+\)$")
+
+for _name, _citation in (
+    ("_CITATION_PROTEIN_KDRIS", _CITATION_PROTEIN_KDRIS),
+    ("_CITATION_PROTEIN_USER", _CITATION_PROTEIN_USER),
+    ("_CITATION_CALORIE_USER", _CITATION_CALORIE_USER),
+    ("_CITATION_RATIO_USER", _CITATION_RATIO_USER),
+    ("_CITATION_ALLERGEN_MFDS", _CITATION_ALLERGEN_MFDS),
+):
+    if not _CITATION_PATTERN.match(_citation):
+        raise RuntimeError(
+            f"insights citation SOT violates FR24 pattern: name={_name}, value={_citation!r}"
         )
 
 
