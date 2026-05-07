@@ -4,17 +4,20 @@
  * 진입 가드 ①: ``consentStatus === null`` → 스피너(bootstrap).
  * 진입 가드 ②: ``!basic_consents_complete`` → disclaimer redirect (이론상 (tabs) 가드
  *   통과한 사용자는 미진입 — direct deep link 안전망).
- * 진입 가드 ③: ``!profile_completed_at`` → onboarding profile redirect (수정 진입 차단,
- *   POST 흐름 강제 — 미입력 사용자는 *최초 입력*부터).
+ * 진입 가드 ③ (loading/error): ``useHealthProfileQuery`` 로딩/에러 분기.
+ * 진입 가드 ④: ``data.profile_completed_at === null`` → onboarding profile redirect
+ *   (수정 진입 차단, POST 흐름 강제 — 미입력 사용자는 *최초 입력*부터). AC4 SOT —
+ *   ``useHealthProfileQuery`` ``data``를 single source(``useAuth().user``는 invalidate→
+ *   refetch race 가능, GET ``/me/profile``이 정합).
  *
  * Prefill: ``useHealthProfileQuery``(Story 1.5 SOT) → ``data`` arrival 후 폼 mount.
- *   ``data`` 미arrival 동안 spinner.
  *
- * 저장 성공 UX: PATCH 성공 → 저장 toast + ``router.back()``(설정 메뉴 복귀).
+ * 저장 성공 UX: PATCH 성공 → 인라인 토스트 1.5s 가시화 → ``router.back()``(설정 메뉴 복귀).
+ * 작성자 mountedRef 가드로 사용자가 1.5s 내 수동 뒤로가기 시 timer no-op.
  * onboarding flow의 ``router.replace("/(tabs)")`` 분기와 분리.
  */
 import { Stack, router } from 'expo-router';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -29,9 +32,20 @@ import { useHealthProfileQuery } from '@/features/onboarding/useHealthProfile';
 import { useAuth } from '@/lib/auth';
 
 export default function SettingsProfileScreen() {
-  const { consentStatus, user } = useAuth();
+  const { consentStatus } = useAuth();
   const profileQuery = useHealthProfileQuery();
   const [savedAt, setSavedAt] = useState<number | null>(null);
+  const mountedRef = useRef(true);
+  const backTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      mountedRef.current = false;
+      if (backTimerRef.current !== null) {
+        clearTimeout(backTimerRef.current);
+      }
+    };
+  }, []);
 
   // 진입 가드 ①: bootstrap 미완료.
   if (consentStatus === null) {
@@ -59,23 +73,7 @@ export default function SettingsProfileScreen() {
     );
   }
 
-  // 진입 가드 ③: 미입력 사용자(``profile_completed_at IS NULL``) — 수정 진입 차단.
-  if (user && !user.profile_completed_at) {
-    return (
-      <View style={styles.center}>
-        <Stack.Screen options={{ title: '프로필 수정' }} />
-        <Text style={styles.note}>먼저 프로필을 입력해 주세요.</Text>
-        <Pressable
-          style={styles.linkButton}
-          onPress={() => router.replace('/(auth)/onboarding/profile')}
-        >
-          <Text style={styles.linkButtonText}>프로필 입력으로 이동</Text>
-        </Pressable>
-      </View>
-    );
-  }
-
-  // Prefill 로딩 — query loading 상태(query에 invalidate 후 refetch 동안에도 진입).
+  // 진입 가드 ③ — Prefill 로딩 — query loading 상태(query에 invalidate 후 refetch 동안에도 진입).
   if (profileQuery.isLoading || profileQuery.data === undefined) {
     return (
       <View style={styles.center}>
@@ -92,6 +90,24 @@ export default function SettingsProfileScreen() {
         <Text style={styles.note}>프로필을 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.</Text>
         <Pressable style={styles.linkButton} onPress={() => router.back()}>
           <Text style={styles.linkButtonText}>뒤로</Text>
+        </Pressable>
+      </View>
+    );
+  }
+
+  // 진입 가드 ④: 미입력 사용자(``data.profile_completed_at IS NULL``) — 수정 진입 차단.
+  // AC4 SOT — ``useHealthProfileQuery`` ``data``가 GET ``/me/profile`` 정합(``useAuth().user``는
+  // invalidate→refetch race 가능 → 갓 온보딩한 사용자가 reBounce되는 회귀 차단).
+  if (profileQuery.data.profile_completed_at === null) {
+    return (
+      <View style={styles.center}>
+        <Stack.Screen options={{ title: '프로필 수정' }} />
+        <Text style={styles.note}>먼저 프로필을 입력해 주세요.</Text>
+        <Pressable
+          style={styles.linkButton}
+          onPress={() => router.replace('/(auth)/onboarding/profile')}
+        >
+          <Text style={styles.linkButtonText}>프로필 입력으로 이동</Text>
         </Pressable>
       </View>
     );
@@ -118,13 +134,14 @@ export default function SettingsProfileScreen() {
         mode="edit"
         submitLabel="프로필 저장"
         onSuccess={() => {
-          // ``router.back``은 setSavedAt 직후 잠시 보이게 — 사용자 인지 후 자연 복귀.
           setSavedAt(Date.now());
-          // 즉시 복귀(설정 메뉴로). toast는 spec상 inline이라 즉시 back 처리.
-          // ``router.back`` 호출 후 화면이 unmount → toast는 다음 mount에 보이지 않음
-          // (의도). 현재 인라인 메시지가 표시된 직후 setSavedAt이 새 render를 트리거해
-          // 한 prepaint 동안은 사용자가 인지 가능.
-          router.back();
+          // 토스트 가시화 후 1.5s 자연 복귀. 사용자가 1.5s 내 수동 뒤로 시 unmount →
+          // mountedRef 가드로 timer no-op(double-back 차단).
+          backTimerRef.current = setTimeout(() => {
+            if (mountedRef.current) {
+              router.back();
+            }
+          }, 1500);
         }}
       />
     </ScrollView>
