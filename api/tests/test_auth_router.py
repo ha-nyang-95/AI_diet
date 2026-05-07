@@ -211,7 +211,9 @@ async def test_google_login_account_deleted_returns_403(
 ) -> None:
     """탈퇴(deleted_at != None) 사용자가 같은 google_sub으로 재로그인.
 
-    → 403 + auth.account.deleted (P19).
+    → 403 + auth.account.deleted (P19, Story 1.2 baseline 회귀 가드).
+
+    Story 5.2 — status=403 + code invariant 보존(detail 자동 합성 후에도 본 회귀 가드 통과).
     """
     deleted_sub = "google-sub-deleted-fixture"
     await user_factory(google_sub=deleted_sub, deleted=True)
@@ -219,6 +221,84 @@ async def test_google_login_account_deleted_returns_403(
     response = await client.post("/v1/auth/google", json=_login_payload("mobile"))
     assert response.status_code == 403, response.text
     assert response.json()["code"] == "auth.account.deleted"
+
+
+async def test_google_login_account_deleted_includes_korean_grace_detail(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    user_factory: UserFactory,
+) -> None:
+    """Story 5.2 AC3 — soft-deleted 재로그인 응답 detail에 *"탈퇴 진행 중"* + N일 한국어 안내.
+
+    *Why*: ``AccountDeletedError(purge_at=...)`` 자동 detail 합성으로 사용자가 직접
+    response.detail 본문을 alert/banner로 표시. PIPA Art.35 정합 — 사용자에게 grace
+    기간(N일) + 복구 채널 명시.
+
+    검증: 정확한 N일 값은 시계 차이로 ±1일 tolerance.
+    """
+    deleted_sub = "google-sub-deleted-grace-fixture"
+    user = await user_factory(google_sub=deleted_sub, deleted=True)
+    # user_factory의 ``deleted=True``는 ``deleted_at = now()``로 set — purge_at은 30일 후,
+    # 따라서 days_remaining은 ~30일.
+    _stub_google(monkeypatch, google_sub=deleted_sub)
+    response = await client.post("/v1/auth/google", json=_login_payload("mobile"))
+    assert response.status_code == 403
+    body = response.json()
+    assert body["code"] == "auth.account.deleted"
+    assert body["detail"] is not None
+    detail = body["detail"]
+    assert "탈퇴 진행 중" in detail, f"detail substring missing: {detail!r}"
+    assert "복구를 원하시면 고객문의" in detail, detail
+    # N일 검증 — user_factory가 방금 ``deleted_at = now()``로 set했으므로 grace는 ~30일.
+    # ±1일 tolerance(테스트 시계 차이 흡수).
+    import re
+
+    match = re.search(r"(\d+)일 후", detail)
+    assert match is not None, f"N일 substring missing: {detail!r}"
+    days_remaining = int(match.group(1))
+    assert 28 <= days_remaining <= 30, (
+        f"days_remaining out of tolerance (got {days_remaining}, expected ~30): {detail!r}"
+    )
+    # user.deleted_at가 set됐는지도 검증 — fixture invariant.
+    assert user.deleted_at is not None
+
+
+def test_account_deleted_error_auto_synthesizes_korean_detail() -> None:
+    """Story 5.2 AC3 — ``AccountDeletedError(purge_at=...)`` 직접 raise 시 한국어 detail
+    자동 합성 단위 검증.
+
+    *Why*: detail string format SOT — auth.py / users.py / 향후 admin endpoint 등 raise
+    site가 변경돼도 본 단위 테스트가 string 포맷 invariant 가드. ``detail`` 명시 송신
+    시 override 동작도 함께 검증.
+    """
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
+
+    from app.core.exceptions import AccountDeletedError
+
+    # 자동 합성 — purge_at 30일 후 + detail 미제공.
+    purge_at_30d = _dt.now(_UTC) + _td(days=30)
+    err_auto = AccountDeletedError(purge_at=purge_at_30d)
+    assert err_auto.detail is not None
+    assert "탈퇴 진행 중" in err_auto.detail
+    assert "30일 후" in err_auto.detail or "29일 후" in err_auto.detail  # 시계 ±1
+    assert err_auto.purge_at == purge_at_30d
+
+    # detail 명시 송신 시 override.
+    err_override = AccountDeletedError(
+        "explicit detail",
+        purge_at=purge_at_30d,
+    )
+    assert err_override.detail == "explicit detail"
+    assert err_override.purge_at == purge_at_30d
+
+    # purge_at 없이 default — Story 1.2 baseline invariant(detail=None → super가 title set).
+    err_default = AccountDeletedError()
+    assert err_default.purge_at is None
+    # base BalanceNoteError가 detail None일 때 self.detail은 None
+    # (``to_problem``에서 title fallback).
+    assert err_default.detail is None
 
 
 async def test_logout_revokes_refresh_and_returns_204(

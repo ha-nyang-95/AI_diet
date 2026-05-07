@@ -51,6 +51,13 @@ export default function SettingsIndex() {
         void signOut();
       },
     },
+    {
+      // Story 5.2 — 마지막 항목 배치 사유: 로그아웃은 일상 액션, 탈퇴는 *되돌리기 어려운*
+      // 액션이라 UX 정합으로 *마지막 항목*에 배치(이탈 시점 사용자가 의도 확인 1단계).
+      // 다이얼로그 confirmation으로 의도 확인 충분 — destructive 색상은 화면 측 styles.
+      label: '회원 탈퇴',
+      onPress: () => navigateTo('/(tabs)/settings/account-delete'),
+    },
   ];
 
   return (

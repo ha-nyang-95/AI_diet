@@ -8,7 +8,11 @@
   미입력 사용자도 200 + 6 필드 NULL + ``allergies=[]`` 응답(404 X — 사용자는 항상
   존재). prefill 흐름 forward-hook.
 - ``PATCH /v1/users/me/profile`` (Story 5.1 AC2): 건강 프로필 *수정* — 6 필드 partial +
-  at-least-one + ``profile_updated_at`` set. ``profile_completed_at`` 미터치(invariant).
+  at-least-one + ``profile_updated_at`` set. 또한 ``profile_completed_at`` 미터치(invariant).
+- ``DELETE /v1/users/me`` (Story 5.2 AC2): 회원 탈퇴 — soft delete (``deleted_at`` set
+  + 선택적 ``deletion_reason``) + active refresh_tokens 전부 revoke + auth 쿠키 clear.
+  PIPA Art.35 정보주체 권리 정합으로 ``Depends(require_basic_consents)`` 미적용 — 미동의
+  사용자도 탈퇴 가능. 30일 grace 후 ``soft_delete_purge`` cron worker가 cascade hard delete.
 """
 
 from __future__ import annotations
@@ -20,7 +24,7 @@ from datetime import datetime
 from typing import Annotated, Any, Self
 
 import structlog
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response, status
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -32,7 +36,9 @@ from pydantic import (
 from sqlalchemy import func, text, update
 
 from app.api.deps import DbSession, current_user, require_basic_consents
+from app.api.v1.auth import clear_auth_cookies  # Story 5.2 — DELETE /me 쿠키 clear 재사용.
 from app.core.exceptions import MacroGoalInvalidError
+from app.db.models.refresh_token import RefreshToken
 from app.db.models.user import User
 from app.domain.allergens import normalize_allergens
 from app.domain.health_profile import ActivityLevel, HealthGoal
@@ -123,6 +129,37 @@ class HealthProfileResponse(BaseModel):
     allergies: list[str]
     profile_completed_at: datetime | None
     profile_updated_at: datetime | None
+
+
+class AccountDeleteRequest(BaseModel):
+    """``DELETE /v1/users/me`` body — 선택적 탈퇴 사유 1 필드.
+
+    빈 body ``{}``, body 미송신, ``{"reason": ""}`` 모두 valid — ``_validate_reason``
+    validator가 ``""``/whitespace를 ``None``으로 normalize. 200자 cap은 DoS 방지(domain
+    상한 명시 + content_length 우회 attack 차단 — Story 4.4 ``MacroGoal`` Field 가드 패턴
+    정합).
+
+    Story 1.5/5.1 SOT 정합 — ``extra="forbid"`` 명시 송신 외 키 거부.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str | None = Field(default=None, max_length=200)
+
+    @field_validator("reason")
+    @classmethod
+    def _validate_reason(cls, v: str | None) -> str | None:
+        """``""`` / whitespace-only → ``None`` normalize.
+
+        클라이언트가 빈 string을 송신해도 DB에는 NULL로 set — 미송신 의미와 동등.
+        wire 레벨 polymorphism 흡수.
+        """
+        if v is None:
+            return None
+        stripped = v.strip()
+        if not stripped:
+            return None
+        return stripped
 
 
 class HealthProfilePatchRequest(BaseModel):
@@ -349,6 +386,82 @@ async def patch_health_profile(
             user_id=_mask_user_id(user.id),
             keys_set=sorted(fields_dict.keys()),  # 값 본문 X — NFR-S5
         )
+    return response
+
+
+# --- Story 5.2 — Account Delete endpoint -----------------------------------
+
+
+@router.delete("/me", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_account(
+    response: Response,
+    db: DbSession,
+    user: Annotated[User, Depends(current_user)],
+    body: AccountDeleteRequest | None = None,
+) -> Response:
+    """회원 탈퇴 — soft delete + active refresh_tokens revoke + 쿠키 clear.
+
+    PIPA Art.35 정보주체 권리(열람·정정·삭제·처리정지)는 *동의 철회와 독립*된 권리 —
+    ``Depends(require_basic_consents)`` 미적용(``deps.py:202-206`` docstring 정합:
+    *조회/삭제 경로는 인증만*). 미동의 사용자도 본 endpoint로 탈퇴 가능해야 권리 봉쇄 X.
+    탈퇴 자체가 *동의 철회의 최종 형태*이므로 안전망 가드 X.
+
+    흐름:
+    1) body 검증(없으면 ``None`` → ``reason=None``).
+    2) ``UPDATE users SET deleted_at=now(), deletion_reason=:reason, updated_at=now()
+       WHERE id=:user_id AND deleted_at IS NULL`` — ``deleted_at IS NULL`` 가드로 *이미 탈퇴
+       진행 중* 재호출 멱등 처리(rowcount=0 분기). race-free.
+    3) 모든 active refresh_tokens revoke — ``UPDATE refresh_tokens SET revoked_at=now()
+       WHERE user_id=:user_id AND revoked_at IS NULL`` (logout endpoint 정합). 다른 디바이스
+       활성 세션도 즉시 무효화.
+    4) ``clear_auth_cookies(response)`` — Story 1.2 SOT 재사용.
+    5) 204 No Content (auth.logout 패턴 정합).
+
+    Idempotency: 이미 ``deleted_at IS NOT NULL`` 사용자는 ``current_user`` Dependency가
+    401 (``User.deleted_at.is_(None)`` 필터)로 차단 — 본 endpoint *idempotent 204* 분기는
+    이론상 미진입. 클라이언트는 401을 정상 흐름(``/login`` redirect)으로 처리.
+
+    로깅: NFR-S5 정합 — ``user_id`` ``u_{8char}`` 마스킹 + ``reason_provided`` boolean
+    only(*reason raw text 본문 X*. 사유 raw는 ``users.deletion_reason`` DB 컬럼 SOT —
+    운영 분석은 admin 권한 SELECT). Audit 미기록(자기 데이터 권리, AC8 정합).
+    """
+    reason_value = body.reason if body is not None else None
+
+    # 1) Soft delete — race-free 가드 ``deleted_at IS NULL``로 멱등 처리.
+    await db.execute(
+        update(User)
+        .where(User.id == user.id, User.deleted_at.is_(None))
+        .values(
+            deleted_at=func.now(),
+            deletion_reason=reason_value,
+            updated_at=func.now(),
+        )
+    )
+
+    # 2) 모든 active refresh_tokens revoke — logout endpoint 패턴 정합. 다중 device 격리.
+    await db.execute(
+        update(RefreshToken)
+        .where(
+            RefreshToken.user_id == user.id,
+            RefreshToken.revoked_at.is_(None),
+        )
+        .values(revoked_at=func.now())
+    )
+
+    await db.commit()
+
+    # 3) 쿠키 clear — Story 1.2 SOT 재사용.
+    clear_auth_cookies(response)
+    response.status_code = status.HTTP_204_NO_CONTENT
+
+    # 4) 로깅 — NFR-S5 마스킹 + reason raw 본문 X.
+    with contextlib.suppress(Exception):
+        logger.info(
+            "users.account.deleted",
+            user_id=_mask_user_id(user.id),
+            reason_provided=reason_value is not None,
+        )
+
     return response
 
 

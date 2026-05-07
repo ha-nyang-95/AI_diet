@@ -83,7 +83,35 @@ export interface paths {
         get: operations["get_me_v1_users_me_get"];
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * Delete Account
+         * @description 회원 탈퇴 — soft delete + active refresh_tokens revoke + 쿠키 clear.
+         *
+         *     PIPA Art.35 정보주체 권리(열람·정정·삭제·처리정지)는 *동의 철회와 독립*된 권리 —
+         *     ``Depends(require_basic_consents)`` 미적용(``deps.py:202-206`` docstring 정합:
+         *     *조회/삭제 경로는 인증만*). 미동의 사용자도 본 endpoint로 탈퇴 가능해야 권리 봉쇄 X.
+         *     탈퇴 자체가 *동의 철회의 최종 형태*이므로 안전망 가드 X.
+         *
+         *     흐름:
+         *     1) body 검증(없으면 ``None`` → ``reason=None``).
+         *     2) ``UPDATE users SET deleted_at=now(), deletion_reason=:reason, updated_at=now()
+         *        WHERE id=:user_id AND deleted_at IS NULL`` — ``deleted_at IS NULL`` 가드로 *이미 탈퇴
+         *        진행 중* 재호출 멱등 처리(rowcount=0 분기). race-free.
+         *     3) 모든 active refresh_tokens revoke — ``UPDATE refresh_tokens SET revoked_at=now()
+         *        WHERE user_id=:user_id AND revoked_at IS NULL`` (logout endpoint 정합). 다른 디바이스
+         *        활성 세션도 즉시 무효화.
+         *     4) ``clear_auth_cookies(response)`` — Story 1.2 SOT 재사용.
+         *     5) 204 No Content (auth.logout 패턴 정합).
+         *
+         *     Idempotency: 이미 ``deleted_at IS NOT NULL`` 사용자는 ``current_user`` Dependency가
+         *     401 (``User.deleted_at.is_(None)`` 필터)로 차단 — 본 endpoint *idempotent 204* 분기는
+         *     이론상 미진입. 클라이언트는 401을 정상 흐름(``/login`` redirect)으로 처리.
+         *
+         *     로깅: NFR-S5 정합 — ``user_id`` ``u_{8char}`` 마스킹 + ``reason_provided`` boolean
+         *     only(*reason raw text 본문 X*. 사유 raw는 ``users.deletion_reason`` DB 컬럼 SOT —
+         *     운영 분석은 admin 권한 SELECT). Audit 미기록(자기 데이터 권리, AC8 정합).
+         */
+        delete: operations["delete_account_v1_users_me_delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -665,6 +693,21 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * AccountDeleteRequest
+         * @description ``DELETE /v1/users/me`` body — 선택적 탈퇴 사유 1 필드.
+         *
+         *     빈 body ``{}``, body 미송신, ``{"reason": ""}`` 모두 valid — ``_validate_reason``
+         *     validator가 ``""``/whitespace를 ``None``으로 normalize. 200자 cap은 DoS 방지(domain
+         *     상한 명시 + content_length 우회 attack 차단 — Story 4.4 ``MacroGoal`` Field 가드 패턴
+         *     정합).
+         *
+         *     Story 1.5/5.1 SOT 정합 — ``extra="forbid"`` 명시 송신 외 키 거부.
+         */
+        AccountDeleteRequest: {
+            /** Reason */
+            reason?: string | null;
+        };
         /**
          * AdminExchangeResponse
          * @description `admin_access_token`은 mobile에서만 채움(secure-store 저장).
@@ -1565,6 +1608,41 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["UserMeResponse"];
                 };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_account_v1_users_me_delete: {
+        parameters: {
+            query?: never;
+            header?: {
+                Authorization?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                bn_access?: string | null;
+            };
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["AccountDeleteRequest"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {

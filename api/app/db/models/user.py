@@ -18,6 +18,14 @@ Story 5.1에서 ``profile_updated_at`` 컬럼 추가(0016 마이그레이션). 3
   시 set. 본 컬럼은 ``POST /me/profile`` 흐름으로는 set X(의미 분리).
 - ``updated_at`` — *행 단위 마지막 변경 시점*. ``onupdate=now()``로 모든 컬럼
   변경 시 자동 bump (macro_goal/notification/profile 등 모두 포함).
+
+Story 5.2에서 ``deletion_reason`` Text nullable 컬럼 + ``idx_users_deleted_at_pending_purge``
+partial index 추가(0017 마이그레이션). 본 컬럼은 사용자 탈퇴 시점에 ``DELETE
+/v1/users/me`` 엔드포인트가 set(선택, 빈/미송신 시 NULL), 30일 grace 후 cascade
+hard delete와 함께 사라짐. partial index는 ``soft_delete_purge`` cron worker의
+eligible SELECT(``WHERE deleted_at IS NOT NULL AND deleted_at < cutoff``)를 위해
+존재 — 활성 사용자(``deleted_at IS NULL``) 색인 미진입으로 hot path INSERT/UPDATE
+비용 0.
 """
 
 from __future__ import annotations
@@ -90,6 +98,10 @@ class User(Base):
     )
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Story 5.2 — 사용자가 탈퇴 시 선택한 자유 텍스트 사유(0017 마이그레이션). ``DELETE
+    # /v1/users/me`` 엔드포인트가 set, 미송신/빈 string 시 NULL. 30일 grace 후 cascade
+    # hard delete와 함께 사라짐. enum 미사용(MVP — 카테고리 분류는 polish 스토리 forward).
+    deletion_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     onboarded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # Story 1.5 — 건강 프로필 7컬럼. 모두 nullable — Story 1.2 OAuth 시점에 미입력
@@ -187,5 +199,13 @@ class User(Base):
             "idx_users_role_admin",
             "role",
             postgresql_where=text("role = 'admin'"),
+        ),
+        # Story 5.2 — soft-deleted 사용자만 색인. ``soft_delete_purge`` cron worker의
+        # eligible SELECT(``WHERE deleted_at IS NOT NULL AND deleted_at < cutoff``) hit.
+        # 활성 사용자(``deleted_at IS NULL``) hot path INSERT/UPDATE 비용 0.
+        Index(
+            "idx_users_deleted_at_pending_purge",
+            "deleted_at",
+            postgresql_where=text("deleted_at IS NOT NULL"),
         ),
     )

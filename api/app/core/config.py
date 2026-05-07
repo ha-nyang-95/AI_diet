@@ -158,6 +158,10 @@ class Settings(BaseSettings):
     r2_secret_access_key: str = ""
     r2_bucket: str = "balancenote-meals"
     r2_public_base_url: str = ""
+    # Story 5.2 — 회원 탈퇴 30일 grace 시점에 사용자 데이터 JSON dump를 보관하는 별도
+    # bucket(R2). 미설정 시 dump skip + 운영 SOP 1줄(Cloudflare 콘솔 lifecycle policy로
+    # 30일 후 자동 객체 삭제 — NFR-R5/C6 정합). dev/CI는 env 미설정 → graceful skip.
+    r2_purge_dump_bucket: str = ""
 
     # --- Expo ---
     expo_access_token: str = ""

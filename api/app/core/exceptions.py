@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any, ClassVar, Final
 
 from pydantic import BaseModel, ConfigDict
@@ -131,6 +132,35 @@ class AccountDeletedError(AuthError):
     status: ClassVar[int] = 403
     code: ClassVar[str] = "auth.account.deleted"
     title: ClassVar[str] = "Account deleted"
+
+    def __init__(
+        self,
+        detail: str | None = None,
+        *,
+        purge_at: datetime | None = None,
+    ) -> None:
+        """Story 5.2 — ``purge_at`` keyword-only 파라미터로 한국어 detail 자동 합성.
+
+        ``purge_at`` 제공 + ``detail`` 미제공 시 *"탈퇴 진행 중입니다. {N}일 후 모든 데이터가
+        영구 파기됩니다. 복구를 원하시면 고객문의로 연락해 주세요."* 자동 생성. N은
+        ``max(0, (purge_at - now()).days)`` — 음수 방어 + 정수 일자.
+
+        ``detail`` 명시 송신 시 override(테스트/명시 안내 흐름 정합). ``purge_at`` 미제공
+        + ``detail`` 미제공 시 base ``BalanceNoteError.__init__`` default(``self.title``) —
+        Story 1.2 baseline ``test_login_returns_403_when_account_deleted`` invariant 보존
+        (status=403 + code 검증만).
+
+        Story 1.4 ``ConsentVersionMismatchError.latest_versions`` 패턴 정합.
+        """
+        if detail is None and purge_at is not None:
+            now = datetime.now(UTC)
+            days_remaining = max(0, (purge_at - now).days)
+            detail = (
+                f"탈퇴 진행 중입니다. {days_remaining}일 후 모든 데이터가 영구 파기됩니다. "
+                "복구를 원하시면 고객문의로 연락해 주세요."
+            )
+        super().__init__(detail)
+        self.purge_at: datetime | None = purge_at
 
 
 # --- Consent 계층 (Story 1.3) ---
