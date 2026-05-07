@@ -42,6 +42,7 @@ from app.api.deps import (
 from app.core.config import (
     ADMIN_ACCESS_TOKEN_TTL_SECONDS,
     NON_SECURE_COOKIE_ENVIRONMENTS,
+    PURGE_GRACE_DAYS,
     USER_ACCESS_TOKEN_TTL_SECONDS,
     USER_REFRESH_TOKEN_TTL_SECONDS,
     settings,
@@ -63,6 +64,11 @@ from app.db.models.refresh_token import RefreshToken
 from app.db.models.user import User
 
 router = APIRouter()
+
+# Story 5.2 — ``clear_auth_cookies``는 본 모듈 외부(``users.py:DELETE /me``)에서
+# 재사용되는 *2nd consumer* 진입점. underscore prefix 유지 시 cross-module import는
+# *rule-bending* 신호 — Python 컨벤션 정합으로 *명시 public + ``__all__`` 등재*.
+__all__ = ["clear_auth_cookies", "router"]
 
 
 # --- Pydantic 스키마 (snake_case 양방향) -----------------------------------
@@ -178,7 +184,7 @@ def _set_admin_cookie(response: Response, admin_access: str) -> None:
     )
 
 
-def _clear_auth_cookies(response: Response) -> None:
+def clear_auth_cookies(response: Response) -> None:
     # Max-Age=0 + 발급 시 사용한 path를 동일하게 명시(브라우저가 일치할 때만 expire 처리).
     for key, path in (
         ("bn_access", "/"),
@@ -259,7 +265,9 @@ async def _upsert_user_from_google(
             result = await db.execute(select(User).where(User.google_sub == google_sub))
             user = result.scalar_one()
             if user.deleted_at is not None:
-                raise AccountDeletedError("account is deleted") from None
+                # Story 5.2 — purge_at 전달 시 한국어 detail 자동 합성(N일 grace 안내).
+                purge_at = user.deleted_at + timedelta(days=PURGE_GRACE_DAYS)
+                raise AccountDeletedError(purge_at=purge_at) from None
             _apply_google_profile(
                 user,
                 email=email,
@@ -272,8 +280,9 @@ async def _upsert_user_from_google(
         return user
 
     if user.deleted_at is not None:
-        # 탈퇴 후 같은 google_sub로 재로그인 — 본 스토리는 회복 시도하지 않음(Story 5.x 결정).
-        raise AccountDeletedError("account is deleted")
+        # 탈퇴 후 같은 google_sub로 재로그인 — Story 5.2 grace 30일 한국어 안내 자동 합성.
+        purge_at = user.deleted_at + timedelta(days=PURGE_GRACE_DAYS)
+        raise AccountDeletedError(purge_at=purge_at)
     _apply_google_profile(
         user,
         email=email,
@@ -493,9 +502,9 @@ async def logout(
             .values(revoked_at=datetime.now(UTC))
         )
         await db.commit()
-    # 의존주입된 `response`에 `_clear_auth_cookies`가 raw_headers list로 다중 Set-Cookie를
+    # 의존주입된 `response`에 `clear_auth_cookies`가 raw_headers list로 다중 Set-Cookie를
     # 누적함. 새 Response 객체로 복사하면 단일 값으로 평탄화되어 누락 위험. 그대로 반환.
-    _clear_auth_cookies(response)
+    clear_auth_cookies(response)
     response.status_code = status.HTTP_204_NO_CONTENT
     return response
 

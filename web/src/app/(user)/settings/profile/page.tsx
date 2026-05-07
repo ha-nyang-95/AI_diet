@@ -57,6 +57,15 @@ export default async function HealthProfileSettingsPage() {
         </p>
       </header>
       <HealthProfileEditForm initial={initial} />
+      {/* Story 5.2 — 회원 탈퇴 링크 (UX 정합: 자기 데이터 컨트롤 흐름 끝에 배치). */}
+      <footer className="mt-12 border-t border-zinc-200 pt-6 text-sm text-zinc-500">
+        <a
+          href="/account/delete"
+          className="text-red-600 underline-offset-2 hover:underline"
+        >
+          회원 탈퇴
+        </a>
+      </footer>
     </main>
   );
 }

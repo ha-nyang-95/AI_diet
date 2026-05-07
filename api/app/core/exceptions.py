@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+import math
+from datetime import UTC, datetime
 from typing import Any, ClassVar, Final
 
 from pydantic import BaseModel, ConfigDict
@@ -131,6 +133,43 @@ class AccountDeletedError(AuthError):
     status: ClassVar[int] = 403
     code: ClassVar[str] = "auth.account.deleted"
     title: ClassVar[str] = "Account deleted"
+
+    def __init__(
+        self,
+        detail: str | None = None,
+        *,
+        purge_at: datetime | None = None,
+    ) -> None:
+        """Story 5.2 — ``purge_at`` keyword-only 파라미터로 한국어 detail 자동 합성.
+
+        ``purge_at`` 제공 + ``detail`` 미제공 시 *"탈퇴 진행 중입니다. {N}일 후 모든 데이터가
+        영구 파기됩니다. 복구를 원하시면 고객문의로 연락해 주세요."* 자동 생성. N은
+        ``max(0, (purge_at - now()).days)`` — 음수 방어 + 정수 일자.
+
+        ``detail`` 명시 송신 시 override(테스트/명시 안내 흐름 정합). ``purge_at`` 미제공
+        + ``detail`` 미제공 시 base ``BalanceNoteError.__init__`` default(``self.title``) —
+        Story 1.2 baseline ``test_login_returns_403_when_account_deleted`` invariant 보존
+        (status=403 + code 검증만).
+
+        Story 1.4 ``ConsentVersionMismatchError.latest_versions`` 패턴 정합.
+        """
+        if detail is None and purge_at is not None:
+            # tz-naive 입력은 UTC로 정규화 — 미래 caller(테스트 헬퍼/admin endpoint)가
+            # naive datetime을 전달해도 ``can't subtract offset-naive...`` TypeError 차단.
+            normalized_purge_at = (
+                purge_at.replace(tzinfo=UTC) if purge_at.tzinfo is None else purge_at
+            )
+            now = datetime.now(UTC)
+            # ``.days``는 floor 연산이라 ``purge_at = now + 30d`` 직후 호출 시 microsecond
+            # 차이로 29 반환 → UX 약속(30일) ↔ detail 표기(29일) 첫날 불일치 차단.
+            seconds_remaining = (normalized_purge_at - now).total_seconds()
+            days_remaining = max(0, math.ceil(seconds_remaining / 86400))
+            detail = (
+                f"탈퇴 진행 중입니다. {days_remaining}일 후 모든 데이터가 영구 파기됩니다. "
+                "복구를 원하시면 고객문의로 연락해 주세요."
+            )
+        super().__init__(detail)
+        self.purge_at: datetime | None = purge_at
 
 
 # --- Consent 계층 (Story 1.3) ---

@@ -57,6 +57,7 @@ from app.graph.pipeline import compile_pipeline
 from app.services.analysis_service import AnalysisService
 from app.workers.nudge_scheduler import register_nudge_job
 from app.workers.scheduler import build_scheduler, shutdown_scheduler, start_scheduler
+from app.workers.soft_delete_purge import register_purge_job
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -198,6 +199,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         try:
             scheduler = build_scheduler()
             register_nudge_job(scheduler, app.state.session_maker, app.state.redis)
+            # Story 5.2 — 회원 탈퇴 30일 grace 후 사용자 데이터 물리 파기 cron.
+            # ``app.adapters.r2`` 모듈 자체를 r2_adapter로 주입(boto3 lazy singleton SOT).
+            from app.adapters import r2 as _r2_module  # noqa: PLC0415
+
+            register_purge_job(
+                scheduler,
+                app.state.session_maker,
+                r2_adapter=_r2_module,
+                redis=app.state.redis,
+            )
             app.state.scheduler = scheduler
             await start_scheduler(app)
         except Exception as exc:  # noqa: BLE001

@@ -21,6 +21,11 @@ USER_ACCESS_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60  # 30일
 USER_REFRESH_TOKEN_TTL_SECONDS = 90 * 24 * 60 * 60  # 90일
 ADMIN_ACCESS_TOKEN_TTL_SECONDS = 8 * 60 * 60  # 8시간
 
+# Story 5.2 — 회원 탈퇴 후 30일 grace 기간(epics.md:798 + architecture.md:351 SOT).
+# auth.py(detail 합성)와 workers/soft_delete_purge.py(cutoff 계산) 양쪽이 import.
+# 모듈 의존성 역전 방지(api → workers 회피)를 위해 core/config로 위치.
+PURGE_GRACE_DAYS = 30
+
 # 서버 측 비-prod 환경(쿠키 Secure flag 분기 등에서 사용).
 NON_SECURE_COOKIE_ENVIRONMENTS = frozenset({"dev", "ci", "test"})
 
@@ -158,6 +163,10 @@ class Settings(BaseSettings):
     r2_secret_access_key: str = ""
     r2_bucket: str = "balancenote-meals"
     r2_public_base_url: str = ""
+    # Story 5.2 — 회원 탈퇴 30일 grace 시점에 사용자 데이터 JSON dump를 보관하는 별도
+    # bucket(R2). 미설정 시 dump skip + 운영 SOP 1줄(Cloudflare 콘솔 lifecycle policy로
+    # 30일 후 자동 객체 삭제 — NFR-R5/C6 정합). dev/CI는 env 미설정 → graceful skip.
+    r2_purge_dump_bucket: str = ""
 
     # --- Expo ---
     expo_access_token: str = ""
