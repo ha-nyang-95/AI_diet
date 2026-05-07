@@ -9,7 +9,7 @@
  */
 
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -98,10 +98,28 @@ export function MacroGoalForm({ initial }: MacroGoalFormProps) {
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [serverError, setServerError] = useState<string | null>(null);
   const mutation = useMacroGoalMutation();
+  // setTimeout id 보관 — 언마운트/연속 저장 시 cleanup으로 stale setState 차단.
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current !== null) {
+        clearTimeout(toastTimerRef.current);
+        toastTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  // react-hooks/refs는 *render-time* ref 접근을 차단하나 handleSubmit 콜백은 submit
+  // 시점에만 실행 → false positive. 토스트 타이머 cleanup 정합 유지.
+  // eslint-disable-next-line react-hooks/refs
   const onSubmit = handleSubmit(async (data) => {
     setServerError(null);
     setToastMessage(null);
+    if (toastTimerRef.current !== null) {
+      clearTimeout(toastTimerRef.current);
+      toastTimerRef.current = null;
+    }
     try {
       const payload: MacroGoalPatchPayload = {
         daily_calorie_target_kcal: data.daily_calorie_target_kcal,
@@ -112,8 +130,11 @@ export function MacroGoalForm({ initial }: MacroGoalFormProps) {
       };
       await mutation.mutateAsync(payload);
       setToastMessage("매크로 목표가 저장되었습니다. 다음 분석부터 반영됩니다.");
-      // 3초 후 자동 close.
-      setTimeout(() => setToastMessage(null), 3000);
+      // 3초 후 자동 close. 언마운트 / 다음 저장 시 cleanup으로 stale setState 차단.
+      toastTimerRef.current = setTimeout(() => {
+        setToastMessage(null);
+        toastTimerRef.current = null;
+      }, 3000);
     } catch (err) {
       if (err instanceof MacroGoalFetchError && err.bodyCode) {
         setServerError(err.message);

@@ -859,8 +859,8 @@ export interface components {
          * InsightCard
          * @description 주간 인사이트 단일 카드 — Story 4.4 SOT.
          *
-         *     ``citation``은 FR24 ``(출처: ...)`` 패턴 contain 검증 — 카드 생성 시점
-         *     ``_validate_citation_format`` 가드.
+         *     ``citation``은 FR24 ``(출처: ...)`` 패턴 contain 검증 — 모듈 import 시점에
+         *     ``_CITATION_*`` 5 상수 모두 ``^\(출처: .+\)$`` regex 매칭으로 fail-fast 가드.
          */
         InsightCard: {
             /**

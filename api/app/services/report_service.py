@@ -195,10 +195,12 @@ def _apply_ad_guard_to_insights(
     cleaned: list[InsightCard] = []
     replaced_count = 0
     replaced_kinds: list[str] = []
+    non_converged_kinds: list[str] = []
     # 치환 결과가 다른 금지 표현을 포함할 가능성에 대비해 *수렴 루프* — find_violations가
     # 빈 list가 될 때까지 ``apply_replacements`` 반복(최대 3회 cap, 무한 루프 방지).
     # spec line 110 *"치환 후 재검사"* 정합. 정상 흐름에서 1패스로 수렴(템플릿 SOT
     # import-time 가드가 1차 — trigger 0건이 baseline).
+    # 3회에도 수렴 실패 시 *원본 카드 보존* — 부분-치환된 잠재 위반 텍스트 송출 차단.
     max_replacement_passes = 3
     for card in insights:
         title_violations = _ad_find_violations(card.title)
@@ -219,6 +221,11 @@ def _apply_ad_guard_to_insights(
             if b_v:
                 new_body = _ad_apply_replacements(new_body)
             card_replaced += len(t_v) + len(b_v)
+        # 수렴 여부 재확인 — 3회 후에도 잔존 시 원본 보존(NFR-S5: 부분-치환 송출 차단).
+        if _ad_find_violations(new_title) or _ad_find_violations(new_body):
+            non_converged_kinds.append(card.kind)
+            cleaned.append(card)
+            continue
         replaced_count += card_replaced
         replaced_kinds.append(card.kind)
         cleaned.append(card.model_copy(update={"title": new_title, "body": new_body}))
@@ -228,6 +235,12 @@ def _apply_ad_guard_to_insights(
             user_id=user_id_masked,
             replaced_count=replaced_count,
             kinds=replaced_kinds,
+        )
+    if non_converged_kinds:
+        log.error(
+            "insight.ad_guard.non_converged",
+            user_id=user_id_masked,
+            kinds=non_converged_kinds,
         )
     return cleaned
 

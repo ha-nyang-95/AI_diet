@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import uuid
 from datetime import datetime
 from typing import Annotated, Any
@@ -309,8 +310,6 @@ async def patch_macro_goal(
             continue
         sql_remove_chain += f" - '{k}'"
 
-    import json as _json
-
     sql = text(
         f"UPDATE users SET macro_goal = ("
         f"COALESCE(macro_goal, '{{}}'::jsonb) || CAST(:patch AS jsonb)"
@@ -321,7 +320,7 @@ async def patch_macro_goal(
     result = await db.execute(
         sql,
         {
-            "patch": _json.dumps(set_jsonb_param),
+            "patch": json.dumps(set_jsonb_param),
             "user_id": user.id,
         },
     )
