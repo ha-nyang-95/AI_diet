@@ -831,3 +831,151 @@ class MacroGoalInvalidError(UserError):
     status: ClassVar[int] = 400
     code: ClassVar[str] = "user.macro_goal.invalid"
     title: ClassVar[str] = "Macro goal invalid"
+
+
+# --- Payment 계층 (Story 6.1 — 정기결제 sandbox 신청 + Toss 1플랜) ---
+
+
+class PaymentError(BalanceNoteError):
+    """Story 6.1 결제 도메인 예외 base.
+
+    ``MealError`` / ``LLMRouterError`` 카탈로그 패턴 정합 — 직접 raise 회피
+    (서브클래스만 사용 권장 — base 직접 raise는 status/code/title default를 leak).
+    Story 6.x 후속(해지 / webhook / refund)에서 본 base 하위 코드 카탈로그 확장.
+    """
+
+    status: ClassVar[int] = 500
+    code: ClassVar[str] = "payments.error"
+    title: ClassVar[str] = "Payment Error"
+
+
+class PaymentIdempotencyKeyInvalidError(PaymentError):
+    """``Idempotency-Key`` 헤더 형식 위반(UUID v4 regex 미일치, length ≠ 36 등) —
+    Story 2.5 ``MealIdempotencyKeyInvalidError`` 패턴 1:1 정합.
+
+    DF49(Idempotency cross-cutting catalog) 갱신 결정(Story 6.1):
+    *cross-cutting base 분리 미수행* — payments-specific 유지. 사유는
+    ``MealIdempotencyKeyInvalidError`` docstring + Story 6.1 Dev Notes 참조.
+    함수 helper 분리는 Story 6.3 webhook 시점에 가능.
+    """
+
+    status: ClassVar[int] = 400
+    code: ClassVar[str] = "payments.idempotency_key.invalid"
+    title: ClassVar[str] = "Idempotency-Key invalid"
+
+
+class PaymentAmountInvalidError(PaymentError):
+    """클라이언트 송신 amount가 ``MONTHLY_PLAN_PRICE_KRW``와 mismatch — race attack 방어
+    (클라이언트가 ``amount=100`` 송신해 결제 시도 차단). epics.md:841 *"KRW integer
+    통화 표기"* invariant 가드.
+    """
+
+    status: ClassVar[int] = 400
+    code: ClassVar[str] = "payments.amount.invalid"
+    title: ClassVar[str] = "Payment amount invalid"
+
+
+class PaymentConfirmFailedError(PaymentError):
+    """RFC 7807 ``type=payment-failed`` (epics.md:842 정합) — Toss 카드 거절 / 한도 초과
+    / 잘못된 paymentKey 등 모든 *사용자 상응 에러*를 단일 코드로 변환.
+
+    service 레이어가 ``PaymentProviderRejectedError`` catch + *failed payment_log 1건
+    INSERT* + 본 예외로 변환(*adapter raw error는 Sentry breadcrumb만, 사용자 응답은
+    단일 ``payments.confirm_failed``*).
+
+    ``type`` URL은 hyphen(``payments-confirm-failed``), ``code`` 카탈로그는 dot-separated
+    (``payments.confirm_failed``) — 우리 카탈로그 정책 정합.
+    """
+
+    status: ClassVar[int] = 400
+    code: ClassVar[str] = "payments.confirm_failed"
+    title: ClassVar[str] = "Payment confirmation failed"
+
+    def to_problem(self, *, instance: str | None = None) -> ProblemDetail:
+        problem = super().to_problem(instance=instance)
+        # epics.md:842 — `type=payment-failed` 정합 (hyphen URL 표기).
+        problem.type = "https://balancenote.app/errors/payments-confirm-failed"
+        return problem
+
+
+class SubscriptionAlreadyActiveError(PaymentError):
+    """한 사용자 1 active subscription invariant 위반(partial UNIQUE 1차 게이트 +
+    service inline 1차 게이트). 사용자에게 *"이미 활성 구독이 있습니다 — 해지 후 다시
+    신청해 주세요"* 안내 — Story 6.2 cancel 흐름 forward.
+    """
+
+    status: ClassVar[int] = 409
+    code: ClassVar[str] = "payments.subscription.already_active"
+    title: ClassVar[str] = "Subscription already active"
+
+
+class NoActiveSubscriptionError(PaymentError):
+    """``GET /v1/payments/subscription`` 활성 구독 0건 — 신청 안 한 사용자 정상 케이스.
+    Story 1.x ``MealNotFoundError`` 패턴 정합 (404 + 명확한 code).
+    """
+
+    status: ClassVar[int] = 404
+    code: ClassVar[str] = "payments.subscription.not_found"
+    title: ClassVar[str] = "No active subscription"
+
+
+class PaymentProviderError(PaymentError):
+    """Toss/Stripe 어댑터 레벨 base — *직접 raise 회피*. 서브클래스만 사용 권장.
+
+    Story 3.6 ``LLMRouterError`` 패턴 정합 — adapter 레벨 typed 변환 + service 레벨
+    catch + 사용자 친화 변환(``PaymentConfirmFailedError`` 등).
+    """
+
+    status: ClassVar[int] = 502
+    code: ClassVar[str] = "payments.provider.error"
+    title: ClassVar[str] = "Payment provider error"
+
+
+class PaymentProviderRejectedError(PaymentProviderError):
+    """Toss 4xx(카드 거절 / 한도 초과 / 잘못된 paymentKey 등) — adapter 레벨 raise.
+    service 레이어에서 catch + ``PaymentConfirmFailedError``로 변환(*사용자 상응 단일
+    코드 유지*).
+
+    Toss 응답의 한국어 메시지("카드 한도가 초과되었습니다" 등)를 ``detail``에 forward —
+    사용자 안내 정합.
+    """
+
+    status: ClassVar[int] = 400
+    code: ClassVar[str] = "payments.provider.rejected"
+    title: ClassVar[str] = "Payment provider rejected"
+
+
+class PaymentProviderUnavailableError(PaymentProviderError):
+    """Toss 5xx + retry 후 최종 실패 / network / timeout — adapter 레벨 raise. service
+    레이어에서 catch X(그대로 propagate — 클라이언트가 멱등 재시도 가능).
+
+    Story 3.6 ``LLMRouterUnavailableError`` 패턴 정합.
+    """
+
+    status: ClassVar[int] = 502
+    code: ClassVar[str] = "payments.provider.unavailable"
+    title: ClassVar[str] = "Payment provider unavailable"
+
+
+class PaymentProviderPayloadInvalidError(PaymentProviderError):
+    """Toss 응답 schema 위반(``status`` 필드 missing 등 — Pydantic ValidationError) —
+    adapter 레벨 raise + service 그대로 propagate.
+
+    502 Bad Gateway는 RFC 9110 정합(*upstream invalid response*).
+    """
+
+    status: ClassVar[int] = 502
+    code: ClassVar[str] = "payments.provider.payload_invalid"
+    title: ClassVar[str] = "Payment provider payload invalid"
+
+
+class TossSecretKeyMissingError(PaymentError):
+    """``settings.toss_secret_key``가 빈 문자열 — fail-fast(retry 무효 + cost 0).
+
+    운영 부팅 시 staging/prod 환경은 *부팅 검증* X(Story 8 hardening forward) —
+    runtime fail-fast로 우선 안전 + 503 안내.
+    """
+
+    status: ClassVar[int] = 503
+    code: ClassVar[str] = "payments.toss.secret_key_missing"
+    title: ClassVar[str] = "Toss secret key not configured"

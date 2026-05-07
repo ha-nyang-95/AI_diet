@@ -66,6 +66,13 @@ export default async function HealthProfileSettingsPage() {
         >
           데이터 내보내기
         </a>
+        {/* Story 6.1 — 구독 관리(non-destructive 그룹 — export 다음 / delete 이전). */}
+        <a
+          href="/account/subscribe"
+          className="text-blue-600 underline-offset-2 hover:underline"
+        >
+          구독 관리
+        </a>
         <a
           href="/account/delete"
           className="text-red-600 underline-offset-2 hover:underline"

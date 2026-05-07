@@ -13,6 +13,7 @@ export default function SettingsLayout() {
     <Stack screenOptions={{ headerShown: true, headerBackTitle: '뒤로' }}>
       <Stack.Screen name="profile" options={{ title: '프로필 수정' }} />
       <Stack.Screen name="data-export" options={{ title: '데이터 내보내기' }} />
+      <Stack.Screen name="subscription" options={{ title: '구독' }} />
       <Stack.Screen name="account-delete" options={{ title: '회원 탈퇴' }} />
     </Stack>
   );

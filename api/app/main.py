@@ -33,6 +33,7 @@ from app.api.v1 import legal as legal_router
 from app.api.v1 import meals as meals_router
 from app.api.v1 import meals_images as meals_images_router
 from app.api.v1 import notifications as notifications_router
+from app.api.v1 import payments as payments_router
 from app.api.v1 import reports as reports_router
 from app.api.v1 import users as users_router
 from app.core.config import settings
@@ -367,6 +368,7 @@ app.include_router(meals_router.router, prefix="/v1/meals", tags=["meals"])
 app.include_router(meals_images_router.router, prefix="/v1/meals/images", tags=["meals", "images"])
 app.include_router(analysis_router.router, prefix="/v1/analysis", tags=["analysis"])
 app.include_router(notifications_router.router, prefix="/v1/notifications", tags=["notifications"])
+app.include_router(payments_router.router, prefix="/v1/payments", tags=["payments"])
 app.include_router(reports_router.router, prefix="/v1/reports", tags=["reports"])
 
 

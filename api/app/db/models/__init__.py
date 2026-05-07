@@ -12,7 +12,9 @@ from app.db.models.knowledge_chunk import KnowledgeChunk
 from app.db.models.meal import Meal
 from app.db.models.meal_analysis import MealAnalysis
 from app.db.models.notification import Notification
+from app.db.models.payment_log import PaymentLog
 from app.db.models.refresh_token import RefreshToken
+from app.db.models.subscription import Subscription
 from app.db.models.user import User
 
 __all__ = [
@@ -23,6 +25,8 @@ __all__ = [
     "Meal",
     "MealAnalysis",
     "Notification",
+    "PaymentLog",
     "RefreshToken",
+    "Subscription",
     "User",
 ]
