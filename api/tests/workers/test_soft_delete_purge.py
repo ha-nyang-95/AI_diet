@@ -381,3 +381,139 @@ async def test_nudge_sweep_excludes_soft_deleted_users(
         "Story 4.2 회귀 — soft-deleted 사용자가 nudge sweep eligible에 진입했음. "
         "_build_eligible_users_query의 u.deleted_at IS NULL 필터를 점검하세요."
     )
+
+
+# --- Story 5.3 — DF136 forward-hook 즉시 해소 회귀 가드 -------------------
+
+
+def test_data_export_service_module_provides_collect_payload() -> None:
+    """worker가 service 모듈로 갈아끼웠는지 import path 정합 가드 — Story 5.3 AC3.
+
+    *Why*: 본 worker 모듈에서 ``_build_user_dump_payload`` helper 정의가 *제거*되고
+    ``app.services.data_export_service.collect_user_export_payload``를 import해 호출하는
+    구조로 갈아끼움(DF136 forward-hook). import 회귀 시 본 가드가 즉시 fail.
+    """
+    import app.workers.soft_delete_purge as worker_mod
+    from app.services.data_export_service import collect_user_export_payload as _svc_fn
+
+    # worker 모듈 자체에는 _build_user_dump_payload 정의 부재(이전된 후 worker는 호출만).
+    assert not hasattr(worker_mod, "_build_user_dump_payload"), (
+        "worker는 service module로 갈아끼웠어야 함 — _build_user_dump_payload 정의가 worker에 잔존."
+    )
+    # worker가 service 함수를 import 했는지 검증.
+    assert worker_mod.collect_user_export_payload is _svc_fn
+
+
+async def test_purge_dump_payload_includes_meal_analysis_nested(
+    session_maker: async_sessionmaker,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Story 5.3 AC3 — worker dump payload는 *전체 set*(meal_analyses nested).
+
+    *Why*: Story 5.2 baseline은 *최소 set*(meals 단순 배열) — 본 스토리 시점에
+    ``meal_analyses`` nested 추가로 PIPA Art.21 30일 grace 사용자가 *피드백까지 회복 가능*.
+    R2 dump JSON shape upgrade — endpoint export와 SOT 정합(schema 1.0).
+    """
+    from decimal import Decimal as _Decimal
+
+    from app.db.models.meal import Meal as _Meal
+    from app.db.models.meal_analysis import MealAnalysis as _MealAnalysis
+
+    monkeypatch.setattr(
+        "app.core.config.settings.r2_purge_dump_bucket",
+        "balancenote-purge-dumps",
+    )
+    expired_user = await _create_user(session_maker, deleted_days_ago=31)
+
+    # meals + analysis fixture 1세트.
+    async with session_maker() as session:
+        meal = _Meal(
+            user_id=expired_user.id,
+            raw_text="dump payload meal",
+            ate_at=datetime.now(UTC),
+        )
+        session.add(meal)
+        await session.flush()
+        session.add(
+            _MealAnalysis(
+                meal_id=meal.id,
+                user_id=expired_user.id,
+                fit_score=80,
+                fit_score_label="good",
+                fit_reason="ok",
+                carbohydrate_g=_Decimal("100"),
+                protein_g=_Decimal("20"),
+                fat_g=_Decimal("10"),
+                energy_kcal=600,
+                feedback_text="피드백 본문",
+                feedback_summary="피드백 1줄",
+                citations=[],
+                used_llm="gpt-4o-mini",
+            )
+        )
+        await session.commit()
+
+    fake_r2 = _make_fake_r2_module()
+    stats = await purge_expired_soft_deleted_users(session_maker, r2_adapter=fake_r2)
+    assert stats["r2_dumps_count"] == 1
+
+    # put_object call body 검증 — meals[0].analysis nested 키 존재.
+    fake_client = fake_r2._get_client.return_value
+    call_kwargs = fake_client.put_object.call_args.kwargs
+    body_bytes: bytes = call_kwargs["Body"]
+    import json as _json
+
+    payload = _json.loads(body_bytes.decode("utf-8"))
+    assert payload["schema_version"] == "1.0"
+    assert len(payload["meals"]) == 1
+    meal_row = payload["meals"][0]
+    assert "analysis" in meal_row, (
+        "Story 5.3 AC3 회귀 — worker dump payload meals[i].analysis nested 키가 누락됨. "
+        "collect_user_export_payload SOT 호출(include_soft_deleted_meals=True) 점검."
+    )
+    assert meal_row["analysis"] is not None
+    assert meal_row["analysis"]["feedback_summary"] == "피드백 1줄"
+
+
+async def test_purge_dump_payload_includes_soft_deleted_meals(
+    session_maker: async_sessionmaker,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Story 5.3 AC3 — worker는 ``include_soft_deleted_meals=True`` 호출 → soft-deleted meal
+    *포함* dump.
+
+    *Why*: PIPA Art.21 30일 grace 사용자가 *전체 history* 회복 권리(soft-deleted 포함).
+    endpoint export(default False)와 분기 SOT — 같은 ``collect_user_export_payload`` 함수를
+    키워드만 달리 호출.
+    """
+    from app.db.models.meal import Meal as _Meal
+
+    monkeypatch.setattr(
+        "app.core.config.settings.r2_purge_dump_bucket",
+        "balancenote-purge-dumps",
+    )
+    expired_user = await _create_user(session_maker, deleted_days_ago=31)
+    async with session_maker() as session:
+        active = _Meal(user_id=expired_user.id, raw_text="active meal")
+        deleted = _Meal(
+            user_id=expired_user.id,
+            raw_text="user-deleted meal",
+            deleted_at=datetime.now(UTC) - timedelta(days=5),
+        )
+        session.add_all([active, deleted])
+        await session.commit()
+
+    fake_r2 = _make_fake_r2_module()
+    stats = await purge_expired_soft_deleted_users(session_maker, r2_adapter=fake_r2)
+    assert stats["r2_dumps_count"] == 1
+
+    fake_client = fake_r2._get_client.return_value
+    body_bytes: bytes = fake_client.put_object.call_args.kwargs["Body"]
+    import json as _json
+
+    payload = _json.loads(body_bytes.decode("utf-8"))
+    raw_texts = sorted(m["raw_text"] for m in payload["meals"])
+    assert raw_texts == ["active meal", "user-deleted meal"], (
+        f"Story 5.3 AC3 회귀 — soft-deleted meal이 worker dump에서 누락됨. "
+        f"include_soft_deleted_meals=True 키워드 호출 점검. seen={raw_texts}"
+    )
