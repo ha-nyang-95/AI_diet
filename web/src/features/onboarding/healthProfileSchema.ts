@@ -96,3 +96,17 @@ export const healthProfileSchema = z.object({
 });
 
 export type HealthProfileFormData = z.infer<typeof healthProfileSchema>;
+
+export interface HealthProfileResponse {
+  age: number | null;
+  weight_kg: number | null;
+  height_cm: number | null;
+  activity_level: ActivityLevel | null;
+  health_goal: HealthGoal | null;
+  allergies: string[];
+  profile_completed_at: string | null;
+  // Story 5.1 — 마지막 PATCH 시점(0016 마이그레이션). POST 흐름은 항상 null.
+  // PATCH 첫 호출 시 ISO 8601 timestamp set. mobile SOT(``mobile/features/onboarding/
+  // healthProfileSchema.ts``)와 *수동 동기*.
+  profile_updated_at: string | null;
+}

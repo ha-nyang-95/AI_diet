@@ -116,3 +116,60 @@ async def test_fetch_user_profile_macro_goal_none_default(
     out = await fetch_user_profile(_state(user.id), deps=db_deps)
     snap = out["user_profile"]
     assert snap.macro_goal is None
+
+
+# Story 5.1 — FR3 즉시 반영 sha256 mismatch 가드 (AC7)
+
+
+async def test_fetch_user_profile_after_weight_change_changes_profile_hash(
+    user_factory: UserFactory,
+    db_deps: NodeDeps,
+) -> None:
+    """Story 5.1 AC7 — PATCH 시뮬레이션 후 ``_build_profile_hash`` sha256 mismatch.
+
+    *Why*: PATCH endpoint가 ``users.weight_kg``을 갱신하면 다음 분석 호출 시
+    ``fetch_user_profile`` 노드가 fresh DB SELECT로 새 weight를 로드하고, 그 결과
+    ``_build_profile_hash``의 sha256이 자동 변경되어 LLM cache miss → 새 LLM 호출
+    트리거. 별도 ``redis.delete`` 없이 6 필드 SOT만으로 자동 invalidate되는 회귀 가드.
+
+    weight_kg 80.0 → 75.0 (1 kg 단위 변동도 hash mismatch 보장).
+    """
+    from decimal import Decimal
+
+    from sqlalchemy import update
+
+    from app.db.models.user import User
+    from app.graph.nodes.generate_feedback import _build_profile_hash
+
+    user = await user_factory(
+        profile_completed=True,
+        weight_kg=Decimal("80.0"),
+    )
+
+    snap_before = (await fetch_user_profile(_state(user.id), deps=db_deps))["user_profile"]
+    hash_before = _build_profile_hash(snap_before)
+
+    # PATCH 시뮬레이션 — weight_kg 80 → 75. profile_updated_at도 set.
+    from sqlalchemy import func
+
+    async with db_deps.session_maker() as session:
+        await session.execute(
+            update(User)
+            .where(User.id == user.id)
+            .values(
+                weight_kg=Decimal("75.0"),
+                profile_updated_at=func.now(),
+                updated_at=func.now(),
+            )
+        )
+        await session.commit()
+
+    snap_after = (await fetch_user_profile(_state(user.id), deps=db_deps))["user_profile"]
+    hash_after = _build_profile_hash(snap_after)
+
+    assert snap_before.weight_kg == 80.0
+    assert snap_after.weight_kg == 75.0
+    assert hash_before != hash_after, (
+        "profile hash must change after weight_kg PATCH — "
+        "LLM cache miss 자동 트리거 회귀 가드(redis.delete 미필요 SOT)."
+    )

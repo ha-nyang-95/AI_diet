@@ -682,3 +682,83 @@ async def test_users_me_exposes_onboarded_at_after_profile_post(
     # POST 후: onboarded_at이 ISO datetime으로 노출.
     assert "onboarded_at" in body
     assert body["onboarded_at"] is not None
+
+
+# --- Story 5.1 회귀 가드 — profile_updated_at 응답 일관성 (AC3) ---
+
+
+async def test_get_profile_response_includes_profile_updated_at_null_for_untouched_user(
+    client: AsyncClient,
+    user_factory: UserFactory,
+) -> None:
+    """Story 5.1 AC3 — GET /me/profile 응답에 ``profile_updated_at: null`` 키 명시.
+
+    *Why*: 본 컬럼은 PATCH 첫 호출 시점에만 set — POST/GET 흐름은 항상 NULL 응답
+    invariant. mobile/web 클라이언트가 ``profile_updated_at`` 필드를 *항상 존재*로
+    가정하고 prefill UX를 구성하므로 NULL이 누락되거나 missing key가 되면 회귀.
+    """
+    user = await user_factory(profile_completed=True)
+    response = await client.get("/v1/users/me/profile", headers=auth_headers(user))
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert "profile_updated_at" in body, "response must always include profile_updated_at key"
+    assert body["profile_updated_at"] is None
+
+
+async def test_post_profile_response_includes_profile_updated_at_null(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """Story 5.1 AC3 — POST /me/profile 응답에 ``profile_updated_at: null`` 명시.
+
+    *Why*: POST는 *최초 입력* SOT — ``profile_completed_at``만 set, ``profile_updated_at``
+    미터치 invariant. PATCH(*수정* SOT)와 의미 분리 — POST 후에도 null이어야 한다.
+    """
+    user = await user_factory()
+    await consent_factory(user)
+    response = await client.post(
+        "/v1/users/me/profile",
+        json=_valid_payload(),
+        headers=auth_headers(user),
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["profile_completed_at"] is not None
+    assert body["profile_updated_at"] is None
+
+
+async def test_post_then_patch_chain_profile_completed_at_invariant(
+    client: AsyncClient,
+    user_factory: UserFactory,
+    consent_factory: ConsentFactory,
+) -> None:
+    """Story 5.1 AC3 — POST → PATCH chain시 ``profile_completed_at = T0`` invariant +
+    ``profile_updated_at = T1`` set 동시 검증.
+
+    *Why*: 두 timestamp 컬럼 의미 분리 SOT(*최초 시점* vs *마지막 수정 시점*) 회귀 가드.
+    """
+    user = await user_factory()
+    await consent_factory(user)
+
+    # 1) POST — 최초 입력(profile_completed_at = T0).
+    post_response = await client.post(
+        "/v1/users/me/profile",
+        json=_valid_payload(),
+        headers=auth_headers(user),
+    )
+    assert post_response.status_code == 200
+    completed_at_t0 = post_response.json()["profile_completed_at"]
+    assert completed_at_t0 is not None
+    assert post_response.json()["profile_updated_at"] is None
+
+    # 2) PATCH — 수정(profile_updated_at = T1, profile_completed_at 보존).
+    patch_response = await client.patch(
+        "/v1/users/me/profile",
+        json={"weight_kg": 80.0},
+        headers=auth_headers(user),
+    )
+    assert patch_response.status_code == 200
+    body = patch_response.json()
+    assert body["profile_completed_at"] == completed_at_t0  # invariant
+    assert body["profile_updated_at"] is not None  # set
