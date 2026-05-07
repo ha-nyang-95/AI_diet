@@ -189,6 +189,47 @@ export interface paths {
         patch: operations["patch_health_profile_v1_users_me_profile_patch"];
         trace?: never;
     };
+    "/v1/users/me/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Export User Data
+         * @description ``GET /v1/users/me/export?format=json|csv`` — PIPA Art.35 데이터 이전·열람권 SOT.
+         *
+         *     PIPA Art.35 정보주체 권리(열람·정정·삭제·처리정지)는 *동의 철회와 독립*된 권리 —
+         *     ``Depends(require_basic_consents)`` 미적용(Story 5.1/5.2 패턴 1:1 정합). 미동의
+         *     사용자도 본 endpoint로 자기 데이터 다운로드 가능해야 권리 봉쇄 X.
+         *
+         *     흐름:
+         *     1) ``collect_user_export_payload(db, user.id)`` — 5 entity 매핑 + nested analysis.
+         *        endpoint default ``include_soft_deleted_meals=False`` — 사용자 권리 행사는 *현재
+         *        활성 데이터*만(soft-deleted 식단 제외). Worker는 ``True``로 호출(분기 SOT).
+         *     2) ``format == "json"``: 단일 chunk generator + ``application/json``.
+         *     3) ``format == "csv"``: row-by-row async generator + ``text/csv; charset=utf-8`` +
+         *        첫 chunk BOM 포함(Excel 자동 인코딩 인식).
+         *     4) ``Content-Disposition: attachment; filename="balancenote_export_u_{8char}_{date}.{ext}"``
+         *        RFC 6266 정합 — ``filename*=UTF-8''<percent-encoded>``로 국제화 대응. spec deviation
+         *        1건 — ``{user_id}`` raw UUID 36자 노출 회피, ``_mask_user_id`` SOT 정합(NFR-S5).
+         *     5) ``X-Content-Type-Options: nosniff`` — MIME sniffing 차단(브라우저가 다운로드 파일을
+         *        이상하게 해석하는 부작용 회피).
+         *
+         *     audit 미기록 — 자기 데이터 권리 행사(``audit_admin_action`` Dependency 미wire 가드).
+         *     structlog ``users.export.requested`` 이벤트는 *system log SOT* — ``user_id u_{8char}``
+         *     + ``format``/``meal_count`` metadata only(*data 본문 X*).
+         */
+        get: operations["export_user_data_v1_users_me_export_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/users/me/macro_goal": {
         parameters: {
             query?: never;
@@ -1749,6 +1790,43 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HealthProfileResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    export_user_data_v1_users_me_export_get: {
+        parameters: {
+            query?: {
+                /** @description Export 형식 — JSON(외부 도구·스크립트 분석) / CSV(Excel/Sheets). */
+                format?: "json" | "csv";
+            };
+            header?: {
+                Authorization?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                bn_access?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description User data export (JSON or CSV). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                    "text/csv": unknown;
                 };
             };
             /** @description Validation Error */

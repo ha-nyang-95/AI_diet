@@ -2,6 +2,12 @@
 
 리뷰·구현 과정에서 식별되었으나 다음 스토리·시점으로 미룬 항목 모음.
 
+## Deferred from: code review of 5-3-데이터-내보내기-json-csv (2026-05-08)
+
+- **D1 — `GET /v1/users/me/export` OpenAPI `responses={400, 401}` 미선언 + 4xx/5xx 타입 부재**: 자동 생성된 web/mobile `api-client.ts`의 `responses` 블록이 200/422만 선언 — 실제로는 401(인증 미통과), 400(`code=validation.error` invalid format), 5xx 가능. Story 5.1 D2와 동일 프로젝트 단위 hygiene 패턴(`users.py` 전반). Story 8.4 polish에서 `responses={400, 401, 5xx}` 일괄 선언 + `pnpm gen:api`로 일괄 재생성.
+- **D2 — `api-client.ts` cookie typed parameter 노이즈 (DF130 family)**: 자동 generator가 `cookie: { bn_access?: string | null }`를 모든 endpoint 호출 시그니처에 노출 — fetch credentials flag로 처리되는 cookie를 typed param처럼 보이게 함. 모든 endpoint 공통이므로 Story 5.3 자체가 만든 issue 아님. Story 8.4에서 `openapi-typescript` 또는 `openapi-fetch` config로 cookie param suppress.
+- **D3 — JSON path 진정한 low-memory streaming(`ijson`/`orjson`/Streams API)**: 본 스토리 spec line 50에서 *"진정한 low-memory streaming JSON은 OUT — YAGNI MVP scale 외, deferred-work forward"* 명시. 사용자당 meal 10K+ + analyses 합계 50MB+ 시 server side `json.dumps` 전체 buffer + web `response.blob()` 메모리 적재 + mobile `response.text()` JS heap. MVP 사용자 스케일 도래 전에 evaluate.
+
 ## Deferred from: code review of 5-1-건강-프로필-수정 (2026-05-07)
 
 - **D1 — `api-client.ts` mobile/web 중복 재발 (DF130)**: `mobile/lib/api-client.ts` + `web/src/lib/api-client.ts` 두 파일이 byte-identical hunk로 PATCH endpoint type을 동시 추가. 본 diff가 중복 면적을 ~200 lines × 2로 확대. 공통 SDK 모듈로 통합 후보. Story 8.4 polish forward — DF130 *active* 잔여로 묶어 일괄 처리.

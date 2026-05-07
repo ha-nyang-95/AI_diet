@@ -46,6 +46,12 @@ export default function SettingsIndex() {
       onPress: () => navigateTo('/(tabs)/settings/automated-decision'),
     },
     {
+      // Story 5.3 — 데이터 권리 그룹 묶음(자동화 의사결정 동의 다음 / 로그아웃 이전).
+      // *'회원 탈퇴'* destructive 마지막 invariant(Story 5.2 SOT)는 보존.
+      label: '데이터 내보내기',
+      onPress: () => navigateTo('/(tabs)/settings/data-export'),
+    },
+    {
       label: '로그아웃',
       onPress: () => {
         void signOut();

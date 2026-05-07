@@ -20,11 +20,14 @@ from __future__ import annotations
 import contextlib
 import json
 import uuid
-from datetime import datetime
-from typing import Annotated, Any, Self
+from datetime import UTC, datetime
+from typing import Annotated, Any, Literal, Self
+from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 import structlog
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import APIRouter, Depends, Query, Response, status
+from fastapi.responses import StreamingResponse
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -43,6 +46,11 @@ from app.db.models.user import User
 from app.domain.allergens import normalize_allergens
 from app.domain.health_profile import ActivityLevel, HealthGoal
 from app.domain.macro_goal import MacroGoal, MacroGoalPatchRequest
+from app.services.data_export_service import (
+    collect_user_export_payload,
+    serialize_payload_to_json_bytes,
+    stream_csv_rows,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -461,6 +469,111 @@ async def delete_account(
             user_id=_mask_user_id(user.id),
             reason_provided=reason_value is not None,
         )
+
+    return response
+
+
+# --- Story 5.3 — Data Export endpoint --------------------------------------
+
+
+_KST = ZoneInfo("Asia/Seoul")
+
+
+@router.get(
+    "/me/export",
+    responses={
+        200: {
+            "description": "User data export (JSON or CSV).",
+            "content": {
+                "application/json": {},
+                "text/csv": {},
+            },
+        }
+    },
+)
+async def export_user_data(
+    db: DbSession,
+    user: Annotated[User, Depends(current_user)],
+    format: Literal["json", "csv"] = Query(  # noqa: A002 — wire 호환성: query 키 ``format`` SOT.
+        "json", description="Export 형식 — JSON(외부 도구·스크립트 분석) / CSV(Excel/Sheets)."
+    ),
+) -> StreamingResponse:
+    """``GET /v1/users/me/export?format=json|csv`` — PIPA Art.35 데이터 이전·열람권 SOT.
+
+    PIPA Art.35 정보주체 권리(열람·정정·삭제·처리정지)는 *동의 철회와 독립*된 권리 —
+    ``Depends(require_basic_consents)`` 미적용(Story 5.1/5.2 패턴 1:1 정합). 미동의
+    사용자도 본 endpoint로 자기 데이터 다운로드 가능해야 권리 봉쇄 X.
+
+    흐름:
+    1) ``collect_user_export_payload(db, user.id)`` — 5 entity 매핑 + nested analysis.
+       endpoint default ``include_soft_deleted_meals=False`` — 사용자 권리 행사는 *현재
+       활성 데이터*만(soft-deleted 식단 제외). Worker는 ``True``로 호출(분기 SOT).
+    2) ``format == "json"``: 단일 chunk generator + ``application/json``.
+    3) ``format == "csv"``: row-by-row async generator + ``text/csv; charset=utf-8`` +
+       첫 chunk BOM 포함(Excel 자동 인코딩 인식).
+    4) ``Content-Disposition: attachment; filename="balancenote_export_u_{8char}_{date}.{ext}"``
+       RFC 6266 정합 — ``filename*=UTF-8''<percent-encoded>``로 국제화 대응. spec deviation
+       1건 — ``{user_id}`` raw UUID 36자 노출 회피, ``_mask_user_id`` SOT 정합(NFR-S5).
+    5) ``X-Content-Type-Options: nosniff`` — MIME sniffing 차단(브라우저가 다운로드 파일을
+       이상하게 해석하는 부작용 회피).
+
+    audit 미기록 — 자기 데이터 권리 행사(``audit_admin_action`` Dependency 미wire 가드).
+    structlog ``users.export.requested`` 이벤트는 *system log SOT* — ``user_id u_{8char}``
+    + ``format``/``meal_count`` metadata only(*data 본문 X*).
+    """
+    payload = await collect_user_export_payload(db, user.id)
+    if payload is None:
+        # ``current_user`` Dependency가 user 존재 보장 — 본 분기는 race로 hard-deleted
+        # 동시 발생 시 이론적 미진입. 빈 dict로 graceful 분기(401 X).
+        payload = {
+            "user_id": str(user.id),
+            # AC1 SOT — service의 happy-path도 ``datetime.now(UTC).isoformat()``. fallback도
+            # 동일 timezone-aware ISO 형식 유지(``+00:00`` suffix 보존).
+            "exported_at": datetime.now(UTC).isoformat(),
+            "schema_version": "1.0",
+            "user": None,
+            "consents": [],
+            "meals": [],
+            "notifications": [],
+        }
+
+    masked = _mask_user_id(user.id)
+    date_str = datetime.now(_KST).strftime("%Y-%m-%d")
+    ext = "json" if format == "json" else "csv"
+    filename = f"balancenote_export_{masked}_{date_str}.{ext}"
+
+    iterator: Any
+    if format == "json":
+        body = serialize_payload_to_json_bytes(payload)
+
+        async def _json_iter() -> Any:
+            yield body
+
+        iterator = _json_iter()
+        media_type = "application/json"
+    else:
+        iterator = stream_csv_rows(payload)
+        media_type = "text/csv; charset=utf-8"
+
+    # RFC 6266 — ``filename`` (ASCII fallback) + ``filename*`` (UTF-8 percent-encoded). raw
+    # filename은 ASCII만(``_mask_user_id`` + ``YYYY-MM-DD`` + ``.json|.csv``)이라 두 형식
+    # 동등 결과. 미래 한국어 파일명 도입 시 자동 안전(``urllib.parse.quote``).
+    content_disposition = f"attachment; filename=\"{filename}\"; filename*=UTF-8''{quote(filename)}"
+    response = StreamingResponse(
+        iterator,
+        media_type=media_type,
+        headers={
+            "Content-Disposition": content_disposition,
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+    logger.info(
+        "users.export.requested",
+        user_id=masked,
+        format=format,
+        meal_count=len(payload.get("meals") or []),
+    )
 
     return response
 

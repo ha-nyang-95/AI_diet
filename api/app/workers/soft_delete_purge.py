@@ -35,7 +35,6 @@ import asyncio
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Final
 
 import sentry_sdk
@@ -45,10 +44,8 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import PURGE_GRACE_DAYS, settings
-from app.db.models.consent import Consent
-from app.db.models.meal import Meal
-from app.db.models.notification import Notification
 from app.db.models.user import User
+from app.services.data_export_service import collect_user_export_payload
 
 if TYPE_CHECKING:
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -77,53 +74,11 @@ def _mask_user_id(user_id: uuid.UUID) -> str:
 
 
 # --- Per-user helpers ------------------------------------------------------
-
-
-async def _build_user_dump_payload(
-    session: AsyncSession,
-    user_id: uuid.UUID,
-) -> dict[str, Any] | None:
-    """R2 dump JSON shape SOT — *최소 set*(profile + consents + meals 메타 + notifications).
-
-    user 미발견(race로 이미 hard-deleted) 시 ``None`` 반환 — caller가 dump skip + 명시
-    경고 로그 분기. 빈 dict 반환은 truthy/falsy 가드와 의미 충돌 회피.
-    """
-    user = (await session.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
-    if user is None:
-        return None
-
-    consents = (
-        (await session.execute(select(Consent).where(Consent.user_id == user_id))).scalars().all()
-    )
-    meals = (await session.execute(select(Meal).where(Meal.user_id == user_id))).scalars().all()
-    notifications = (
-        (await session.execute(select(Notification).where(Notification.user_id == user_id)))
-        .scalars()
-        .all()
-    )
-
-    def _serialize_value(v: Any) -> Any:
-        if isinstance(v, datetime):
-            return v.isoformat()
-        if isinstance(v, uuid.UUID):
-            return str(v)
-        if isinstance(v, Decimal):
-            # CR P10 — ``default=str``의 implementation-dependent fallback 회피.
-            # ``format(d, 'f')``는 scientific notation 차단 + 정수/소수 결정성 유지.
-            return format(v, "f")
-        return v
-
-    def _serialize_row(row: Any) -> dict[str, Any]:
-        return {col.name: _serialize_value(getattr(row, col.name)) for col in row.__table__.columns}
-
-    return {
-        "user_id": str(user.id),
-        "exported_at": datetime.now(UTC).isoformat(),
-        "user": _serialize_row(user),
-        "consents": [_serialize_row(c) for c in consents],
-        "meals": [_serialize_row(m) for m in meals],
-        "notifications": [_serialize_row(n) for n in notifications],
-    }
+#
+# Story 5.3 — JSON dump shape SOT는 ``app.services.data_export_service``로 이전됨.
+# 본 worker는 ``collect_user_export_payload(..., include_soft_deleted_meals=True)`` 호출로
+# 갈아끼움(DF136 forward-hook 즉시 해소) — *전체 set*(``meal_analyses`` 포함)으로
+# PIPA Art.21 30일 grace 사용자 회복 권리 강화.
 
 
 async def _dump_user_to_r2(
@@ -236,7 +191,12 @@ async def _process_single_user_purge(
             if dump_bucket and r2_adapter is not None:
                 try:
                     async with session_maker() as session:
-                        payload = await _build_user_dump_payload(session, user_id)
+                        # Story 5.3 — service SOT 갈아끼움(DF136). worker는 *전체 set*
+                        # (meal_analyses 포함 + soft-deleted meals 포함)으로 dump — PIPA
+                        # Art.21 30일 grace 사용자 *전체 history* 회복 권리.
+                        payload = await collect_user_export_payload(
+                            session, user_id, include_soft_deleted_meals=True
+                        )
                     if payload is not None:
                         await _dump_user_to_r2(r2_adapter, user_id, dump_bucket, payload)
                         stats["dumped"] = 1
