@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import UTC, datetime
 from typing import Any, ClassVar, Final
 
@@ -153,8 +154,16 @@ class AccountDeletedError(AuthError):
         Story 1.4 ``ConsentVersionMismatchError.latest_versions`` 패턴 정합.
         """
         if detail is None and purge_at is not None:
+            # tz-naive 입력은 UTC로 정규화 — 미래 caller(테스트 헬퍼/admin endpoint)가
+            # naive datetime을 전달해도 ``can't subtract offset-naive...`` TypeError 차단.
+            normalized_purge_at = (
+                purge_at.replace(tzinfo=UTC) if purge_at.tzinfo is None else purge_at
+            )
             now = datetime.now(UTC)
-            days_remaining = max(0, (purge_at - now).days)
+            # ``.days``는 floor 연산이라 ``purge_at = now + 30d`` 직후 호출 시 microsecond
+            # 차이로 29 반환 → UX 약속(30일) ↔ detail 표기(29일) 첫날 불일치 차단.
+            seconds_remaining = (normalized_purge_at - now).total_seconds()
+            days_remaining = max(0, math.ceil(seconds_remaining / 86400))
             detail = (
                 f"탈퇴 진행 중입니다. {days_remaining}일 후 모든 데이터가 영구 파기됩니다. "
                 "복구를 원하시면 고객문의로 연락해 주세요."

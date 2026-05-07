@@ -232,14 +232,15 @@ async def test_purge_cleans_user_meal_images(
 # --- AC4 5) per-user 격리 — dump 실패가 다른 사용자 sweep 미중단 ------------
 
 
-async def test_purge_per_user_isolation_on_dump_failure(
+async def test_purge_dump_failure_does_not_block_hard_delete(
     session_maker: async_sessionmaker,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """첫 사용자 dump 예외 → errors_count=1 + 두 번째 사용자 정상 진행.
+    """CR D1 — dump 실패해도 cleanup + DB hard DELETE 진행 (PIPA Art.21 30일 mandate).
 
-    *Why*: per-user try/except 가드 회귀 — 한 사용자의 R2 PUT 실패가 sweep 전체를 중단
-    시키지 않도록.
+    *Why*: dump bucket 영구 misconfig 시 grace 만료 사용자가 영원히 soft-deleted 잔존하면
+    PIPA 즉시 삭제 의무 위반. dump 실패는 stats[dump_errors_count]에 기록 + sentry capture로
+    운영자 즉시 인지하지만, hard DELETE는 차단하지 않음.
     """
     monkeypatch.setattr(
         "app.core.config.settings.r2_purge_dump_bucket",
@@ -251,21 +252,21 @@ async def test_purge_per_user_isolation_on_dump_failure(
     user2 = await _create_user(session_maker, deleted_days_ago=32)
 
     stats = await purge_expired_soft_deleted_users(session_maker, r2_adapter=fake_r2)
-    # 두 사용자 모두 eligible — 각자 dump 시도하다 실패.
     assert stats["users_eligible_count"] == 2
-    # 본 분기는 dump 실패 시 user_stats["errors"]=1 + purged=0 → 다음 사용자 진행.
-    assert stats["errors_count"] >= 1
-    # sweep 전체가 중단되지 않았다는 invariant — 두 사용자 모두 실패해도 errors_count=2.
-    assert stats["errors_count"] == 2
+    # CR D1 — dump 실패 2건 + DB hard DELETE 2건 모두 진행. PIPA mandate 우선.
+    assert stats["dump_errors_count"] == 2
+    assert stats["users_purged_count"] == 2
+    # outer except는 미진입 — dump 실패는 inner try로 isolated.
+    assert stats["errors_count"] == 0
 
-    # 두 사용자 row가 여전히 DB에 남아있어야 함(dump 실패 시 hard delete 미진행).
+    # 두 사용자 row 모두 hard delete 완료(soft-deleted 잔존 X).
     async with session_maker() as session:
         remaining = (
             (await session.execute(select(User.id).where(User.id.in_([user1.id, user2.id]))))
             .scalars()
             .all()
         )
-        assert len(remaining) == 2
+        assert len(remaining) == 0
 
 
 # --- AC4 6) register_purge_job — scheduler 등록 ----------------------------

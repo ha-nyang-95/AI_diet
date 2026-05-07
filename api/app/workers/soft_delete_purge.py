@@ -20,6 +20,10 @@
 R2 dump bucket(``settings.r2_purge_dump_bucket``)는 미설정 시 graceful skip — 운영 SOP는
 Cloudflare 콘솔 측 lifecycle policy(30일 자동 만료) SOT.
 
+CR D1 결정 — *PIPA Art.21 30일 mandate 우선*: dump 실패는 inner try로 격리되어 cleanup +
+DB DELETE는 계속 진행(stat["dump_errors"] + sentry capture로 운영자 즉시 인지). dump
+bucket 영구 misconfig가 컴플라이언스를 차단하지 않도록.
+
 Story 4.2 ``nudge_scheduler.py`` 패턴 1:1 정합 — ``register_*_job`` + per-job ``Final[str]``
 ID 상수 + Sentry transaction(``op="purge.sweep"``) + per-user span(``op="purge.user"``) +
 structlog NFR-S5 마스킹.
@@ -27,9 +31,11 @@ structlog NFR-S5 마스킹.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Final
 
 import sentry_sdk
@@ -38,7 +44,7 @@ from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.core.config import settings
+from app.core.config import PURGE_GRACE_DAYS, settings
 from app.db.models.consent import Consent
 from app.db.models.meal import Meal
 from app.db.models.notification import Notification
@@ -49,8 +55,8 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
-# epics.md:798 + architecture.md:351 SOT — 회원 탈퇴 후 30일 grace, 31일째 sweep 진입.
-PURGE_GRACE_DAYS: Final[int] = 30
+# 본 상수 SOT는 ``app.core.config.PURGE_GRACE_DAYS`` — auth.py(detail 합성)와 본 모듈
+# (cutoff 계산) 공통 import. ``__all__``에서 재export하여 기존 callsite 호환 유지.
 
 # APScheduler 잡 ID — lifespan 재등록 시 ``replace_existing=True``와 페어. nudge SOT 정합.
 PURGE_JOB_ID: Final[str] = "soft_delete_purge_expired"
@@ -58,6 +64,11 @@ PURGE_JOB_ID: Final[str] = "soft_delete_purge_expired"
 # R2 list_objects_v2 페이지 크기(R2/S3 표준 1000건 cap). meal images cleanup 페이지네이션
 # 기준 — 단일 사용자가 1000건 이상의 meals 이미지를 보유한 시나리오 흡수.
 _R2_DELETE_BATCH_SIZE: Final[int] = 1000
+
+# CR P7 — daily cron은 컨테이너 짧은 down 시 sweep cycle 자체를 silent skip하지 않도록
+# nudge SOT(600s)보다 큰 grace 부여. 6시간 = 03:00 ~ 09:00 KST 사이 부팅 복구분 흡수.
+# sweep는 멱등(rowcount=0 가드 + cutoff 동일)이라 늦은 실행도 안전.
+_PURGE_MISFIRE_GRACE_SECONDS: Final[int] = 6 * 60 * 60
 
 
 def _mask_user_id(user_id: uuid.UUID) -> str:
@@ -71,15 +82,15 @@ def _mask_user_id(user_id: uuid.UUID) -> str:
 async def _build_user_dump_payload(
     session: AsyncSession,
     user_id: uuid.UUID,
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
     """R2 dump JSON shape SOT — *최소 set*(profile + consents + meals 메타 + notifications).
 
-    Story 5.3(``data_export_service.py``) 추가 시 통합 검토 가능(deferred-work DF136 forward).
-    본 스토리는 worker 내부 dump JSON shape를 명시 — 사용자 권리 행사 응답과 *별 모듈*.
+    user 미발견(race로 이미 hard-deleted) 시 ``None`` 반환 — caller가 dump skip + 명시
+    경고 로그 분기. 빈 dict 반환은 truthy/falsy 가드와 의미 충돌 회피.
     """
     user = (await session.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
     if user is None:
-        return {}
+        return None
 
     consents = (
         (await session.execute(select(Consent).where(Consent.user_id == user_id))).scalars().all()
@@ -96,6 +107,10 @@ async def _build_user_dump_payload(
             return v.isoformat()
         if isinstance(v, uuid.UUID):
             return str(v)
+        if isinstance(v, Decimal):
+            # CR P10 — ``default=str``의 implementation-dependent fallback 회피.
+            # ``format(d, 'f')``는 scientific notation 차단 + 정수/소수 결정성 유지.
+            return format(v, "f")
         return v
 
     def _serialize_row(row: Any) -> dict[str, Any]:
@@ -111,22 +126,27 @@ async def _build_user_dump_payload(
     }
 
 
-def _dump_user_to_r2(
+async def _dump_user_to_r2(
     r2_adapter: Any,
     user_id: uuid.UUID,
     dump_bucket: str,
     payload: dict[str, Any],
 ) -> None:
-    """JSON dump → ``purge-dumps/{user_id}/{yyyy-mm-dd}.json`` PUT.
+    """JSON dump → ``purge-dumps/{user_id}/{yyyy-mm-ddTHHMMSS}.json`` PUT.
 
     bucket lifecycle policy(30일 자동 삭제)는 Cloudflare 콘솔 측 SOT — 본 worker는
     PUT만 수행. ``r2_adapter``는 ``app.adapters.r2`` 모듈 자체(boto3 lazy singleton).
+
+    CR P3 — key에 시각 suffix 포함하여 same-day 재시도 시 silent overwrite 차단(이전
+    dump 보존 + 운영자가 history 식별 가능).
+    CR P2 — boto3 sync put_object는 event loop 차단 → ``asyncio.to_thread`` 위임.
     """
-    today = datetime.now(UTC).date().isoformat()
-    key = f"purge-dumps/{user_id}/{today}.json"
+    timestamp = datetime.now(UTC).strftime("%Y-%m-%dT%H%M%SZ")
+    key = f"purge-dumps/{user_id}/{timestamp}.json"
     body = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
     client = r2_adapter._get_client()  # noqa: SLF001 — 인접 worker는 어댑터 lazy singleton 직접 사용.
-    client.put_object(
+    await asyncio.to_thread(
+        client.put_object,
         Bucket=dump_bucket,
         Key=key,
         Body=body,
@@ -134,7 +154,7 @@ def _dump_user_to_r2(
     )
 
 
-def _cleanup_user_r2_images(
+async def _cleanup_user_r2_images(
     r2_adapter: Any,
     user_id: uuid.UUID,
 ) -> int:
@@ -142,6 +162,9 @@ def _cleanup_user_r2_images(
 
     Returns 삭제된 객체 수. R2/S3 표준 paginator 패턴 — ``ContinuationToken``으로 다음
     페이지 진입. r2_adapter None 또는 R2 미설정은 호출 측에서 가드(본 함수는 client 가져옴).
+
+    CR P2 — boto3 sync 호출(list_objects_v2/delete_objects)은 event loop 차단 →
+    ``asyncio.to_thread`` 위임. 새벽 3시 sweep 동안 HTTP 요청 차단 회피.
     """
     client = r2_adapter._get_client()  # noqa: SLF001
     bucket = settings.r2_bucket
@@ -157,11 +180,12 @@ def _cleanup_user_r2_images(
         }
         if continuation_token is not None:
             kwargs["ContinuationToken"] = continuation_token
-        response = client.list_objects_v2(**kwargs)
+        response = await asyncio.to_thread(client.list_objects_v2, **kwargs)
         objects = response.get("Contents", [])
         if objects:
             keys = [{"Key": obj["Key"]} for obj in objects]
-            client.delete_objects(
+            await asyncio.to_thread(
+                client.delete_objects,
                 Bucket=bucket,
                 Delete={"Objects": keys, "Quiet": True},
             )
@@ -185,24 +209,50 @@ async def _process_single_user_purge(
 ) -> dict[str, int]:
     """단일 사용자 격리 트랜잭션 — dump → cleanup → DB hard DELETE.
 
-    Returns per-user stats(dump=0|1, images=N, purged=0|1, errors=0|1). 실패는 격리되어
-    sweep 전체를 중단시키지 않음.
+    Returns per-user stats(dump=0|1, images=N, purged=0|1, dump_errors=0|1,
+    cleanup_errors=0|1, errors=0|1). 실패는 격리되어 sweep 전체를 중단시키지 않음.
+
+    CR D1 — dump 실패는 inner try로 격리 + ``stats["dump_errors"]+=1`` + sentry capture
+    후 cleanup + DB DELETE 계속 진행(PIPA Art.21 30일 mandate 우선). 운영자는 sentry로
+    즉시 인지.
     """
     masked = _mask_user_id(user_id)
-    stats = {"dumped": 0, "images_cleaned": 0, "purged": 0, "errors": 0}
+    stats = {
+        "dumped": 0,
+        "images_cleaned": 0,
+        "purged": 0,
+        "dump_errors": 0,
+        "cleanup_errors": 0,
+        "errors": 0,
+    }
 
     try:
         with sentry_sdk.start_span(op="purge.user", name="purge.user") as span:
             span.set_tag("user_id_masked", masked)
 
             # 1) R2 dump (선택 — bucket 미설정 시 skip).
+            #    CR D1 — dump 실패도 inner try로 isolated → cleanup + DELETE는 계속 진행
+            #    (PIPA 컴플라이언스 우선 + sentry로 운영자 즉시 인지).
             if dump_bucket and r2_adapter is not None:
-                async with session_maker() as session:
-                    payload = await _build_user_dump_payload(session, user_id)
-                if payload:
-                    _dump_user_to_r2(r2_adapter, user_id, dump_bucket, payload)
-                    stats["dumped"] = 1
-                    logger.info("purge.user.dumped", user_id=masked, bucket=dump_bucket)
+                try:
+                    async with session_maker() as session:
+                        payload = await _build_user_dump_payload(session, user_id)
+                    if payload is not None:
+                        await _dump_user_to_r2(r2_adapter, user_id, dump_bucket, payload)
+                        stats["dumped"] = 1
+                        logger.info("purge.user.dumped", user_id=masked, bucket=dump_bucket)
+                    else:
+                        # CR P11 — race(이미 다른 sweep cycle이 hard-deleted) 명시 신호.
+                        logger.warning("purge.dump_user_missing", user_id=masked)
+                except Exception as exc:  # noqa: BLE001 — dump 실패는 DB DELETE를 막지 않음(PIPA).
+                    sentry_sdk.capture_exception(exc)
+                    stats["dump_errors"] = 1
+                    logger.error(
+                        "purge.user.dump_failed",
+                        user_id=masked,
+                        bucket=dump_bucket,
+                        reason=type(exc).__name__,
+                    )
             else:
                 logger.info(
                     "purge.dump_skipped",
@@ -213,11 +263,14 @@ async def _process_single_user_purge(
             # 2) R2 meal images cleanup (선택 — adapter 미주입 시 skip).
             if r2_adapter is not None:
                 try:
-                    cleaned = _cleanup_user_r2_images(r2_adapter, user_id)
+                    cleaned = await _cleanup_user_r2_images(r2_adapter, user_id)
                     stats["images_cleaned"] = cleaned
                     logger.info("purge.user.images_cleaned", user_id=masked, count=cleaned)
                 except Exception as exc:  # noqa: BLE001 — R2 transient 실패는 DB delete를 막지 않음.
                     sentry_sdk.capture_exception(exc)
+                    # CR P6 — cleanup 실패도 stats["cleanup_errors"]에 기록(운영자가 sweep
+                    # stats만 보고도 R2 orphan 위험 인지 가능). dump_errors와 분리 — 원인 분리.
+                    stats["cleanup_errors"] = 1
                     logger.warning(
                         "purge.user.images_cleanup_failed",
                         user_id=masked,
@@ -268,7 +321,8 @@ async def purge_expired_soft_deleted_users(
     """30일 grace 경과 사용자 sweep — 매일 새벽 3시 KST cron entrypoint.
 
     Returns sweep 통계 dict — ``users_eligible_count`` / ``users_purged_count`` /
-    ``r2_dumps_count`` / ``r2_images_cleaned_count`` / ``errors_count``.
+    ``r2_dumps_count`` / ``r2_images_cleaned_count`` / ``dump_errors_count`` /
+    ``cleanup_errors_count`` / ``errors_count``.
     """
     now = datetime.now(UTC)
     cutoff = now - timedelta(days=PURGE_GRACE_DAYS)
@@ -285,6 +339,8 @@ async def purge_expired_soft_deleted_users(
         "users_purged_count": 0,
         "r2_dumps_count": 0,
         "r2_images_cleaned_count": 0,
+        "dump_errors_count": 0,
+        "cleanup_errors_count": 0,
         "errors_count": 0,
     }
 
@@ -315,9 +371,13 @@ async def purge_expired_soft_deleted_users(
             stats["users_purged_count"] += user_stats["purged"]
             stats["r2_dumps_count"] += user_stats["dumped"]
             stats["r2_images_cleaned_count"] += user_stats["images_cleaned"]
+            stats["dump_errors_count"] += user_stats["dump_errors"]
+            stats["cleanup_errors_count"] += user_stats["cleanup_errors"]
             stats["errors_count"] += user_stats["errors"]
 
         transaction.set_tag("users_purged_count", stats["users_purged_count"])
+        transaction.set_tag("dump_errors_count", stats["dump_errors_count"])
+        transaction.set_tag("cleanup_errors_count", stats["cleanup_errors_count"])
         transaction.set_tag("errors_count", stats["errors_count"])
 
     except Exception:
@@ -332,6 +392,8 @@ async def purge_expired_soft_deleted_users(
         users_purged_count=stats["users_purged_count"],
         r2_dumps_count=stats["r2_dumps_count"],
         r2_images_cleaned_count=stats["r2_images_cleaned_count"],
+        dump_errors_count=stats["dump_errors_count"],
+        cleanup_errors_count=stats["cleanup_errors_count"],
         errors_count=stats["errors_count"],
     )
     return stats
@@ -347,6 +409,10 @@ def register_purge_job(
 
     사유: nudge sweep는 매 30분 cycle, 새벽 3시는 push 발사 ↓ DB load idle peak. 단일
     노드 정합으로 cron 충돌 0. ``redis`` 인자는 forward — 본 스토리 미사용.
+
+    CR P7 — daily cron이라 nudge SOT 600s grace가 너무 짧음. 컨테이너 10분+ 재기동 시
+    sweep cycle 자체 silent skip 회피 위해 6h(_PURGE_MISFIRE_GRACE_SECONDS) override.
+    sweep 멱등성(rowcount=0 가드 + cutoff 동일)이 늦은 실행을 안전하게 흡수.
     """
     _ = redis  # forward use
     scheduler.add_job(
@@ -355,6 +421,7 @@ def register_purge_job(
         args=[session_maker, r2_adapter],
         id=PURGE_JOB_ID,
         replace_existing=True,
+        misfire_grace_time=_PURGE_MISFIRE_GRACE_SECONDS,
     )
     logger.info("purge.job.registered", job_id=PURGE_JOB_ID)
 

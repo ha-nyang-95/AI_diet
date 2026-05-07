@@ -312,3 +312,9 @@ NOW-ACTIONABLE 일괄 CLOSED. 20 AC + 10 Task로 그룹화 처리.
 - **DF130 — Mobile/web `lib/api-client.ts` SOT 중복** [mobile/lib/api-client.ts + web/src/lib/api-client.ts] — 두 파일 모두 `pnpm gen:api` 출력으로 byte-identical하나 별도 위치. 향후 백엔드 OpenAPI 변경 시 양쪽 동시 regen 책임이 휴먼 프로세스에 의존. **재검토 시점**: monorepo codegen 통합(Epic 5 또는 Epic 6 인프라 hardening).
 - **DF131 — `fetch_user_profile`이 ValidationError만 catch (TypeError 경로 무방어)** [api/app/graph/nodes/fetch_user_profile.py:54-58] — `MacroGoal.model_validate(row.macro_goal)`이 dict가 아닌 입력에 대해 TypeError/AttributeError를 raise할 가능성. 0015 CHECK 제약이 `jsonb_typeof = 'object'` 강제로 진입 차단하므로 현재 위험 0. **재검토 시점**: legacy 마이그레이션(Pre-0015 row 존재 가능성) 또는 schema drift 점검 스토리.
 
+## Deferred from: code review of 5-2-회원-탈퇴-soft-delete-grace (2026-05-07)
+
+- **DF132 — purge worker dump↔delete 트랜잭셔널 tie 부재** [api/app/workers/soft_delete_purge.py:_process_single_user_purge] — dump session, R2 PUT, cleanup session, DELETE session 4단계가 별 트랜잭션. SIGTERM mid-loop이 PUT 후 DELETE 전 발생 시 dump 잔존 + soft-deleted 유지 — 다음 sweep이 같은 키로 overwrite하며 dump 1세대 유실. per-user idempotency token + "already-dumped" check + Outbox 패턴 도입 영역. 현재 빈도 낮음(컨테이너 stable, daily cron). **재검토 시점**: Epic 8 hardening 또는 가용성/HA SLA 도입 시.
+- **DF133 — `DELETE /v1/users/me` OpenAPI 422 only declared / 클라이언트 400 분기 (DF99/DF101 baseline 연속)** [mobile/lib/api-client.ts:delete_account_v1_users_me_delete + web/src/lib/api-client.ts 동일] — `validation_exception_handler`가 422 → 400(`code=validation.error`) 변환하나 OpenAPI는 422만 선언. 자동 생성 클라이언트 타입에 400 응답 shape 부재 → 런타임은 동작하나 type 우수성 부족. Story 5.1까지 누적. **재검토 시점**: Story 8.4 polish — 글로벌 핸들러 OpenAPI extra responses 등록 일괄.
+- **DF134 — Android Alert.alert `style: 'destructive'` 미지원** [mobile/app/(tabs)/settings/account-delete.tsx Alert.alert 호출부] — iOS만 빨간 글자로 destructive 시각 cue 렌더, Android는 일반 버튼 색상 — 우발 탭으로 탈퇴 확정 위험. RN 표준 패턴은 커스텀 Modal 컴포넌트 도입(react-native `Modal` + 자체 destructive 버튼 스타일링). **재검토 시점**: Story 8.4 모바일 UX polish.
+

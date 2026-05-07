@@ -42,6 +42,7 @@ from app.api.deps import (
 from app.core.config import (
     ADMIN_ACCESS_TOKEN_TTL_SECONDS,
     NON_SECURE_COOKIE_ENVIRONMENTS,
+    PURGE_GRACE_DAYS,
     USER_ACCESS_TOKEN_TTL_SECONDS,
     USER_REFRESH_TOKEN_TTL_SECONDS,
     settings,
@@ -61,7 +62,6 @@ from app.core.security import (
 )
 from app.db.models.refresh_token import RefreshToken
 from app.db.models.user import User
-from app.workers.soft_delete_purge import PURGE_GRACE_DAYS  # Story 5.2 — 30일 grace SOT.
 
 router = APIRouter()
 

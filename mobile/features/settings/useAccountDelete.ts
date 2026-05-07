@@ -2,13 +2,14 @@
  * Story 5.2 — 회원 탈퇴 mutation 훅 (DELETE /v1/users/me).
  *
  * Story 5.1 ``ProfileSubmitError`` / ``useUpdateHealthProfile`` 패턴 1:1 정합 — typed
- * status + code + detail 노출. 성공 시 ``queryClient.clear()`` 호출 — 모든 query cache
- * 초기화로 logout 후 stale 데이터(profile/macro_goal/notifications 등) 잠시 남는 회귀 차단.
+ * status + code + detail 노출.
  *
- * 본 훅은 *콜백만* 노출 — ``signOut`` / ``router.replace`` 호출은 화면 측 책임(분리된
- * 책임 — hook은 *서버 mutation* 만, 화면은 *navigation flow* 결정). PIPA Art.35 정합.
+ * 본 훅은 *서버 mutation*만 담당 — ``signOut`` / ``queryClient.clear`` / ``router.replace``
+ * 호출은 화면 측 책임. CR P8 — onSuccess에서 ``clear()`` 먼저 호출하면 활성 쿼리들이
+ * 401로 refetch + authFetch refresh race가 발생 → 화면에서 ``signOut → clear → replace``
+ * 순서로 정렬해 일관 처리. PIPA Art.35 정합.
  */
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation } from '@tanstack/react-query';
 
 import { authFetch } from '@/lib/auth';
 
@@ -67,22 +68,19 @@ async function deleteAccount(body: AccountDeleteRequestBody): Promise<void> {
  * 사용 예 (settings/account-delete.tsx):
  * ```tsx
  * const mutation = useAccountDelete();
+ * const queryClient = useQueryClient();
  * await mutation.mutateAsync({ reason });
- * await signOut();
+ * await signOut();           // 1) 로컬 토큰/세션 클리어
+ * queryClient.clear();        // 2) stale 쿼리 정리(이미 인증 끊긴 후)
  * router.replace('/(auth)/login');
  * ```
  *
- * ``onSuccess``는 화면 측 콜백 *전*에 ``queryClient.clear()`` 호출 — 모든 query cache
- * 무효화로 logout 후 stale 데이터 회귀 차단.
+ * CR P8 — onSuccess에서 ``clear()`` 호출하면 활성 쿼리들이 401로 즉시 refetch +
+ * authFetch refresh race가 발생. 순서 책임은 화면 측에 위임 — ``signOut`` 후 토큰이
+ * 클리어된 상태에서 ``clear()`` 호출하면 race 없이 안전.
  */
 export function useAccountDelete() {
-  const queryClient = useQueryClient();
   return useMutation({
     mutationFn: deleteAccount,
-    onSuccess: () => {
-      // logout 후 stale 데이터(profile/macro_goal/notifications 등) 회귀 방지 —
-      // 모든 queryKey 무효화. signOut/router.replace는 화면 측에서 별도 호출.
-      queryClient.clear();
-    },
   });
 }

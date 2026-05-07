@@ -21,6 +21,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 from httpx import AsyncClient
 from sqlalchemy import select, text
@@ -252,13 +253,21 @@ async def test_delete_me_revokes_active_refresh_tokens(
 # --- AC8: audit_admin_action 미wire 가드 ----------------------------------
 
 
+def _dep_name(dep_callable: Any) -> str:
+    return getattr(dep_callable, "__name__", str(dep_callable))
+
+
 async def test_delete_me_endpoint_does_not_wire_audit_admin_action() -> None:
-    """Story 5.2 AC8 — ``delete_account`` endpoint signature에 ``audit_*`` Dependency
-    미진입 가드.
+    """Story 5.2 AC8 — ``delete_account`` endpoint signature *및* route-level dependency
+    양쪽에 ``audit_*`` 미진입 가드.
 
     *Why*: epics.md:792 + PIPA Art.35 자기 데이터 권리 정합 — 일반 사용자 자기 탈퇴는
     audit log 미기록(Epic 7 admin 탈퇴만 audit). Story 5.1 ``patch_health_profile`` 패턴
     1:1 정합.
+
+    CR P9 — 함수 signature(``Annotated[..., Depends(...)]``)와 *router-level
+    dependencies=[]* 두 채널 모두 검증. 후자만 통하는 우회 wire(``@router.delete("/me",
+    dependencies=[Depends(audit_admin_action)])``)도 즉시 fail.
     """
     type_hints = typing.get_type_hints(users_router.delete_account, include_extras=True)
     sig = inspect.signature(users_router.delete_account)
@@ -270,7 +279,7 @@ async def test_delete_me_endpoint_does_not_wire_audit_admin_action() -> None:
             dep_callable = getattr(meta, "dependency", None)
             if dep_callable is None:
                 continue
-            dep_name = getattr(dep_callable, "__name__", str(dep_callable))
+            dep_name = _dep_name(dep_callable)
             seen_dep_names.append(dep_name)
             assert not dep_name.startswith("audit_"), (
                 f"audit_* dependency must NOT wire to delete_account "
@@ -286,6 +295,30 @@ async def test_delete_me_endpoint_does_not_wire_audit_admin_action() -> None:
         f"require_basic_consents must NOT wire to delete_account "
         f"(PIPA Art.35 — 미동의 사용자 탈퇴 권리 봉쇄 X). seen={seen_dep_names}"
     )
+
+    # CR P9 — route-level dependencies(``@router.delete("/me", dependencies=[...])``) 검증.
+    # FastAPI Route 객체의 ``dependant.dependencies`` 트리에 ``audit_*`` callable 부재 검증.
+    delete_route = next(
+        route
+        for route in app.routes
+        if getattr(route, "path", "") == "/v1/users/me"
+        and "DELETE" in getattr(route, "methods", set())
+    )
+    route_deps: list[str] = []
+
+    def _walk(dependant: Any) -> None:
+        for sub in getattr(dependant, "dependencies", []) or []:
+            call = getattr(sub, "call", None)
+            if call is not None:
+                route_deps.append(_dep_name(call))
+            _walk(sub)
+
+    _walk(delete_route.dependant)
+    for name in route_deps:
+        assert not name.startswith("audit_"), (
+            f"audit_* dependency must NOT wire at route level either "
+            f"(dep={name}); PIPA Art.35 자기 데이터 권리 정합."
+        )
 
 
 # --- AC7: integration cascade — DELETE /me → soft delete → worker → all child rows 0 ---

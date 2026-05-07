@@ -1,6 +1,6 @@
 # Story 5.2: 회원 탈퇴 + soft delete + 30일 grace + 물리 파기 worker
 
-Status: review
+Status: done
 
 <!-- Validation: Epic 5 두 번째 스토리. Story 1.2(`users.deleted_at` 컬럼 + `current_user`의 `deleted_at IS NULL` 가드 + `AccountDeletedError` 403) baseline + Story 4.2(APScheduler `AsyncIOScheduler` lifespan SOT + `register_*_job` 패턴 + Sentry transaction op `*.sweep`) baseline + Story 5.1 PATCH endpoint + 3 timestamp 의미 분리 baseline 위에 *PIPA 정보주체 권리(즉시 삭제 의무) + 30일 grace + 물리 파기 cron* 흐름 신설. epics.md:794-807 정합 — `DELETE /v1/users/me` 신규(soft delete + active refresh_tokens revoke) + `app/workers/soft_delete_purge.py` 신규 cron(매일 새벽 3시 KST) + R2 dump bucket 30일 추가 보관(settings env 미설정 시 skip + 운영 SOP 1줄) + `AccountDeletedError` detail 강화(N일 grace 한국어 안내). 모든 user-FK 모델(`consents`/`meals`/`meal_analyses`/`notifications`/`refresh_tokens`)이 이미 `ondelete="CASCADE"`라 `DELETE FROM users WHERE id = X` 1건이 자동 cascade — 별도 명시 cascade 코드 0건. R2 meal images cleanup은 `meals/{user_id}/` prefix list_objects + delete_objects 1패스. 일반 사용자 자기 탈퇴는 Story 5.1 정합으로 audit 미기록(자기 데이터 권리). -->
 
@@ -497,3 +497,41 @@ claude-opus-4-7[1m]
 | Version | Date | Description |
 |---------|------|-------------|
 | 0.1 | 2026-05-07 | DS 완료 (Amelia) — Story 5.2 회원 탈퇴 + soft delete + 30일 grace + 물리 파기 worker. pytest 1042/11/0 + coverage 85.27% + ruff/mypy 0 + web/mobile tsc/lint 0. Status: in-progress → review. |
+| 0.2 | 2026-05-07 | CR 완료 (Amelia, bmad-code-review) — 12 patch(D1 PIPA 우선 dump-failure isolation 포함) + DF132/133/134 defer. PURGE_GRACE_DAYS를 core/config로 이동(api → workers 의존 역전 정정), boto3 sync → asyncio.to_thread, dump key timestamp suffix, math.ceil 보정, tz-naive 가드, cleanup error 분리, misfire_grace=21600s, mobile signOut→clear 순서 정렬, audit-gate route-level 검증, Decimal 명시 직렬화, dump payload None signal. pytest 1043/11/0 + coverage 85.20%. Status: review → done. |
+
+### Review Findings
+
+**Code review** — 2026-05-07 (Amelia, bmad-code-review). Blind Hunter / Edge Case Hunter / Acceptance Auditor 3-layer adversarial. 23 files / +2,764 / -13. 결과: 12 patch 적용, 3 defer(DF132/DF133/DF134), ~21 dismiss.
+
+#### Decision Resolved
+
+- [x] [Review][Decision] **R2 dump 실패 시 DB 물리 삭제 차단 vs 진행** → **(a) PIPA 우선 — dump 실패 시에도 cleanup+DELETE 진행**. `_process_single_user_purge`에서 dump를 inner try/except로 격리, 실패 시 `stats["dump_errors"] += 1` + sentry capture, cleanup + DB DELETE는 계속 진행. PIPA Art.21 30일 mandate 위반 위험 차단. 신규 P12 patch로 적용.
+- [x] [Review][Decision] **`meal_analyses` dump payload 포함 여부** → **(a) spec 유지 — 제외**. 분석 결과는 LLM 출력 재계산 가능, dump는 *cold archive* 성격(profile/consents/meals raw + notifications). 운영 복구 완전성 vs 비용/속도 트레이드오프에서 비용 우위. dismiss.
+
+#### Patch (모두 적용)
+
+- [x] [Review][Patch] **`(purge_at - now).days` ceil 보정** [api/app/core/exceptions.py:155-167] — `math.ceil(seconds/86400)`로 변경. 첫 호출 시 "30일 후" 표기 보장.
+- [x] [Review][Patch] **boto3 sync → `asyncio.to_thread`** [api/app/workers/soft_delete_purge.py:_dump_user_to_r2/_cleanup_user_r2_images] — `put_object`/`list_objects_v2`/`delete_objects` 모두 `asyncio.to_thread` 위임. event loop 차단 회피.
+- [x] [Review][Patch] **R2 dump 키 timestamp suffix** [_dump_user_to_r2:144-156] — `purge-dumps/{user_id}/{yyyy-mm-ddTHHMMSSZ}.json`. same-day 재시도 시 이전 dump 보존.
+- [x] [Review][Patch] **cross-module import 방향 정정** [api/app/core/config.py:24-27 + api/app/api/v1/auth.py:42-49 + api/app/workers/soft_delete_purge.py:42] — `PURGE_GRACE_DAYS`를 `app.core.config`로 이동. `auth.py`와 worker 모두 config에서 import. worker는 `__all__`에 재export로 backward-compat.
+- [x] [Review][Patch] **AccountDeletedError tz-naive 가드** [api/app/core/exceptions.py:160-164] — `purge_at.tzinfo is None`이면 `replace(tzinfo=UTC)` 정규화. 미래 caller TypeError → 500 변환 차단.
+- [x] [Review][Patch] **R2 cleanup 실패 stat 분리** [api/app/workers/soft_delete_purge.py:_process_single_user_purge cleanup catch + sweep aggregation] — `stats["cleanup_errors"]` 신규 + sweep aggregation `cleanup_errors_count` 추가. dump_errors와 분리해 원인 분석 가능.
+- [x] [Review][Patch] **register_purge_job misfire_grace_time=21600(6h)** [api/app/workers/soft_delete_purge.py:_PURGE_MISFIRE_GRACE_SECONDS + register_purge_job:add_job] — daily cron 컨테이너 down 흡수. sweep 멱등성으로 늦은 실행 안전.
+- [x] [Review][Patch] **`queryClient.clear()` 순서 정렬** [mobile/features/settings/useAccountDelete.ts:78-82 + mobile/app/(tabs)/settings/account-delete.tsx:74-92] — `useAccountDelete` onSuccess에서 `clear()` 제거. 화면 측에서 `signOut → queryClient.clear() → router.replace` 순서로 정렬해 401 refresh race 차단.
+- [x] [Review][Patch] **audit_admin_action route-level deps 검증** [api/tests/api/v1/test_users_account_delete.py:test_delete_me_endpoint_does_not_wire_audit_admin_action] — `app.routes` walk + `route.dependant.dependencies` 재귀 검증 추가. signature + route-level 양쪽 channel 모두 가드.
+- [x] [Review][Patch] **Decimal 명시 직렬화** [api/app/workers/soft_delete_purge.py:_serialize_value Decimal 분기] — `format(d, 'f')`로 결정성 + scientific notation 차단.
+- [x] [Review][Patch] **`_build_user_dump_payload` None 반환** [api/app/workers/soft_delete_purge.py:_build_user_dump_payload + caller] — race(이미 hard-deleted) 시 `None` + caller `if payload is not None` + `purge.dump_user_missing` 경고 로그.
+- [x] [Review][Patch] **(D1 신규) dump 실패 isolated → DB DELETE 계속 진행** [api/app/workers/soft_delete_purge.py:_process_single_user_purge dump inner try] — dump를 inner try/except로 격리. 실패 시 `stats["dump_errors"] += 1` + sentry capture 후 cleanup+DELETE 진행. PIPA Art.21 30일 mandate 우선. test `test_purge_dump_failure_does_not_block_hard_delete`로 invariant 가드.
+
+#### Deferred
+
+- [x] [Review][Defer] **dump↔delete 트랜잭셔널 tie 부재** — DF132 (재검토: Epic 8 hardening).
+- [x] [Review][Defer] **OpenAPI 422 only declared / 클라이언트 400 분기 (DF99 계열 baseline)** — DF133 (재검토: Story 8.4).
+- [x] [Review][Defer] **Android Alert.alert `style: 'destructive'` 미지원** — DF134 (재검토: Story 8.4 모바일 UX polish).
+
+#### Test 결과 (CR 후)
+
+- pytest **1043 passed / 11 skipped / 0 failed** (+1 from CR — D1 invariant test rename + 1 worker isolation test 흡수).
+- coverage **85.20%** (-0.07pp vs DS — worker 모듈 라인 증가 흡수).
+- ruff/format/mypy 0 errors. mobile tsc/lint 0 errors(pre-existing 4 warnings 무관).
+- `soft_delete_purge.py` 87% 커버리지.
