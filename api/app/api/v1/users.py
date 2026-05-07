@@ -1,12 +1,14 @@
-"""`/v1/users/me` — 현재 로그인 사용자 조회 + 건강 프로필 입력/조회.
+"""`/v1/users/me` — 현재 로그인 사용자 조회 + 건강 프로필 입력/조회/수정.
 
 - ``GET /v1/users/me`` (Story 1.2): 자기 정보 조회. 인증만 — 동의 게이트 X.
   Story 1.5에서 ``profile_completed_at`` 필드 응답 모델 추가(4번째 가드용 분기).
-- ``POST /v1/users/me/profile`` (Story 1.5 AC2): 건강 프로필 입력 — 7컬럼 update.
-  ``Depends(require_basic_consents)`` 첫 wire (Story 1.3 W14 deferred 흡수).
+- ``POST /v1/users/me/profile`` (Story 1.5 AC2): 건강 프로필 *최초* 입력 — 7컬럼 update +
+  ``profile_completed_at`` set. ``Depends(require_basic_consents)`` 첫 wire.
 - ``GET /v1/users/me/profile`` (Story 1.5 AC3): 프로필 값 조회 — 인증만(자기 정보).
   미입력 사용자도 200 + 6 필드 NULL + ``allergies=[]`` 응답(404 X — 사용자는 항상
-  존재). prefill 흐름 forward-hook (Story 5.1 수정 흐름).
+  존재). prefill 흐름 forward-hook.
+- ``PATCH /v1/users/me/profile`` (Story 5.1 AC2): 건강 프로필 *수정* — 6 필드 partial +
+  at-least-one + ``profile_updated_at`` set. ``profile_completed_at`` 미터치(invariant).
 """
 
 from __future__ import annotations
@@ -15,11 +17,18 @@ import contextlib
 import json
 import uuid
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Self
 
 import structlog
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from sqlalchemy import func, text, update
 
 from app.api.deps import DbSession, current_user, require_basic_consents
@@ -97,10 +106,13 @@ class HealthProfileSubmitRequest(BaseModel):
 
 
 class HealthProfileResponse(BaseModel):
-    """``POST/GET /v1/users/me/profile`` 응답 — 7 필드.
+    """``POST/GET/PATCH /v1/users/me/profile`` 응답 — 8 필드.
 
     ``allergies``는 NULL → ``[]`` 빈 배열로 응답(클라이언트 분기 단순화).
     ``weight_kg``는 DB ``Decimal`` → JSON wire format ``float`` 직렬화.
+
+    Story 5.1 — ``profile_updated_at`` 필드 추가(8번째). PATCH 호출 전까지는 NULL,
+    PATCH 첫 호출 시 set. POST는 본 필드 미터치(``profile_completed_at`` SOT만 set).
     """
 
     age: int | None
@@ -110,6 +122,60 @@ class HealthProfileResponse(BaseModel):
     health_goal: HealthGoal | None
     allergies: list[str]
     profile_completed_at: datetime | None
+    profile_updated_at: datetime | None
+
+
+class HealthProfilePatchRequest(BaseModel):
+    """``PATCH /v1/users/me/profile`` body — 6 필드 partial + at-least-one 가드.
+
+    Story 1.5 ``HealthProfileSubmitRequest``(POST 6 필드 required full-replace)와 *별
+    모델*. 본 모델은 6 필드 모두 Optional + ``model_fields_set`` 기반 at-least-one
+    + None 명시 송신은 *해당 컬럼 NULL set*(REST PATCH 표준 정합 — 6 필드 모두
+    *원래 nullable*이라 *부재*와 *명시 null* 동작 일관 가능).
+
+    Story 4.4 ``MacroGoalPatchRequest`` SOT 패턴 정합 — at-least-one 가드는 *명시
+    송신* 기준(``model_fields_set``)으로, 빈 body ``{}`` 만 거부(6 필드 모두 None
+    default + 빈 body는 ``model_fields_set``이 빈 set).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    age: int | None = Field(default=None, ge=1, le=150)
+    # ``allow_inf_nan=False`` — Story 1.5 SOT 정합(NaN/Infinity wire 거부).
+    weight_kg: float | None = Field(default=None, ge=1.0, le=500.0, allow_inf_nan=False)
+    height_cm: int | None = Field(default=None, ge=50, le=300)
+    activity_level: ActivityLevel | None = None
+    health_goal: HealthGoal | None = None
+    allergies: list[str] | None = Field(default=None, max_length=22)
+
+    @field_validator("weight_kg")
+    @classmethod
+    def _validate_weight_precision(cls, v: float | None) -> float | None:
+        """Story 1.5 SOT 1:1 — 소수 1자리 silent rounding 차단. None pass-through."""
+        if v is None:
+            return None
+        if round(v, 1) != v:
+            raise ValueError("weight_kg must have at most 1 decimal place")
+        return v
+
+    @field_validator("allergies")
+    @classmethod
+    def _validate_allergens(cls, v: list[str] | None) -> list[str] | None:
+        """Story 1.5 SOT 재사용 — 22종 부분집합 + dedup + NFC + 정의 순. None pass-through."""
+        if v is None:
+            return None
+        return normalize_allergens(v)
+
+    @model_validator(mode="after")
+    def _validate_at_least_one(self) -> Self:
+        """``model_fields_set``이 빈 set이면 empty PATCH — 거부.
+
+        None 명시 송신은 *명시 송신*으로 분류(``model_fields_set``에 포함) → valid.
+        Story 4.4 ``MacroGoalPatchRequest`` 패턴 정합.
+        """
+        if not self.model_fields_set:
+            raise ValueError("at least one health profile field required")
+        return self
 
 
 def _build_profile_response(user: User) -> HealthProfileResponse:
@@ -119,6 +185,7 @@ def _build_profile_response(user: User) -> HealthProfileResponse:
     - ``allergies`` ``None → []`` 빈 배열 fallback (``is not None`` 명시 분기 — DB의 *NULL*과
       *empty list*를 같은 ``[]`` 응답으로 통합. profile 입력 여부는 ``profile_completed_at``
       으로 판별).
+    - Story 5.1 ``profile_updated_at`` forward — POST 흐름은 항상 NULL, PATCH 후 set.
     """
     return HealthProfileResponse(
         age=user.age,
@@ -128,6 +195,7 @@ def _build_profile_response(user: User) -> HealthProfileResponse:
         health_goal=user.health_goal,
         allergies=list(user.allergies) if user.allergies is not None else [],
         profile_completed_at=user.profile_completed_at,
+        profile_updated_at=user.profile_updated_at,
     )
 
 
@@ -220,6 +288,68 @@ async def get_health_profile(
     ``allergies=[]`` + ``profile_completed_at=null``. 404 미사용.
     """
     return _build_profile_response(user)
+
+
+@router.patch("/me/profile")
+async def patch_health_profile(
+    body: HealthProfilePatchRequest,
+    db: DbSession,
+    user: Annotated[User, Depends(require_basic_consents)],  # Story 1.5 W14 패턴 정합
+) -> HealthProfileResponse:
+    """프로필 수정 — 6 필드 partial update + ``profile_updated_at`` set.
+
+    Story 1.5 ``POST /me/profile``(*최초 입력*)과 *별 endpoint*. 본 endpoint는
+    *재방문 수정* 흐름 — ``profile_completed_at`` 미터치(invariant 보존), ``onboarded_at``
+    미터치(Story 1.6 invariant). ``profile_updated_at``만 set(0016 마이그레이션 컬럼).
+
+    흐름:
+    1) Pydantic 1차 게이트(at-least-one + range + 22종 + weight precision).
+    2) ``model_dump(exclude_unset=True)`` — *명시 송신* 필드만 처리. None 명시 송신은
+       *해당 컬럼 NULL set*(REST PATCH 표준 + 6 필드 모두 *원래 nullable*이라 의미 일관).
+    3) ``UPDATE ... RETURNING`` race-free — Story 1.5 SOT 패턴(``populate_existing=True``
+       expired 객체 lazy-load 회피, commit 전 응답 build).
+    4) ``profile_updated_at = func.now()`` set + ``updated_at = func.now()`` bump. DB-side
+       single 시계.
+
+    ``users.profile.patched`` structlog event(별 이벤트명 — POST는 ``users.profile.updated``):
+    NFR-S5 정합 — ``user_id`` ``u_{8char}`` 마스킹 + ``keys_set`` only(*값* 본문 X).
+
+    LLM cache invalidate: ``_build_profile_hash``(Story 3.6/4.4 SOT)가 6 필드 모두
+    sha256 body에 포함 → PATCH 후 다음 분석 자동 cache miss → 새 LLM 호출.
+    Redis profile cache(architecture.md:296 ``cache:user:{user_id}:profile``)는
+    *현 프로젝트 미구현* — Story 8.4 polish forward.
+    """
+    # TODO Story 8.4: redis profile cache wire — invalidate on PATCH (cache miss after
+    # write). 현 baseline은 미구현(architecture.md:296 forward-hook). LLM cache는
+    # _build_profile_hash가 자동 invalidate.
+    fields_dict = body.model_dump(exclude_unset=True)
+
+    result = await db.execute(
+        update(User)
+        .where(User.id == user.id)
+        .values(
+            **fields_dict,
+            profile_updated_at=func.now(),
+            updated_at=func.now(),
+            # profile_completed_at 미터치 — Story 1.5 invariant 보존(*최초 온보딩 시점*).
+            # onboarded_at 미터치 — Story 1.6 invariant 보존.
+        )
+        .returning(User)
+        .execution_options(populate_existing=True)
+    )
+    updated_user = result.scalar_one()
+    response = _build_profile_response(updated_user)
+    await db.commit()
+
+    # 로깅은 commit 성공 후 best-effort — Story 1.5 패턴 정합(structlog processor 실패가
+    # 응답을 500으로 전환하지 않도록 가드).
+    with contextlib.suppress(Exception):
+        logger.info(
+            "users.profile.patched",
+            user_id=_mask_user_id(user.id),
+            keys_set=sorted(fields_dict.keys()),  # 값 본문 X — NFR-S5
+        )
+    return response
 
 
 # --- Story 4.4 — Macro Goal endpoints --------------------------------------

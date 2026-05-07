@@ -127,4 +127,8 @@ export interface HealthProfileResponse {
   health_goal: HealthGoal | null;
   allergies: string[];
   profile_completed_at: string | null;
+  // Story 5.1 — 마지막 PATCH 시점(0016 마이그레이션). POST 흐름은 항상 null.
+  // PATCH 첫 호출 시 ISO 8601 timestamp set. Web SOT(``web/src/features/onboarding/
+  // healthProfileSchema.ts``)와 *수동 동기* — 22종 변경 SOP 정합.
+  profile_updated_at: string | null;
 }

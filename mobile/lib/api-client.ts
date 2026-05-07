@@ -133,7 +133,32 @@ export interface paths {
         delete?: never;
         options?: never;
         head?: never;
-        patch?: never;
+        /**
+         * Patch Health Profile
+         * @description 프로필 수정 — 6 필드 partial update + ``profile_updated_at`` set.
+         *
+         *     Story 1.5 ``POST /me/profile``(*최초 입력*)과 *별 endpoint*. 본 endpoint는
+         *     *재방문 수정* 흐름 — ``profile_completed_at`` 미터치(invariant 보존), ``onboarded_at``
+         *     미터치(Story 1.6 invariant). ``profile_updated_at``만 set(0016 마이그레이션 컬럼).
+         *
+         *     흐름:
+         *     1) Pydantic 1차 게이트(at-least-one + range + 22종 + weight precision).
+         *     2) ``model_dump(exclude_unset=True)`` — *명시 송신* 필드만 처리. None 명시 송신은
+         *        *해당 컬럼 NULL set*(REST PATCH 표준 + 6 필드 모두 *원래 nullable*이라 의미 일관).
+         *     3) ``UPDATE ... RETURNING`` race-free — Story 1.5 SOT 패턴(``populate_existing=True``
+         *        expired 객체 lazy-load 회피, commit 전 응답 build).
+         *     4) ``profile_updated_at = func.now()`` set + ``updated_at = func.now()`` bump. DB-side
+         *        single 시계.
+         *
+         *     ``users.profile.patched`` structlog event(별 이벤트명 — POST는 ``users.profile.updated``):
+         *     NFR-S5 정합 — ``user_id`` ``u_{8char}`` 마스킹 + ``keys_set`` only(*값* 본문 X).
+         *
+         *     LLM cache invalidate: ``_build_profile_hash``(Story 3.6/4.4 SOT)가 6 필드 모두
+         *     sha256 body에 포함 → PATCH 후 다음 분석 자동 cache miss → 새 LLM 호출.
+         *     Redis profile cache(architecture.md:296 ``cache:user:{user_id}:profile``)는
+         *     *현 프로젝트 미구현* — Story 8.4 polish forward.
+         */
+        patch: operations["patch_health_profile_v1_users_me_profile_patch"];
         trace?: never;
     };
     "/v1/users/me/macro_goal": {
@@ -804,11 +829,41 @@ export interface components {
             detail?: components["schemas"]["ValidationError"][];
         };
         /**
+         * HealthProfilePatchRequest
+         * @description ``PATCH /v1/users/me/profile`` body — 6 필드 partial + at-least-one 가드.
+         *
+         *     Story 1.5 ``HealthProfileSubmitRequest``(POST 6 필드 required full-replace)와 *별
+         *     모델*. 본 모델은 6 필드 모두 Optional + ``model_fields_set`` 기반 at-least-one
+         *     + None 명시 송신은 *해당 컬럼 NULL set*(REST PATCH 표준 정합 — 6 필드 모두
+         *     *원래 nullable*이라 *부재*와 *명시 null* 동작 일관 가능).
+         *
+         *     Story 4.4 ``MacroGoalPatchRequest`` SOT 패턴 정합 — at-least-one 가드는 *명시
+         *     송신* 기준(``model_fields_set``)으로, 빈 body ``{}`` 만 거부(6 필드 모두 None
+         *     default + 빈 body는 ``model_fields_set``이 빈 set).
+         */
+        HealthProfilePatchRequest: {
+            /** Age */
+            age?: number | null;
+            /** Weight Kg */
+            weight_kg?: number | null;
+            /** Height Cm */
+            height_cm?: number | null;
+            /** Activity Level */
+            activity_level?: ("sedentary" | "light" | "moderate" | "active" | "very_active") | null;
+            /** Health Goal */
+            health_goal?: ("weight_loss" | "muscle_gain" | "maintenance" | "diabetes_management") | null;
+            /** Allergies */
+            allergies?: string[] | null;
+        };
+        /**
          * HealthProfileResponse
-         * @description ``POST/GET /v1/users/me/profile`` 응답 — 7 필드.
+         * @description ``POST/GET/PATCH /v1/users/me/profile`` 응답 — 8 필드.
          *
          *     ``allergies``는 NULL → ``[]`` 빈 배열로 응답(클라이언트 분기 단순화).
          *     ``weight_kg``는 DB ``Decimal`` → JSON wire format ``float`` 직렬화.
+         *
+         *     Story 5.1 — ``profile_updated_at`` 필드 추가(8번째). PATCH 호출 전까지는 NULL,
+         *     PATCH 첫 호출 시 set. POST는 본 필드 미터치(``profile_completed_at`` SOT만 set).
          */
         HealthProfileResponse: {
             /** Age */
@@ -825,6 +880,8 @@ export interface components {
             allergies: string[];
             /** Profile Completed At */
             profile_completed_at: string | null;
+            /** Profile Updated At */
+            profile_updated_at: string | null;
         };
         /**
          * HealthProfileSubmitRequest
@@ -1567,6 +1624,43 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["HealthProfileSubmitRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HealthProfileResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    patch_health_profile_v1_users_me_profile_patch: {
+        parameters: {
+            query?: never;
+            header?: {
+                Authorization?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                bn_access?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HealthProfilePatchRequest"];
             };
         };
         responses: {

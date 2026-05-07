@@ -2,6 +2,11 @@
 
 리뷰·구현 과정에서 식별되었으나 다음 스토리·시점으로 미룬 항목 모음.
 
+## Deferred from: code review of 5-1-건강-프로필-수정 (2026-05-07)
+
+- **D1 — `api-client.ts` mobile/web 중복 재발 (DF130)**: `mobile/lib/api-client.ts` + `web/src/lib/api-client.ts` 두 파일이 byte-identical hunk로 PATCH endpoint type을 동시 추가. 본 diff가 중복 면적을 ~200 lines × 2로 확대. 공통 SDK 모듈로 통합 후보. Story 8.4 polish forward — DF130 *active* 잔여로 묶어 일괄 처리.
+- **D2 — `PATCH /me/profile` OpenAPI `responses={400, 403}` 미선언**: 자동 생성된 web/mobile api-client 타입이 실제 RFC 7807 에러 shape(`validation.error` 400 / `consent.basic.missing` 403) 누락. Story 1.5 POST + Story 4.4 PATCH `macro_goal` 등 `users.py` 전반 동일 패턴 — 프로젝트 단위 hygiene. Story 8.4 polish forward에서 `responses={400: dict, 403: dict}` 일괄 선언 + OpenAPI regen.
+
 ## Deferred from: code review of 4-2-apscheduler-nudge-미기록-푸시 (2026-05-06)
 
 - **D1 — push-then-INSERT race window + multi-worker 동시 sweep + shutdown wait=False**: `expo_push.send_nudge` 성공 후 `_record_notification` INSERT *전*에 컨테이너 종료/Postgres connection drop 시 push는 발사됐지만 멱등 row 없음 → 다음 cycle 30분 후 동일 사용자 재발사(중복 알림). multi-worker(uvicorn workers > 1 또는 Railway preview + prod 동시) 시 두 sweep 인스턴스가 동일 사용자를 fetch → push 양쪽 발사 → 한쪽 INSERT만 성공. 1인 8주 단일 노드 정합 — Story 8.5 hardening forward(reservation 패턴: INSERT before send + `INSERT ... ON CONFLICT DO NOTHING RETURNING id` + `apscheduler-postgres` JobStore 또는 cron 외부화).

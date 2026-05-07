@@ -9,6 +9,15 @@ Story 4.1에서 알림 설정 4컬럼(``notifications_enabled`` / ``notification
 (``ck_users_notification_time_kst_format``) 추가. partial UNIQUE index
 ``ux_users_expo_push_token_active``는 alembic 0013에서 생성 — ORM ``Index`` 미선언
 (부분 index는 ORM 레벨에서 metadata 동기화 X — alembic SOT만 유지).
+
+Story 5.1에서 ``profile_updated_at`` 컬럼 추가(0016 마이그레이션). 3 timestamp
+컬럼 의미 분리(SOT):
+- ``profile_completed_at`` — *최초 온보딩 완료 시점*. POST /me/profile 시 set,
+  PATCH /me/profile 시 미터치(invariant — *최초 시점* 보존).
+- ``profile_updated_at`` — *프로필을 명시적으로 마지막 수정한 시점*. PATCH /me/profile
+  시 set. 본 컬럼은 ``POST /me/profile`` 흐름으로는 set X(의미 분리).
+- ``updated_at`` — *행 단위 마지막 변경 시점*. ``onupdate=now()``로 모든 컬럼
+  변경 시 자동 bump (macro_goal/notification/profile 등 모두 포함).
 """
 
 from __future__ import annotations
@@ -108,6 +117,12 @@ class User(Base):
     # 배열 타입 매칭 강제(varchar[] vs text[] type mismatch 회피).
     allergies: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
     profile_completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Story 5.1 — 프로필을 *명시적으로* 마지막 수정한 시점(0016 마이그레이션).
+    # ``PATCH /v1/users/me/profile`` 첫 호출 시점에 set — 그전까지는 NULL. POST 흐름
+    # 으로는 set X(의미 분리, docstring SOT). 회귀 0건: 기존 사용자 row는 NULL default.
+    profile_updated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
 
