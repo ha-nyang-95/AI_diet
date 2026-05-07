@@ -12,7 +12,6 @@
  * - "내보내기 시작" Pressable submit 버튼 + ``isPending`` 시 ``ActivityIndicator``.
  * - 성공 시 OS share sheet이 ``useDataExport`` 안에서 자동 노출.
  */
-import { useQueryClient } from '@tanstack/react-query';
 import { Stack, router } from 'expo-router';
 import { useState } from 'react';
 import {
@@ -34,7 +33,6 @@ import { useAuth } from '@/lib/auth';
 
 export default function DataExportScreen() {
   const { consentStatus } = useAuth();
-  const _queryClient = useQueryClient();
   const [format, setFormat] = useState<DataExportFormat>('json');
   const mutation = useDataExport();
 
@@ -51,6 +49,9 @@ export default function DataExportScreen() {
   const handleSubmit = async () => {
     try {
       await mutation.mutateAsync({ format });
+      // AC4 spec literal — ``Sharing.shareAsync``가 OS share sheet을 띄운 뒤에도
+      // 사용자가 share를 cancel/skip할 수 있으므로 fallback UX로 명시 안내.
+      Alert.alert('내보내기 완료', '공유 메뉴에서 저장 위치를 선택하세요.');
     } catch (err) {
       const message =
         err instanceof DataExportError && err.detail
@@ -61,9 +62,6 @@ export default function DataExportScreen() {
   };
 
   const isSubmitting = mutation.isPending;
-
-  // unused queryClient placeholder — 일관성을 위해 import 유지(Story 5.2 정합) 후 _ prefix.
-  void _queryClient;
 
   return (
     <ScrollView contentContainerStyle={styles.container}>

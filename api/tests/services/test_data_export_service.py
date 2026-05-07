@@ -372,6 +372,26 @@ def test_csv_escape_quote_doubles_internal_quote() -> None:
     assert _csv_escape('he said "hi"') == '"he said ""hi"""'
 
 
+def test_csv_escape_formula_injection_prefixes_apostrophe() -> None:
+    """CWE-1236 — Excel/Sheets formula trigger 첫 글자(``=``/``+``/``-``/``@``/``\\t``/``\\r``)는
+    single-quote ``'`` prefix로 무력화. CR P1 회귀 가드.
+    """
+    # 클래식 attack — HYPERLINK + cmd 주입 패턴.
+    payload = '=HYPERLINK("http://evil/", "click")'
+    escaped = _csv_escape(payload)
+    # ``'`` prefix → 셀 시작이 ``=``로 인식되지 않음. ``,``/``"`` 포함이라 quote-wrap도 적용.
+    assert escaped.startswith("\"'=")
+    # 모든 6 trigger 프리픽스 무력화 — round-robin.
+    for trigger in ("=cmd", "+SUM(1)", "-2+3", "@func", "\tinj", "\rinj"):
+        out = _csv_escape(trigger)
+        # 첫 글자가 ``'``로 변환됐는지(quote-wrap 여부와 무관하게).
+        # quote-wrap 적용 시 첫 글자는 ``"``, 그 다음 ``'``. 미적용 시 첫 글자가 ``'``.
+        assert out[0] == "'" or out.startswith("\"'"), f"trigger={trigger!r} → {out!r}"
+    # 무해한 prefix는 pass-through.
+    assert _csv_escape("정상 텍스트") == "정상 텍스트"
+    assert _csv_escape("123 g") == "123 g"
+
+
 def test_format_meal_date_kst_naive_treated_as_utc() -> None:
     """naive datetime은 UTC 가정(Postgres TZ-aware 컬럼이 UTC 저장 정합)."""
     # naive 15:00 → UTC 15:00 → KST 24:00 = 익일 00:00.

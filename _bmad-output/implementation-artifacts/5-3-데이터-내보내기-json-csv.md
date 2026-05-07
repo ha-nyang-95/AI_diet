@@ -1,6 +1,6 @@
 # Story 5.3: 데이터 내보내기 (JSON/CSV)
 
-Status: review
+Status: done
 
 <!-- Validation: Epic 5 마지막 스토리. Story 5.2 baseline(`DELETE /v1/users/me` + `app/workers/soft_delete_purge.py`의 `_build_user_dump_payload` JSON shape SOT + `_serialize_value` Decimal/UUID/datetime 변환 helper + R2 dump bucket 운영 SOP) + Story 5.1 baseline(`PATCH /me/profile` + 3 timestamp 의미 분리 + settings/profile 페이지 footer 진입점 + react-hook-form/zod 폼 SOT) + Story 4.3 baseline(`reports.py` `Depends(require_basic_consents)` + StreamingResponse 패턴 부재 — sse-starlette만 사용 중이라 본 스토리가 *최초 fastapi.responses.StreamingResponse 사용처*) 위에 *PIPA Art.35 정보주체 권리(데이터 이전·열람권) — JSON/CSV 통합 다운로드 endpoint*를 신설. epics.md:809-823 정합 — `GET /v1/users/me/export?format=json|csv` 신규(`Depends(current_user)` 단독 + audit 미기록) + `app/services/data_export_service.py` 신규(JSON/CSV 양 형식 SOT — Story 5.2 worker dump JSON shape를 *서비스 레이어 SOT*로 정상화하고 worker가 이를 호출하는 방향 — Story 5.2 dev notes의 *DF136 forward-hook* 즉시 해소) + 모바일 `(tabs)/settings/data-export.tsx` + Web `/account/export/page.tsx` 신규. 모바일은 `expo-file-system` + `expo-sharing` 2 신규 의존성(Expo SDK 54 baseline 호환) 도입 — 실 파일 다운로드는 `FileSystem.documentDirectory`에 write 후 OS share sheet으로 노출(Files/Drive/메일 등 사용자 선택). Web은 `Blob` + `URL.createObjectURL` + 임시 anchor click 표준 패턴(추가 의존성 0). 대용량 보호는 `StreamingResponse` + chunked iterator(JSON `ijson`-style 연속 dump X — *전체 payload 단일 dict + json.dumps generator chunking* MVP 정합. CSV는 row generator로 자연 streaming). 일반 사용자 자기 권리 행사이므로 audit 미기록 + `require_basic_consents` 미적용(Art.35 정합, Story 5.2 정합). -->
 
@@ -568,3 +568,39 @@ Frontend (web/):
 
 - 2026-05-07: DS 시작(Amelia) — sprint-status `5-3-데이터-내보내기-json-csv: ready-for-dev → in-progress`.
 - 2026-05-07: DS 완료(Amelia) — pytest 1074 passed/11 skipped/0 failed + coverage 85.09% + ruff/format/mypy/tsc/lint 0 errors. sprint-status `5-3-데이터-내보내기-json-csv: in-progress → review`. Branch `story/5.3-data-export`.
+- 2026-05-08: CR 완료(Amelia) — 10 patch 적용(MUST 5 + SHOULD 5) + 3 defer(deferred-work.md) + 30+ dismiss. CSV formula injection 가드 + race fallback UTC + `contextlib.suppress(Exception)` 제거 + N+1 threshold tighten ≤6 + Literal SOT 엄격 검증 + Mobile 성공 Alert + HHMMSS suffix + BOM defensive prepend + dead code 제거 + Web setTimeout 1.5s. pytest 1075 passed/11 skipped/0 failed + coverage 85.11% + ruff/format/mypy/tsc/lint 0 errors. sprint-status `5-3-데이터-내보내기-json-csv: review → done` + Epic 5 마지막 스토리 클로저(`epic-5: in-progress → done`).
+
+### Review Findings
+
+병렬 3-layer adversarial review (Blind Hunter / Edge Case Hunter / Acceptance Auditor — 2026-05-08).
+원본 산출물: `.review-5-3-blind-hunter.md` / `.review-5-3-edge-case-hunter.json` / `.review-5-3-acceptance-auditor.md`.
+Triage 결과: **10 patch · 3 defer · 30+ dismiss · 0 decision-needed**.
+
+**Patch — MUST (security/AC literal/silent failure)**
+
+- [x] [Review][Patch] CSV formula injection — `raw_text` 시작이 `=`/`+`/`-`/`@`/`\t`/`\r`이면 single-quote `'` prefix 처리 [api/app/services/data_export_service.py:182-191] — 적용 완료(`_CSV_FORMULA_TRIGGERS` frozenset + 회귀 테스트 1건 신설).
+- [x] [Review][Patch] race fallback `datetime.now()` → `datetime.now(UTC)` (AC1 SOT 정합 — `+00:00` suffix) [api/app/api/v1/users.py:530] — 적용 완료.
+- [x] [Review][Patch] `contextlib.suppress(Exception)` logger 래핑 제거 — 진단 hide 부작용, structlog는 정상적으로 raise 안 함 [api/app/api/v1/users.py:569-575] — 적용 완료(`contextlib` import는 다른 endpoint에서 사용 중이라 유지).
+- [x] [Review][Patch] N+1 threshold `cursor_count <= 8` → `<= 6` (test docstring 6 vs assertion 8 불일치 정상화) [api/tests/api/v1/test_users_export.py:340] — 적용 완료.
+- [x] [Review][Patch] Mobile 성공 시 `Alert.alert("내보내기 완료. 공유 메뉴에서 저장 위치를 선택하세요.")` 추가 — AC4 spec literal [mobile/app/(tabs)/settings/data-export.tsx:51-61] — 적용 완료.
+
+**Patch — SHOULD (real edge cases / dead code / test rigor)**
+
+- [x] [Review][Patch] Web `setTimeout(revokeObjectURL, 0)` → `1500ms` — Safari 환경에서 OS save dialog 진입 전 revoke 경합 [web/src/features/settings/DataExportForm.tsx:128] — 적용 완료.
+- [x] [Review][Patch] Mobile filename `HHMMSS` suffix 추가 — 같은 KST 일자 + format 재export 시 silent overwrite 회피 [mobile/features/settings/useDataExport.ts:74] — 적용 완료(`_kstTimeStamp` helper 추가).
+- [x] [Review][Patch] Mobile CSV body BOM 방어적 prepend — RN/Hermes 일부 runtime의 `response.text()` BOM strip 가능성 [mobile/features/settings/useDataExport.ts:70-82] — 적용 완료(`charCodeAt(0) !== 0xfeff` 가드).
+- [x] [Review][Patch] Mobile `_queryClient` 미사용 dead code 제거 — `useQueryClient` import + capture + `void` 3 lines [mobile/app/(tabs)/settings/data-export.tsx:15,37,66] — 적용 완료.
+- [x] [Review][Patch] `test_export_format_query_param_is_literal_json_csv` 약한 substring 검증 → 정확한 `Literal["json","csv"]` 인자 검증으로 tighten [api/tests/api/v1/test_users_export.py:349-372] — 적용 완료(`set(literal_args) == {"json","csv"}`).
+
+**Defer (실 작업이지만 본 스토리 범위 외)**
+
+- [x] [Review][Defer] OpenAPI schema 4xx/5xx error response 누락 — Story 5.2 DF133 forward-defer 동일 (api-client에 401/400/500 shape 부재)
+- [x] [Review][Defer] api-client `cookie: { bn_access?: ... }` 타입 파라미터 — generator artifact, 모든 endpoint 공통 (web/mobile lib/api-client.ts)
+- [x] [Review][Defer] JSON path 진정한 low-memory streaming(`ijson`/`orjson`) — spec 명시 OUT(YAGNI MVP scale 외 — 본 스토리 line 50)와 동일
+
+**Dismiss (대표 항목 — 30+ 건)**
+
+- 라이브러리/방어 over-engineering: `_format_meal_date_kst` ValueError 가드(DB `TIMESTAMPTZ NOT NULL` invariant), `_format_macros` 0g 표기(DB `numeric NOT NULL` invariant), CSV `csv.writer` 모듈 교체(spec/`_csv_escape` 충분), `_csv_escape` ` `/` ` 처리, GET endpoint REPEATABLE READ wrap(MVP scale + READ COMMITTED 표준).
+- Spec/baseline self-resolved: 모바일 filename mask 미포함(spec 명시 인정), web `<a>` vs `<Link>`(Story 5.2 baseline `<a>` 패턴 일관성 우선), endpoint 23-line docstring(non-blocking), race fallback dict shape(spec line 59 자체 모호 — current impl 합리), 모바일 cancel "뒤로" 추가 button(non-blocking 추가 UX).
+- 알려진 baseline 패턴: `format` 빌트인 shadow(이미 `noqa: A002`), `__all__` underscore export(naming convention only — lint 침묵), `format=JSON` 대소문자(REST 표준), 모바일 path concat trailing slash(Expo doc invariant), 모바일 `EncodingType.UTF8`(Expo SDK 54 stable), 모바일 Pressable debounce(`disabled` 가드).
+- Test/log 미세 개선: `users.export.requested` "requested vs delivered" split(과잉 로깅), race fallback `meal_count=0` 마커(speculative), worker dump fixture size(R2 lifecycle 보장).

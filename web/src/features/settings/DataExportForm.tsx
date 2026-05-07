@@ -124,8 +124,10 @@ export function DataExportForm() {
       document.body.appendChild(anchor);
       anchor.click();
       document.body.removeChild(anchor);
-      // brower memory 회수 — anchor click이 OS save dialog trigger 후에만 revoke.
-      setTimeout(() => URL.revokeObjectURL(url), 0);
+      // 브라우저 메모리 회수 — Safari/일부 모바일 환경에서 ``anchor.click()`` 직후 OS
+      // save dialog가 mount되기 전에 revoke되면 다운로드가 0 byte로 잘림. 1.5s 지연으로
+      // dialog 진입 보장(이후엔 OS가 blob 데이터를 own).
+      setTimeout(() => URL.revokeObjectURL(url), 1500);
       setSuccess("다운로드가 시작되었습니다.");
     } catch {
       setError("네트워크 오류로 다운로드에 실패했습니다. 잠시 후 다시 시도해 주세요.");

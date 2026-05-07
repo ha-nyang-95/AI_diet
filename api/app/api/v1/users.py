@@ -20,7 +20,7 @@ from __future__ import annotations
 import contextlib
 import json
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated, Any, Literal, Self
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
@@ -527,7 +527,9 @@ async def export_user_data(
         # 동시 발생 시 이론적 미진입. 빈 dict로 graceful 분기(401 X).
         payload = {
             "user_id": str(user.id),
-            "exported_at": datetime.now().isoformat(),
+            # AC1 SOT — service의 happy-path도 ``datetime.now(UTC).isoformat()``. fallback도
+            # 동일 timezone-aware ISO 형식 유지(``+00:00`` suffix 보존).
+            "exported_at": datetime.now(UTC).isoformat(),
             "schema_version": "1.0",
             "user": None,
             "consents": [],
@@ -566,13 +568,12 @@ async def export_user_data(
         },
     )
 
-    with contextlib.suppress(Exception):
-        logger.info(
-            "users.export.requested",
-            user_id=masked,
-            format=format,
-            meal_count=len(payload.get("meals") or []),
-        )
+    logger.info(
+        "users.export.requested",
+        user_id=masked,
+        format=format,
+        meal_count=len(payload.get("meals") or []),
+    )
 
     return response
 

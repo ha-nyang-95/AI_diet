@@ -179,12 +179,24 @@ def serialize_payload_to_json_bytes(payload: dict[str, Any]) -> bytes:
     return json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
 
 
-def _csv_escape(value: str) -> str:
-    """RFC 4180 정합 escape — ``,``/``"``/``\\n``/``\\r`` 포함 시 ``"``로 감싸고
-    내부 ``"``는 ``""``로 escape.
+# CSV formula injection 가드 — Excel/Google Sheets/LibreOffice가 첫 글자 ``=``/``+``/
+# ``-``/``@``/``\t``/``\r``로 시작하는 셀을 *수식*으로 해석하는 클래식 CVE 패턴(CWE-1236).
+# ``raw_text`` 등 사용자 입력이 직접 셀에 흐르므로 single-quote ``'`` prefix로 무력화 —
+# OWASP 권고 mitigation. 복호화 시 사용자가 ``'`` 1글자만 인지(외부 도구에서 visible).
+_CSV_FORMULA_TRIGGERS: frozenset[str] = frozenset({"=", "+", "-", "@", "\t", "\r"})
 
-    MS Excel + Google Sheets 호환 — 외부 도구 import 시점에 셀 분리/줄바꿈 안전.
+
+def _csv_escape(value: str) -> str:
+    """RFC 4180 정합 escape + Excel formula injection 가드.
+
+    1. 셀 첫 글자가 ``=``/``+``/``-``/``@``/``\\t``/``\\r``이면 ``'`` prefix(formula 무력화).
+    2. ``,``/``"``/``\\n``/``\\r`` 포함 시 ``"``로 감싸고 내부 ``"``는 ``""`` escape.
+
+    MS Excel + Google Sheets 호환 — 외부 도구 import 시점에 셀 분리/줄바꿈 안전 +
+    악의 사용자 ``raw_text``로 인한 수식 실행 차단(CWE-1236, OWASP CSV injection).
     """
+    if value and value[0] in _CSV_FORMULA_TRIGGERS:
+        value = "'" + value
     if any(ch in value for ch in (",", '"', "\n", "\r")):
         escaped = value.replace('"', '""')
         return f'"{escaped}"'

@@ -50,6 +50,20 @@ function _kstDateString(): string {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Seoul' }).format(new Date());
 }
 
+/** KST ``HHmmss`` — 같은 일자 + format 재export 시 silent overwrite 회피용 suffix.
+ *  ``balancenote_export_2026-05-08_143205.json`` 형태로 1초 단위 unique. */
+function _kstTimeStamp(): string {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Seoul',
+    hour12: false,
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).formatToParts(new Date());
+  const get = (type: string): string => parts.find((p) => p.type === type)?.value ?? '00';
+  return `${get('hour')}${get('minute')}${get('second')}`;
+}
+
 async function exportUserData({ format }: DataExportRequest): Promise<void> {
   const response = await authFetch(`/v1/users/me/export?format=${format}`, {
     method: 'GET',
@@ -67,11 +81,17 @@ async function exportUserData({ format }: DataExportRequest): Promise<void> {
     throw new DataExportError(response.status, code, detail);
   }
 
-  const body = await response.text();
+  let body = await response.text();
 
   // 모바일 RN의 Blob 호환성 회피 — string body로 통일(JSON/CSV 둘 다 텍스트 처리).
-  // CSV의 BOM은 server 측 첫 chunk에 prefix되어 있어 자동 보존.
-  const filename = `balancenote_export_${_kstDateString()}.${format}`;
+  // CSV의 BOM은 server 측 첫 chunk에 prefix됨. 단 일부 RN/Hermes 런타임의 ``response.text()``
+  // TextDecoder가 leading ``﻿``를 strip할 수 있어 → 누락 시 client에서 prepend 복원
+  // (Excel Windows 한국어 헤더 자동 인식 보장).
+  if (format === 'csv' && body.charCodeAt(0) !== 0xfeff) {
+    body = '﻿' + body;
+  }
+  // ``HHmmss`` suffix — 같은 일자 + format 재export 시 silent overwrite 회피.
+  const filename = `balancenote_export_${_kstDateString()}_${_kstTimeStamp()}.${format}`;
 
   // documentDirectory는 SDK 54 Legacy API path SOT — *next* API는 polish forward.
   const dir = FileSystem.documentDirectory;

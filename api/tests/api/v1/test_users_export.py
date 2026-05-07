@@ -337,7 +337,10 @@ async def test_export_n_plus_one_guard_meals_with_analyses(
     parsed = response.json()
     assert len(parsed["meals"]) == 5
     # 5 meals × 5 analyses N+1이면 cursor count ≥ 10 — selectinload SOT가 단일 batch로 묶음.
-    assert cursor_count <= 8, (
+    # 상한 6 = 4 entity SELECT(current_user / collect-user / consents / notifications) +
+    # 1 meals(with selectinload) + 1 meal_analyses(selectinload 별 batch). 추가 1건이라도
+    # 발생하면 즉시 N+1 회귀로 가드.
+    assert cursor_count <= 6, (
         f"N+1 회귀 의심 — cursor.execute={cursor_count}회. "
         f"selectinload(Meal.analysis) SOT(Story 4.3) 점검 필요."
     )
@@ -347,26 +350,24 @@ async def test_export_n_plus_one_guard_meals_with_analyses(
 
 
 def test_export_format_query_param_is_literal_json_csv() -> None:
-    """``format`` Query는 ``Literal["json","csv"]`` SOT — 신규 format 추가 시 명시 가드 필요."""
-    sig = inspect.signature(users_router.export_user_data)
-    fmt_param = sig.parameters["format"]
+    """``format`` Query는 ``Literal["json","csv"]`` SOT — 신규 format 추가 시 명시 가드.
+
+    엄격 검증: ``Literal`` 인자 set이 정확히 ``{"json","csv"}``. 신규 format 추가
+    (예: ``Literal["json","csv","xml"]``)는 본 테스트로 즉시 fail — 의도적 spec 갱신
+    트리거 강제.
+    """
     type_hints = typing.get_type_hints(users_router.export_user_data, include_extras=True)
     annotation = type_hints["format"]
-    # Literal[...] 인자 추출 — Annotated의 first arg 또는 직접.
-    args = typing.get_args(annotation)
-    # Literal 타입은 ``__args__`` 또는 ``typing.get_args``로 ('json','csv').
-    if args and isinstance(args[0], type) is False:
-        # Annotated[Literal[...], Query(...)] 또는 Literal[...] 자체.
-        literal_args = typing.get_args(args[0]) if args else ()
-        if not literal_args:
-            literal_args = args
+    # Annotated[Literal[...], Query(...)] 또는 Literal[...] 직접. ``get_origin``으로 분기 —
+    # Annotated의 origin은 base type(Literal), Literal의 origin은 ``typing.Literal``. 단순
+    # 안전 판별: ``get_args(annotation)``의 first arg가 type-like(Literal special form)이면
+    # Annotated 래핑, 아니면 Literal 직접.
+    annotated_args = typing.get_args(annotation)
+    if annotated_args and typing.get_origin(annotated_args[0]) is typing.Literal:
+        literal_args = typing.get_args(annotated_args[0])
     else:
-        literal_args = args
-    # 검증 — Literal 인자가 정확히 ('json','csv').
-    flat = tuple(typing.get_args(annotation)) or ()
-    # 최소한 'json'과 'csv'가 어디든 언급되어야 함 — 단순 invariant 가드.
-    repr_str = str(annotation)
-    assert "'json'" in repr_str and "'csv'" in repr_str, (
-        f"format param Literal SOT 회귀 — annotation={annotation!r}"
+        literal_args = annotated_args
+    assert set(literal_args) == {"json", "csv"}, (
+        f"format param Literal SOT 회귀 — 정확히 {{'json','csv'}}만 허용해야 합니다. "
+        f"실제={literal_args!r}, full annotation={annotation!r}"
     )
-    _ = (fmt_param, flat)  # silence unused
