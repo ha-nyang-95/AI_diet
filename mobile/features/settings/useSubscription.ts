@@ -48,7 +48,15 @@ export class SubscriptionFetchError extends Error {
   }
 }
 
-export const SUBSCRIPTION_QUERY_KEY = ['payments', 'subscription'] as const;
+// CR P14 — userId를 queryKey에 포함해 계정 전환 시 직전 사용자 cache 누출 차단.
+// 호출자는 ``getSubscriptionQueryKey(user.id)``로 안정 key를 얻는다.
+export const SUBSCRIPTION_QUERY_KEY_PREFIX = ['payments', 'subscription'] as const;
+export function getSubscriptionQueryKey(userId: string): readonly [string, string, string] {
+  return [...SUBSCRIPTION_QUERY_KEY_PREFIX, userId] as const;
+}
+
+// 하위 호환 — 본 상수 import한 기존 코드(있다면)는 prefix 의미로 동작.
+export const SUBSCRIPTION_QUERY_KEY = SUBSCRIPTION_QUERY_KEY_PREFIX;
 
 const WEB_SUBSCRIBE_PATH = '/account/subscribe';
 const WEB_BASE_URL_FALLBACK = 'https://balancenote.app';
@@ -93,15 +101,18 @@ async function fetchActiveSubscription(): Promise<SubscriptionDto | null> {
  * - 404 → ``null``.
  * - 401/403/5xx → ``SubscriptionFetchError`` (caller가 ``error`` 분기 처리).
  *
- * cache key ``["payments", "subscription"]`` — Story 6.2 cancel 흐름이 invalidate.
+ * CR P14 — ``userId``를 queryKey에 포함해 계정 전환 시 cache leak 차단(staleTime 30s
+ * 동안 직전 사용자 구독이 표시되는 race 회피).
+ *
+ * cache key ``["payments", "subscription", userId]`` — Story 6.2 cancel 흐름이 invalidate.
  */
-export function useSubscriptionQuery(): UseQueryResult<
-  SubscriptionDto | null,
-  SubscriptionFetchError
-> {
+export function useSubscriptionQuery(
+  userId: string,
+): UseQueryResult<SubscriptionDto | null, SubscriptionFetchError> {
   return useQuery({
-    queryKey: SUBSCRIPTION_QUERY_KEY,
+    queryKey: getSubscriptionQueryKey(userId),
     queryFn: fetchActiveSubscription,
     staleTime: 30_000,
+    enabled: userId.length > 0,
   });
 }

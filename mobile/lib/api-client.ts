@@ -683,7 +683,10 @@ export interface paths {
          *     - 400 ``code=payments.amount.invalid`` — ``amount != 9900``.
          *     - 400 ``code=payments.confirm_failed`` — Toss 카드 거절 / 한도 초과.
          *     - 409 ``code=payments.subscription.already_active`` — 기존 active 사용자.
+         *     - 409 ``code=payments.idempotency_key.retry_after_failed`` — 같은 키로 직전 결제가
+         *       실패 audit log된 상태에서 재시도 (CR P1 — 새 ``Idempotency-Key`` 발급 후 재호출).
          *     - 502 ``code=payments.provider.unavailable`` — Toss 5xx + retry 후 실패.
+         *     - 502 ``code=payments.provider.payload_invalid`` — Toss 응답 amount/orderId mismatch.
          *     - 503 ``code=payments.toss.secret_key_missing`` — fail-fast.
          */
         post: operations["subscribe_v1_payments_subscribe_post"];
@@ -2971,7 +2974,9 @@ export interface operations {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["SubscribeResponse"];
+                };
             };
             /** @description Successful Response */
             201: {
@@ -2989,7 +2994,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Subscription already active */
+            /** @description Subscription already active / previous payment failed (use new Idempotency-Key) */
             409: {
                 headers: {
                     [name: string]: unknown;

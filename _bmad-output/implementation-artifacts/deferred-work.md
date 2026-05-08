@@ -2,6 +2,19 @@
 
 리뷰·구현 과정에서 식별되었으나 다음 스토리·시점으로 미룬 항목 모음.
 
+## Deferred from: code review of 6-1-정기결제-sandbox-신청 (2026-05-08)
+
+- **D1 — Toss `confirm` blind-retry double-charge 위험(production-grade)** [api/app/adapters/toss.py:1450-1509] — tenacity retry on timeout 시 Toss는 이미 결제 처리, 재시도가 `ALREADY_PROCESSED_PAYMENT` 4xx → 사용자 결제됐으나 우리 DB는 failed log. sandbox 단계 허용. **재검토 시점**: prod 진입 전 — `GET /v1/payments/{paymentKey}` confirm-or-query 패턴 또는 Toss-side `Idempotency-Key` 헤더 도입.
+- **D2 — `_mask_payment_payload` shallow — nested PII / non-string `card.number` 미처리** [api/app/adapters/toss.py:1342-1365] — 1-2 nesting level만 가정한 inline 분기. Toss `customer.*` / `cancels[]` / `failure` 하위 PII 키 미마스킹. **재검토 시점**: Story 8.4 audit/masking 강화에서 통합 — 재귀 마스킹 helper로 정리.
+- **D3 — `_insert_failed_payment_log.failure_reason` 미마스킹** [api/app/services/payment_service.py:2438-2463] — Toss 4xx body 메시지가 `str(exc)` 그대로 JSONB raw_payload에 저장. **재검토 시점**: Story 8.4에서 D2와 함께.
+- **D4 — Toss `customerKey = customer-${userId}` raw UUID 노출** [web/src/features/payments/SubscribeForm.tsx:5299] — Toss merchant 대시보드에 raw user UUID 노출. sandbox는 외주 데모용이라 영향 최소, prod 진입 시 issue. **재검토 시점**: prod 진입 전 — opaque hash(예: HMAC-SHA256(`payments:user`, user_id))로 변환.
+- **D5 — soft-deleted user(Story 5.2 grace) subscribe 가능 여부 검증** [api/app/api/v1/payments.py:1700-1740] — `current_user` 의존성이 `deleted_at IS NULL`을 필터하는지 미확인. 이미 필터되어 있으면 dismiss, 아니면 patch. **재검토 시점**: 즉시 verify(다음 세션) — Story 5.2 dependency를 grep으로 확인하고 결과에 따라 close 또는 patch.
+- **D6 — `Cache-Control: no-store` 누락** [api/app/api/v1/payments.py:1700-1740] — 결제 응답이 중간 프록시(CDN/reverse proxy)에 캐싱될 위험. sandbox에선 reverse proxy 없음. **재검토 시점**: prod infra 도입(Cloudflare 등) 시점.
+- **D7 — Toss success URL CSRF — 공격자 controlled `paymentKey`** [web/src/app/(user)/account/subscribe/success/page.tsx:5044-5054] — 공격자가 victim에 `/success?paymentKey=stolen`을 노출시켜 victim 계정으로 confirm 시도 — server-side amount/orderId 검증으로 부분 차단되나 추가 hardening 필요. **재검토 시점**: prod 진입 전 — `localStorage`에 저장된 `orderId`와 query param 비교 검증.
+- **D8 — README test card 번호 verification** [README.md:43] — `4330-1234-1234-1234`/`4330-1234-1234-1235` 등 본 README가 명시한 카드 번호가 현 Toss sandbox 공식 문서와 일치하는지 미확인. **재검토 시점**: 클라이언트 데모 직전 — Toss 문서 cross-check.
+- **D9 — `payment_logs.provider_payment_key` partial UNIQUE가 renew INSERT 차단** [api/app/db/models/payment_log.py:2099-2105] — Story 6.3 webhook이 동일 paymentKey로 renew event_type INSERT 시 UNIQUE 위반. **재검토 시점**: Story 6.3 webhook 구현 시 — composite UNIQUE `(provider, provider_payment_key, event_type)`로 마이그레이션.
+- **D10 — `cancelled-but-not-expired` UX gap — get_subscription 404** [api/app/api/v1/payments.py:1762-1772] — 해지했지만 expires_at 미도래 사용자가 즉시 *구독 없음*으로 보임. **재검토 시점**: Story 6.2 cancel 흐름 구현 시 — grace UX 결정(expires_at > now() AND status='cancelled' 분기 표시).
+
 ## Deferred from: code review of 5-3-데이터-내보내기-json-csv (2026-05-08)
 
 - **D1 — `GET /v1/users/me/export` OpenAPI `responses={400, 401}` 미선언 + 4xx/5xx 타입 부재**: 자동 생성된 web/mobile `api-client.ts`의 `responses` 블록이 200/422만 선언 — 실제로는 401(인증 미통과), 400(`code=validation.error` invalid format), 5xx 가능. Story 5.1 D2와 동일 프로젝트 단위 hygiene 패턴(`users.py` 전반). Story 8.4 polish에서 `responses={400, 401, 5xx}` 일괄 선언 + `pnpm gen:api`로 일괄 재생성.

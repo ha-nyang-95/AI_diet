@@ -12,7 +12,7 @@
  * delete (재진입 시 새 키 — 새 결제 시도). localStorage 미보유 시(직접 URL 접근 등)
  * 헤더 없이 호출 — 첫 신청 흐름.
  */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 
 import { apiFetch } from "@/lib/api-fetch";
@@ -50,8 +50,15 @@ export default function SubscribeSuccessPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [state, setState] = useState<State>({ phase: "loading" });
+  // CR P12 — StrictMode double-mount + searchParams 재참조로 인한 useEffect 중복 진입을
+  // useRef 단일 firing guard로 차단. 1차 호출이 localStorage 키를 삭제한 뒤 2차 호출이
+  // 새 키 없이 재요청해 409로 떨어지는 race 차단.
+  const calledRef = useRef<boolean>(false);
 
   useEffect(() => {
+    if (calledRef.current) return;
+    calledRef.current = true;
+
     const paymentKey = searchParams.get("paymentKey");
     const orderId = searchParams.get("orderId");
     const amountRaw = searchParams.get("amount");
@@ -65,8 +72,11 @@ export default function SubscribeSuccessPage() {
         return;
       }
 
-      const amount = Number(amountRaw);
-      if (Number.isNaN(amount)) {
+      // CR P13 — ``parseInt`` + ``Number.isInteger``로 소수/지수 표기 차단(``9900.5`` /
+      // ``9900e2`` 등이 ``Number()``로는 통과). 서버는 Pydantic int strict로 1차 거절하나
+      // 클라이언트에서 친화적 메시지 노출.
+      const amount = parseInt(amountRaw, 10);
+      if (!Number.isInteger(amount) || String(amount) !== amountRaw.trim()) {
         setState({
           phase: "error",
           message: "결제 금액 정보가 잘못되었습니다.",
@@ -97,7 +107,8 @@ export default function SubscribeSuccessPage() {
 
         if (response.ok) {
           const body = (await response.json()) as SubscribeResponse;
-          // 사용 후 delete — 다음 결제 시도는 새 키.
+          // 사용 후 delete — 다음 결제 시도는 새 키. CR P12 — 응답 수신 후 삭제이므로
+          // useRef guard와 함께 StrictMode race 차단.
           try {
             localStorage.removeItem(SUBSCRIBE_IDEMPOTENCY_STORAGE_KEY);
           } catch {

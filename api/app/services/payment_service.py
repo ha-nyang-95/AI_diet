@@ -47,6 +47,7 @@ from app.core.exceptions import (
     PaymentAmountInvalidError,
     PaymentConfirmFailedError,
     PaymentProviderRejectedError,
+    PaymentRetryAfterFailedError,
     SubscriptionAlreadyActiveError,
 )
 from app.db.models.payment_log import PaymentLog
@@ -64,8 +65,11 @@ MONTHLY_PLAN_PERIOD_DAYS: Final[int] = 30
 
 # CR P3 (Story 2.5 정합) — partial UNIQUE 위반 catch를 인덱스 이름으로 한정. FK/CHECK
 # 위반 등 비-멱등 IntegrityError를 잘못된 replay path로 진입시키지 않기 위함. DB-side
-# 인덱스 이름은 마이그레이션 0019와 동기 — 인덱스 rename 시 본 상수도 갱신 필수.
+# 인덱스 이름은 마이그레이션 0018/0019와 동기 — 인덱스 rename 시 본 상수도 갱신 필수.
 _IDEMPOTENCY_INDEX_NAME: Final[str] = "idx_payment_logs_user_id_idempotency_key_unique"
+# Story 6.1 CR P2 — subscription active partial UNIQUE catch는 ``SubscriptionAlready
+# ActiveError(409)``로 변환(race 진입 케이스). 인덱스 이름은 0018 마이그레이션과 동기.
+_SUBSCRIPTION_ACTIVE_INDEX_NAME: Final[str] = "idx_subscriptions_user_id_active_unique"
 
 
 def _mask_user_id(user_id: uuid.UUID) -> str:
@@ -89,12 +93,17 @@ async def _fetch_active_subscription(
 async def _fetch_payment_log_by_idempotency_key(
     session: AsyncSession, *, user_id: uuid.UUID, idempotency_key: str
 ) -> PaymentLog | None:
-    """``idempotency_key`` 1차 조회 — replay 분기 진입 신호."""
+    """``idempotency_key`` 1차 조회 — replay 분기 진입 신호.
+
+    Story 6.1 CR P1 — ``event_type`` 필터 제거. ``payment_logs.idempotency_key`` partial
+    UNIQUE가 (user_id, idempotency_key) 단일 row만 허용하므로 본 SELECT는 항상 0/1건.
+    호출자가 ``event_type``으로 분기(``subscribe`` → 정상 replay, ``failed`` →
+    ``PaymentRetryAfterFailedError(409)``).
+    """
     result = await session.execute(
         select(PaymentLog).where(
             PaymentLog.user_id == user_id,
             PaymentLog.idempotency_key == idempotency_key,
-            PaymentLog.event_type == "subscribe",
         )
     )
     return result.scalar_one_or_none()
@@ -169,23 +178,36 @@ async def _insert_failed_payment_log(
     amount: int,
     idempotency_key: str | None,
     failure_reason: str,
-) -> None:
-    """결제 실패 시 audit-trail 1건 INSERT — ``subscription_id=NULL`` (구독 row 미생성)."""
-    await session.execute(
-        insert(PaymentLog).values(
-            user_id=user_id,
-            subscription_id=None,
-            event_type="failed",
-            provider="toss",
-            provider_payment_key=payment_key or None,
-            provider_order_id=order_id or None,
-            amount_krw=amount,
-            status="failed",
-            idempotency_key=idempotency_key,
-            raw_payload={"failure_reason": failure_reason},
-            occurred_at=datetime.now(UTC),
+) -> bool:
+    """결제 실패 시 audit-trail 1건 INSERT — ``subscription_id=NULL`` (구독 row 미생성).
+
+    Returns ``True``이면 INSERT 성공, ``False``이면 같은 ``idempotency_key``로 이미 failed
+    log가 존재해 INSERT 차단(CR P1 멱등 invariant — 같은 키 재시도는 추가 row 작성 없이
+    같은 응답 의미론).
+    """
+    try:
+        await session.execute(
+            insert(PaymentLog).values(
+                user_id=user_id,
+                subscription_id=None,
+                event_type="failed",
+                provider="toss",
+                provider_payment_key=payment_key or None,
+                provider_order_id=order_id or None,
+                amount_krw=amount,
+                status="failed",
+                idempotency_key=idempotency_key,
+                raw_payload={"failure_reason": failure_reason},
+                occurred_at=datetime.now(UTC),
+            )
         )
-    )
+    except IntegrityError as exc:
+        # CR P1 — 같은 키로 이미 failed log가 있으면 중복 INSERT 시도 무시(멱등).
+        if idempotency_key is not None and _IDEMPOTENCY_INDEX_NAME in str(exc.orig):
+            await session.rollback()
+            return False
+        raise
+    return True
 
 
 async def _subscribe_idempotent_or_replay(
@@ -213,12 +235,19 @@ async def _subscribe_idempotent_or_replay(
     (``Meal._create_meal_idempotent_or_replay``의 ``MealIdempotencyKeyConflictDeletedError``
     분기는 본 도메인에 없음).
     """
-    # 1차 SELECT — replay 분기 신호.
+    # 1차 SELECT — replay 분기 신호. Story 6.1 CR P1 — failed 이력도 검출 대상.
     if idempotency_key is not None:
         existing_log = await _fetch_payment_log_by_idempotency_key(
             session, user_id=user_id, idempotency_key=idempotency_key
         )
         if existing_log is not None:
+            if existing_log.event_type == "failed":
+                # CR P1 — 직전 결제 실패 audit log가 같은 키로 존재. 같은 키 재시도는
+                # ``payment_logs.idempotency_key`` UNIQUE에 막혀 INSERT 불가 — 사용자에게
+                # 새 키 발급 요청. 클라이언트는 새 ``crypto.randomUUID()``로 재호출.
+                raise PaymentRetryAfterFailedError(
+                    "이전 결제가 실패했습니다 — 새 결제로 다시 시도해 주세요"
+                )
             existing_subscription = await _fetch_subscription_for_log(session, log=existing_log)
             if existing_subscription is None:
                 # subscription_id가 SET NULL 처리됐거나 (FK cascade) — 비정상 상태.
@@ -242,7 +271,7 @@ async def _subscribe_idempotent_or_replay(
         amount=amount,
     )
 
-    # 4차 — 양 row INSERT. INSERT 시점에 idempotency_key UNIQUE 위반 race 차단.
+    # 4차 — 양 row INSERT. INSERT 시점에 partial UNIQUE 충돌 race 차단.
     started_at = datetime.now(UTC)
     try:
         subscription, payment_log = await _insert_subscription_and_payment_log(
@@ -254,9 +283,15 @@ async def _subscribe_idempotent_or_replay(
             started_at=started_at,
         )
     except IntegrityError as exc:
-        # idempotency_key UNIQUE 위반 (race) 만 replay path로 — 다른 INSERT 충돌(active
-        # partial UNIQUE 등)은 그대로 raise.
-        if idempotency_key is not None and _IDEMPOTENCY_INDEX_NAME in str(exc.orig):
+        # CR P2 — 인덱스 이름으로 분기. ``idempotency_key`` UNIQUE는 replay race
+        # 회복(존재하던 row를 재조회). ``subscription`` active UNIQUE는 동시 신청 race
+        # 진입 신호로 ``SubscriptionAlreadyActiveError(409)``. 그 외 IntegrityError(FK/
+        # CHECK 등)는 비정상 상태이므로 그대로 propagate.
+        exc_str = str(exc.orig)
+        if idempotency_key is not None and _IDEMPOTENCY_INDEX_NAME in exc_str:
+            # Race recovery: rollback 후 재조회. 본 함수 진입 시점에 caller transaction
+            # 내 *별도 write*는 없음(라우터의 current_user는 SELECT only) → rollback이
+            # 잃을 caller 작업 없음 (CR EH-7 dismiss).
             await session.rollback()
             replay_log = await _fetch_payment_log_by_idempotency_key(
                 session, user_id=user_id, idempotency_key=idempotency_key
@@ -265,12 +300,31 @@ async def _subscribe_idempotent_or_replay(
                 raise BalanceNoteError(
                     "idempotent replay race resolution failed (no row found after IntegrityError)"
                 ) from None
+            if replay_log.event_type == "failed":
+                # 다른 worker가 같은 키로 failed log INSERT — 같은 응답 의미론.
+                raise PaymentRetryAfterFailedError(
+                    "이전 결제가 실패했습니다 — 새 결제로 다시 시도해 주세요"
+                ) from None
             replay_subscription = await _fetch_subscription_for_log(session, log=replay_log)
             if replay_subscription is None:
                 raise BalanceNoteError(
                     "idempotent replay race: payment_log found but subscription missing"
                 ) from None
             return replay_subscription, replay_log, True
+        if _SUBSCRIPTION_ACTIVE_INDEX_NAME in exc_str:
+            # 동시 2건 subscribe race — 두 worker가 모두 active 가드 SELECT를 통과한 뒤
+            # 두 번째가 partial UNIQUE에 걸린 상황. 9900원이 이미 결제됐을 가능성이 있어
+            # 운영 sentry 신호 명시(refund 수동 처리 hint).
+            await session.rollback()
+            logger.error(
+                "payments.subscribe.subscription_active_race",
+                user_id=_mask_user_id(user_id),
+                payment_key_prefix=payment_key[:8] if payment_key else "",
+                order_id=order_id,
+            )
+            raise SubscriptionAlreadyActiveError(
+                "이미 활성 구독이 있습니다 — 해지 후 다시 신청해 주세요"
+            ) from None
         raise
 
     return subscription, payment_log, False
@@ -333,10 +387,14 @@ async def subscribe(
     except PaymentProviderRejectedError as exc:
         # Toss 카드 거절 — failed payment_log 1건 INSERT (audit-trail) + 사용자 응답
         # 단일 코드(``payments.confirm_failed``)로 변환.
-        # commit 명시 — 라우터가 ``PaymentConfirmFailedError``를 catch하지 않고 글로벌
-        # 핸들러로 propagate하면 ``get_db_session`` dependency가 ``rollback``을 수행해
-        # audit-trail row가 사라진다. 본 INSERT는 *별도 트랜잭션 단위*로 보존 의무.
-        await _insert_failed_payment_log(
+        # ─── CR D1 ratify (2026-05-08) ──────────────────────────────────────────
+        # spec 라인 117-120 commit 책임 분기: *성공 경로*는 라우터 commit. *실패 경로*는
+        # 본 라인의 서비스 commit 의무. 라우터가 ``PaymentConfirmFailedError``를 catch
+        # 하지 않고 글로벌 핸들러로 propagate하면 ``get_db_session`` 의존성이 rollback을
+        # 수행해 audit-trail row가 사라지므로, failed 경로 INSERT는 별도 트랜잭션 단위로
+        # 영속화 의무. (CR P1) 같은 idempotency_key로 이미 failed log가 있으면 INSERT를
+        # 멱등하게 skip(``inserted=False``) — 이 경우 commit 호출은 no-op이므로 안전.
+        inserted = await _insert_failed_payment_log(
             session,
             user_id=user_id,
             payment_key=payment_key,
@@ -345,7 +403,8 @@ async def subscribe(
             idempotency_key=idempotency_key,
             failure_reason=str(exc),
         )
-        await session.commit()
+        if inserted:
+            await session.commit()
         # epics.md:842 *"Sentry 자동 수집"* 정합 — 명시 capture_message로 운영 dashboard
         # alert 신호 (글로벌 핸들러 자동 capture와 별 layer).
         sentry_sdk.capture_message(

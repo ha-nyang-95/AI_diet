@@ -909,6 +909,22 @@ class SubscriptionAlreadyActiveError(PaymentError):
     title: ClassVar[str] = "Subscription already active"
 
 
+class PaymentRetryAfterFailedError(PaymentError):
+    """직전 결제가 *실패*로 audit log된 상태에서 같은 ``Idempotency-Key``로 재시도. 사용자
+    에게는 *"이전 결제가 실패했습니다 — 새 결제로 다시 시도해 주세요"* 안내. 클라이언트는
+    새 ``Idempotency-Key``를 발급해 다시 호출해야 한다.
+
+    근거: ``payment_logs.idempotency_key`` partial UNIQUE는 (user_id, idempotency_key)
+    단일 row만 허용 — 같은 키로 INSERT를 재시도해도 SQL 레벨에서 차단되어 audit-trail
+    중복이 발생하지 않는다. 본 예외는 *애플리케이션 레벨 멱등 의미론*(같은 키 = 같은 결과)을
+    보존하기 위해 이전 실패 결과를 명시적으로 응답하는 역할.
+    """
+
+    status: ClassVar[int] = 409
+    code: ClassVar[str] = "payments.idempotency_key.retry_after_failed"
+    title: ClassVar[str] = "Previous payment failed; use a new Idempotency-Key"
+
+
 class NoActiveSubscriptionError(PaymentError):
     """``GET /v1/payments/subscription`` 활성 구독 0건 — 신청 안 한 사용자 정상 케이스.
     Story 1.x ``MealNotFoundError`` 패턴 정합 (404 + 명확한 code).

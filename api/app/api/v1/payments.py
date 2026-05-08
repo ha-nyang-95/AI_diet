@@ -171,13 +171,22 @@ def _payment_log_to_response(log: PaymentLog) -> PaymentLogResponse:
     status_code=status.HTTP_201_CREATED,
     response_model=SubscribeResponse,
     responses={
-        200: {"description": "Idempotent replay (same Idempotency-Key)"},
+        # CR P7 — replay 200도 ``SubscribeResponse`` body 반환을 OpenAPI에 명시(generated
+        # TS 클라이언트가 200 응답에서도 subscription/payment 필드를 typed로 인식).
+        200: {
+            "description": "Idempotent replay (same Idempotency-Key)",
+            "model": SubscribeResponse,
+        },
         400: {
             "description": (
                 "Validation failed / Idempotency-Key invalid / amount mismatch / payment rejected"
             )
         },
-        409: {"description": "Subscription already active"},
+        409: {
+            "description": (
+                "Subscription already active / previous payment failed (use new Idempotency-Key)"
+            )
+        },
         502: {"description": "Toss provider unavailable / payload invalid"},
         503: {"description": "Toss secret key not configured"},
     },
@@ -199,7 +208,10 @@ async def subscribe(
     - 400 ``code=payments.amount.invalid`` — ``amount != 9900``.
     - 400 ``code=payments.confirm_failed`` — Toss 카드 거절 / 한도 초과.
     - 409 ``code=payments.subscription.already_active`` — 기존 active 사용자.
+    - 409 ``code=payments.idempotency_key.retry_after_failed`` — 같은 키로 직전 결제가
+      실패 audit log된 상태에서 재시도 (CR P1 — 새 ``Idempotency-Key`` 발급 후 재호출).
     - 502 ``code=payments.provider.unavailable`` — Toss 5xx + retry 후 실패.
+    - 502 ``code=payments.provider.payload_invalid`` — Toss 응답 amount/orderId mismatch.
     - 503 ``code=payments.toss.secret_key_missing`` — fail-fast.
     """
     # Story 2.5 패턴 — Idempotency-Key 형식 검증 + 정규화. 빈/공백 헤더는 미송신과 등가.

@@ -44,8 +44,10 @@ function _formatKstDate(iso: string | null): string {
 }
 
 export default function SubscriptionScreen() {
-  const { consentStatus } = useAuth();
-  const query = useSubscriptionQuery();
+  const { consentStatus, user } = useAuth();
+  // CR P14 — userId를 query key에 포함해 계정 전환 cache leak 차단. user 미로딩 시 빈
+  // 문자열 → ``enabled: false``로 fetch skip(useSubscriptionQuery 내부에서 가드).
+  const query = useSubscriptionQuery(user?.id ?? '');
 
   // 진입 가드 ① bootstrap.
   if (consentStatus === null) {

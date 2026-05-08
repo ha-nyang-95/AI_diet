@@ -101,7 +101,8 @@ class TossConfirmResponse(BaseModel):
     order_id: str = Field(alias="orderId")
     # Toss 표준 status — ``DONE``만 success 분기, 그 외는 ``PaymentProviderRejectedError``.
     status: Literal["DONE", "CANCELED", "PARTIAL_CANCELED", "ABORTED"]
-    total_amount: int = Field(alias="totalAmount")
+    # CR P4 — ``strict=True``로 string/float 자동 coerce 차단(보안 — 응답 위변조 방지).
+    total_amount: int = Field(alias="totalAmount", strict=True)
     approved_at: datetime = Field(alias="approvedAt")
     method: str | None = None
     card: dict[str, Any] | None = None
@@ -279,6 +280,28 @@ async def confirm_payment(*, payment_key: str, order_id: str, amount: int) -> To
     # Toss ``status="DONE"`` 외 거절 분기 (HTTP 2xx but 비-DONE 상태).
     if parsed.status != "DONE":
         raise PaymentProviderRejectedError(f"toss_status_not_done: {parsed.status}")
+
+    # CR P3 — Toss 응답 ``totalAmount``/``orderId``가 요청 값과 일치하는지 검증. 응답
+    # 위변조 또는 Toss 버그로 인한 부분 capture / 다른 paymentKey 매핑 차단(보안).
+    if parsed.total_amount != amount:
+        logger.error(
+            "toss.confirm_payment.amount_mismatch",
+            order_id=order_id,
+            requested_amount=amount,
+            response_amount=parsed.total_amount,
+        )
+        raise PaymentProviderPayloadInvalidError(
+            f"toss_amount_mismatch: requested={amount}, response={parsed.total_amount}"
+        )
+    if parsed.order_id != order_id:
+        logger.error(
+            "toss.confirm_payment.order_id_mismatch",
+            requested_order_id=order_id,
+            response_order_id=parsed.order_id,
+        )
+        raise PaymentProviderPayloadInvalidError(
+            f"toss_order_id_mismatch: requested={order_id}, response={parsed.order_id}"
+        )
 
     logger.info(
         "toss.confirm_payment.succeeded",

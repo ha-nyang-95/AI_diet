@@ -29,8 +29,9 @@ import {
 import { apiFetch } from "@/lib/api-fetch";
 
 const PLAN_PRICE_KRW = 9900;
-const TOSS_CLIENT_KEY =
-  process.env.NEXT_PUBLIC_TOSS_CLIENT_KEY ?? "test_ck_DnyRpQWGrN0BKAoJ4BwM8Kwv1M9E";
+// CR P6 — fallback 제거. 환경 변수 미설정 시 fail-closed (위젯 init에서 명시 에러). prod
+// 환경에서 sandbox 키로 silent routing되는 운영 사고 차단.
+const TOSS_CLIENT_KEY = process.env.NEXT_PUBLIC_TOSS_CLIENT_KEY ?? "";
 
 // localStorage key — success 라우트에서 read 후 *delete*. 같은 mount 동안 retry 시
 // 재사용 (Story 2.5 패턴 정합).
@@ -58,8 +59,10 @@ export function SubscribeForm({ userId, customerEmail }: SubscribeFormProps) {
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState<boolean>(false);
-  // 같은 mount 동안 idempotencyKey 불변 — retry 시 재사용 (Story 2.5 패턴).
-  const idempotencyKeyRef = useRef<string>("");
+  // CR P9 — 같은 mount 동안 idempotencyKey 불변(retry 시 재사용 — Story 2.5 패턴).
+  // useEffect 후 세팅 X — 첫 렌더부터 안정 값 보유(StrictMode double-mount + fast click
+  // race 차단).
+  const idempotencyKeyRef = useRef<string>(crypto.randomUUID());
 
   // 1) active 구독 1차 조회 — 200이면 widget 렌더 X + 안내만.
   useEffect(() => {
@@ -71,6 +74,13 @@ export function SubscribeForm({ userId, customerEmail }: SubscribeFormProps) {
         if (response.ok) {
           const body = (await response.json()) as ActiveSubscription;
           setActive(body);
+        } else if (response.status === 401) {
+          // CR P10 — 세션 만료 시 결제 진행 차단 + 로그인 유도.
+          setError("로그인이 만료되었습니다. 다시 로그인 후 결제를 시도해 주세요.");
+          return;
+        } else if (response.status !== 404) {
+          // 404는 *활성 구독 없음* — 정상 진입. 그 외 5xx 등은 결제 차단 안전망.
+          setError(`구독 상태 조회 실패 (${response.status})`);
         }
       } catch {
         // 네트워크 오류는 widget 렌더 진입(낙관적) — 실제 결제 호출 시점에 503으로 노출.
@@ -87,6 +97,11 @@ export function SubscribeForm({ userId, customerEmail }: SubscribeFormProps) {
   useEffect(() => {
     if (loading) return;
     if (active !== null) return; // 활성 구독 — widget 렌더 X.
+    if (TOSS_CLIENT_KEY === "") {
+      // CR P6 — 환경 변수 누락 시 fail-closed.
+      setError("결제 설정 오류가 발생했습니다. 관리자에게 문의해 주세요.");
+      return;
+    }
 
     let cancelled = false;
     void (async () => {
@@ -110,23 +125,16 @@ export function SubscribeForm({ userId, customerEmail }: SubscribeFormProps) {
     };
   }, [loading, active, userId]);
 
-  // 3) idempotencyKey mount 시 1회 생성 + state 보관.
-  useEffect(() => {
-    if (idempotencyKeyRef.current === "") {
-      idempotencyKeyRef.current = crypto.randomUUID();
-    }
-  }, []);
-
   const handleSubscribe = async () => {
     if (widget === null) return;
     setError(null);
     setSubmitting(true);
+    // CR P11 — try/finally로 submitting 상태 복구 보장. ``widget.requestPayment``가
+    // 정상 redirect되면 페이지가 unmount되어 submitting 복구 무관. 팝업 차단/SDK silent
+    // failure로 redirect 미발생 시 submitting=true 영구 stuck 차단.
     try {
       const orderId = crypto.randomUUID();
-      const idempotencyKey =
-        idempotencyKeyRef.current === ""
-          ? crypto.randomUUID()
-          : idempotencyKeyRef.current;
+      const idempotencyKey = idempotencyKeyRef.current;
 
       // localStorage에 저장 — success 라우트에서 read 후 사용.
       try {
@@ -144,9 +152,11 @@ export function SubscribeForm({ userId, customerEmail }: SubscribeFormProps) {
         failUrl: `${baseUrl}/account/subscribe/fail`,
         customerEmail: customerEmail ?? undefined,
       });
-      // Toss 결제 화면이 열리고 브라우저 redirect됨 — 본 함수 이후는 도달 X.
+      // Toss 결제 화면이 열리고 브라우저 redirect됨 — 본 함수 이후는 도달 X(redirect
+      // 시 finally도 실행되지 않음).
     } catch (err) {
       setError(err instanceof Error ? err.message : "결제 요청 실패");
+    } finally {
       setSubmitting(false);
     }
   };
