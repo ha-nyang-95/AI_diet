@@ -152,11 +152,19 @@ def _is_transient_status(status_code: int) -> bool:
 
 
 async def _confirm_payment_once(
-    *, payment_key: str, order_id: str, amount: int, secret_key: str
+    *,
+    payment_key: str,
+    order_id: str,
+    amount: int,
+    secret_key: str,
+    client: httpx.AsyncClient,
 ) -> dict[str, Any]:
     """단일 시도 — tenacity wrapper(``confirm_payment``) 내부에서 호출.
 
     HTTP 응답 분기는 *adapter boundary typed 변환*만 — service 레이어로 propagate 의무.
+
+    Gemini Code Assist 봇 review 정합 — ``client``는 ``confirm_payment`` 수준에서 한 번만
+    생성, 본 함수에 인자로 전달. retry 시도마다 connection pool / TLS handshake 재사용.
     """
     headers = {
         "Authorization": _build_basic_auth_header(secret_key),
@@ -169,12 +177,11 @@ async def _confirm_payment_once(
     }
 
     started = httpx_perf_counter()
-    async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, base_url=TOSS_API_BASE_URL) as client:
-        try:
-            response = await client.post(TOSS_CONFIRM_PATH, headers=headers, json=payload)
-        except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError) as exc:
-            # transient — tenacity retry 진입 신호.
-            raise PaymentProviderUnavailableError(f"toss_network_error: {exc!r}") from exc
+    try:
+        response = await client.post(TOSS_CONFIRM_PATH, headers=headers, json=payload)
+    except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError) as exc:
+        # transient — tenacity retry 진입 신호.
+        raise PaymentProviderUnavailableError(f"toss_network_error: {exc!r}") from exc
 
     latency_ms = int((httpx_perf_counter() - started) * 1000)
 
@@ -252,22 +259,26 @@ async def confirm_payment(*, payment_key: str, order_id: str, amount: int) -> To
     )
 
     # tenacity AsyncRetrying — 3회 backoff(1s/2s/4s), transient만 retry.
+    # ``httpx.AsyncClient``는 retry 루프 외부에서 한 번 생성 — 재시도 시 connection pool
+    # / TLS handshake 재사용(Gemini Code Assist 봇 review 정합).
     raw_body: dict[str, Any] | None = None
-    async for attempt in AsyncRetrying(
-        stop=stop_after_attempt(_RETRY_MAX_ATTEMPTS),
-        wait=wait_exponential(
-            multiplier=1, min=_RETRY_MIN_WAIT_SECONDS, max=_RETRY_MAX_WAIT_SECONDS
-        ),
-        retry=retry_if_exception_type(_TRANSIENT_RETRY_TYPES),
-        reraise=True,
-    ):
-        with attempt:
-            raw_body = await _confirm_payment_once(
-                payment_key=payment_key,
-                order_id=order_id,
-                amount=amount,
-                secret_key=secret_key,
-            )
+    async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, base_url=TOSS_API_BASE_URL) as client:
+        async for attempt in AsyncRetrying(
+            stop=stop_after_attempt(_RETRY_MAX_ATTEMPTS),
+            wait=wait_exponential(
+                multiplier=1, min=_RETRY_MIN_WAIT_SECONDS, max=_RETRY_MAX_WAIT_SECONDS
+            ),
+            retry=retry_if_exception_type(_TRANSIENT_RETRY_TYPES),
+            reraise=True,
+        ):
+            with attempt:
+                raw_body = await _confirm_payment_once(
+                    payment_key=payment_key,
+                    order_id=order_id,
+                    amount=amount,
+                    secret_key=secret_key,
+                    client=client,
+                )
 
     assert raw_body is not None  # tenacity reraise=True invariant
 
