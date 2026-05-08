@@ -126,9 +126,13 @@ async def _truncate_user_tables() -> AsyncIterator[None]:
             # Story 4.2 — notifications 테이블 추가. users.id ON DELETE CASCADE라
             # users TRUNCATE CASCADE로 자동 cascade되지만, 명시 prepend로 가독성 +
             # per-test 격리 강화(이전 test의 멱등 row가 다음 test sweep에 leak 차단).
+            # Story 6.1 — payment_logs / subscriptions 테이블 추가. users.id ON DELETE
+            # CASCADE라 users TRUNCATE CASCADE로 자동 cascade되지만, 명시 prepend로
+            # 가독성 + per-test 격리 강화 (subscriptions partial UNIQUE 잔존 row leak 차단).
             await conn.execute(
                 text(
-                    "TRUNCATE notifications, meal_analyses, meals, consents, "
+                    "TRUNCATE payment_logs, subscriptions, notifications, "
+                    "meal_analyses, meals, consents, "
                     "refresh_tokens, users, knowledge_chunks RESTART IDENTITY CASCADE"
                 )
             )

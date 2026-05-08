@@ -662,6 +662,64 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/payments/subscribe": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Subscribe
+         * @description 정기결제 신청 — Toss API confirm + DB row 작성 (race-free 멱등 처리).
+         *
+         *     ``Idempotency-Key`` 헤더 송신 시 같은 키 재송신은 ``200 OK`` 응답 (RFC 9110
+         *     idempotent retry — resource는 이미 존재). 첫 INSERT는 그대로 ``201 Created``.
+         *
+         *     오류 매핑(RFC 7807 ``application/problem+json``):
+         *     - 400 ``code=payments.idempotency_key.invalid`` — UUID v4 형식 위반.
+         *     - 400 ``code=payments.amount.invalid`` — ``amount != 9900``.
+         *     - 400 ``code=payments.confirm_failed`` — Toss 카드 거절 / 한도 초과.
+         *     - 409 ``code=payments.subscription.already_active`` — 기존 active 사용자.
+         *     - 409 ``code=payments.idempotency_key.retry_after_failed`` — 같은 키로 직전 결제가
+         *       실패 audit log된 상태에서 재시도 (CR P1 — 새 ``Idempotency-Key`` 발급 후 재호출).
+         *     - 502 ``code=payments.provider.unavailable`` — Toss 5xx + retry 후 실패.
+         *     - 502 ``code=payments.provider.payload_invalid`` — Toss 응답 amount/orderId mismatch.
+         *     - 503 ``code=payments.toss.secret_key_missing`` — fail-fast.
+         */
+        post: operations["subscribe_v1_payments_subscribe_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/payments/subscription": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Subscription
+         * @description 자기 active 구독 단일 조회 — PIPA Art.35 정합 (``current_user`` 단독, 동의 게이트 X).
+         *
+         *     오류:
+         *     - 404 ``code=payments.subscription.not_found`` — 활성 구독 0건 (신청 안 한 사용자
+         *       정상 케이스).
+         */
+        get: operations["get_subscription_v1_payments_subscription_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/reports/weekly": {
         parameters: {
             query?: never;
@@ -1340,6 +1398,42 @@ export interface components {
             confidence: number;
         };
         /**
+         * PaymentLogResponse
+         * @description ``payment_logs`` row의 wire shape — ``raw_payload``/``provider_payment_key`` 응답
+         *     미포함 (PII / 머천트 식별자 보호).
+         *
+         *     클라이언트가 영수증 표시에 필요한 *결제 시점 + 금액 + 상태*만 노출.
+         */
+        PaymentLogResponse: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /**
+             * Event Type
+             * @enum {string}
+             */
+            event_type: "subscribe" | "cancel" | "renew" | "failed" | "refund";
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "success" | "failed" | "pending";
+            /** Amount Krw */
+            amount_krw: number;
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            /**
+             * Provider
+             * @enum {string}
+             */
+            provider: "toss" | "stripe";
+        };
+        /**
          * PushTokenRegisterRequest
          * @description device 등록 body — token + platform.
          *
@@ -1369,6 +1463,79 @@ export interface components {
             refresh_token: string;
             /** Expires In Seconds */
             expires_in_seconds: number;
+        };
+        /**
+         * SubscribeRequest
+         * @description ``POST /v1/payments/subscribe`` body — Toss 표준 camelCase alias 정합.
+         *
+         *     클라이언트(Web Toss widget success callback)가 ``paymentKey``/``orderId``/``amount`` 송신.
+         *     서버는 snake_case로 처리. ``model_config.populate_by_name=True``로 양방향 호환.
+         *
+         *     ``extra="forbid"`` — silent unknown field 차단 (Story 1.4/2.x 패턴).
+         */
+        SubscribeRequest: {
+            /** Paymentkey */
+            paymentKey: string;
+            /** Orderid */
+            orderId: string;
+            /** Amount */
+            amount: number;
+        };
+        /**
+         * SubscribeResponse
+         * @description ``POST /v1/payments/subscribe`` 응답 wrapper — subscription + 1차 결제 log.
+         */
+        SubscribeResponse: {
+            subscription: components["schemas"]["SubscriptionResponse"];
+            payment: components["schemas"]["PaymentLogResponse"];
+        };
+        /**
+         * SubscriptionResponse
+         * @description ``subscriptions`` row의 wire shape — ``provider_billing_key`` 응답 미포함
+         *     (Toss billing key는 server-only 보안 정합).
+         */
+        SubscriptionResponse: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /**
+             * User Id
+             * Format: uuid
+             */
+            user_id: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "active" | "cancelled" | "expired";
+            /**
+             * Plan
+             * @constant
+             */
+            plan: "monthly";
+            /** Plan Price Krw */
+            plan_price_krw: number;
+            /**
+             * Started At
+             * Format: date-time
+             */
+            started_at: string;
+            /** Expires At */
+            expires_at: string | null;
+            /** Cancelled At */
+            cancelled_at: string | null;
+            /**
+             * Provider
+             * @enum {string}
+             */
+            provider: "toss" | "stripe";
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
         };
         /** UserMeResponse */
         UserMeResponse: {
@@ -2768,6 +2935,121 @@ export interface operations {
         responses: {
             /** @description Successful Response */
             204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    subscribe_v1_payments_subscribe_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+                Authorization?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                bn_access?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SubscribeRequest"];
+            };
+        };
+        responses: {
+            /** @description Idempotent replay (same Idempotency-Key) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SubscribeResponse"];
+                };
+            };
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SubscribeResponse"];
+                };
+            };
+            /** @description Validation failed / Idempotency-Key invalid / amount mismatch / payment rejected */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Subscription already active / previous payment failed (use new Idempotency-Key) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description Toss provider unavailable / payload invalid */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Toss secret key not configured */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_subscription_v1_payments_subscription_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                Authorization?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                bn_access?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Active subscription found */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SubscriptionResponse"];
+                };
+            };
+            /** @description No active subscription */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

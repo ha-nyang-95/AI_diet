@@ -375,3 +375,46 @@ main 브랜치 자동 배포는 다음을 전제로 한다:
   5. Build hook으로 `alembic upgrade head` 실행
 
 상세는 Story 8.5 (Cloud Migration Hardening Runbook)에서 갱신.
+
+### 5.4 결제 PG 연동 (Toss Payments sandbox)
+
+Story 6.1에서 정기결제 1플랜(월 9,900원) sandbox 흐름을 도입했다 — Toss Payments 단일
+채택(prd.md:925 정합), Stripe는 forward stub만 등재.
+
+#### Toss sandbox 셋업 5단계
+
+1. **Toss Payments 개발자 콘솔 가입** — https://developers.tosspayments.com → 회원가입.
+2. **테스트 키 발급** — 콘솔 *내 개발 정보* 메뉴에서 ``client_key``(``test_ck_...``) +
+   ``secret_key``(``test_sk_...``) 양쪽을 복사한다. prod 키와 sandbox 키는 prefix로
+   구분 — 환경 분리 invariant.
+3. **`.env`에 secret_key 등록** — 루트 `.env`에 `TOSS_SECRET_KEY=<test_sk_...>` 추가.
+   API 컨테이너는 본 키로 `app/adapters/toss.py:confirm_payment`를 호출한다.
+4. **`web/.env.local`에 client_key 등록** — `NEXT_PUBLIC_TOSS_CLIENT_KEY=<test_ck_...>` 추가.
+   Web 클라이언트가 Toss 결제 위젯 SDK를 init할 때 본 키를 사용. ``NEXT_PUBLIC_*`` prefix는
+   클라이언트 번들에 노출됨(client key는 비-secret).
+5. **테스트 카드로 결제 확인** — Toss sandbox 표준 테스트 카드:
+   - 승인: ``4330-1234-1234-1234`` (만료 12/30, CVC 123, 비밀번호 앞 2자리 12)
+   - 잔액부족: ``4330-1234-1234-1235``
+   - 한도초과: ``4330-1234-1234-1236``
+
+#### Stripe 연동 가이드 (Story 6.2/8.5 forward)
+
+Stripe 통합은 후속 스토리 — `app/adapters/stripe.py` 어댑터 + `STRIPE_SECRET_KEY` env
+추가 + Web `@stripe/stripe-js` SDK + checkout session 흐름. Toss와 동일 `payments.py`
+라우터 + `provider` enum 분기로 자연 확장. 본 스토리에서는 `provider="stripe"` ENUM
+값만 등록.
+
+#### PG 본 계약 SOP (외주 인수자 안내)
+
+외주 인수 클라이언트가 자체 PG를 셋업하는 흐름:
+
+1. Toss 콘솔에서 *프로덕션 등록* — 사업자등록증 + 통신판매업 신고증 업로드.
+2. PG 가입 심사 (영업일 ~3일).
+3. ``TOSS_SECRET_KEY`` prod 환경 변수 회전 — Railway secrets에 ``live_sk_...`` 주입
+   (`docs/runbook/secret-rotation.md` §6 참조).
+4. 결제 한도/수수료 협의 (Toss 영업 담당자).
+
+#### 세금정산 SOP (OUT)
+
+MVP 범위 외 — 사업자등록 + 부가세 신고 + 결제 수수료 정산은 인수 클라이언트 책임. 회계
+처리 SOP는 `docs/runbook/payment-accounting.md` (forward) 참조.

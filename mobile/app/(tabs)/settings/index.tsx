@@ -52,6 +52,12 @@ export default function SettingsIndex() {
       onPress: () => navigateTo('/(tabs)/settings/data-export'),
     },
     {
+      // Story 6.1 — 결제 그룹(데이터 내보내기 다음 / 로그아웃 이전). App Store IAP
+      // 정합 — 모바일은 외부 웹 결제 진입점만 노출.
+      label: '구독',
+      onPress: () => navigateTo('/(tabs)/settings/subscription'),
+    },
+    {
       label: '로그아웃',
       onPress: () => {
         void signOut();

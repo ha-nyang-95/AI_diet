@@ -13,7 +13,7 @@
 | 옵저버빌리티 | `LANGSMITH_API_KEY` | LangSmith UI | 분기 1회 | §3 (Story 3.8) |
 | Push | `EXPO_ACCESS_TOKEN` | EAS Console | 6개월 | §4 (Story 4.2) |
 | OAuth | `GOOGLE_OAUTH_CLIENT_SECRET` | Google Console | 6개월 | §5 (Story 8.5) |
-| 결제 | `TOSS_SECRET_KEY` | Toss Payments | 12개월 (Sandbox 무회전) | §6 (Story 8.5) |
+| 결제 | `TOSS_SECRET_KEY` | Toss Payments | 12개월 (Sandbox 무회전) | §6 (Story 6.1) |
 | 모니터링 | `SENTRY_DSN` | Sentry UI | 12개월 | §7 (Story 8.5) |
 | 스토리지 | `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | Cloudflare Dashboard | 6개월 | §8 (Story 8.5) |
 
@@ -146,10 +146,75 @@ EAS Console에서 발급되는 access token으로 `app/adapters/expo_push.py`이
 
 ---
 
-## 5-8. 기타 secret 회전 (Story 8.5 polish 단계 채움)
+## 5. Google OAuth client secret 회전 (Story 8.5 polish 단계 채움)
 
-본 단락은 placeholder — Story 8.5 운영 polish 단계에서 OpenAI / Anthropic /
-Google OAuth / Toss / Sentry / Cloudflare R2 회전 절차를 동일 패턴으로 채운다.
+(placeholder)
+
+---
+
+## 6. TOSS_SECRET_KEY 회전 (Story 6.1)
+
+운영 prod ``TOSS_SECRET_KEY`` 회전 5단계. sandbox(``test_sk_...``)는 회전 무관 — Toss
+콘솔에서 같은 키 영구 사용. prod(``live_sk_...``)는 운영자 퇴사·token leak 의심 시점에
+즉시 회전.
+
+### 6.1. 신규 secret 발급
+
+1. Toss 개발자 콘솔(https://developers.tosspayments.com) → *내 개발 정보* → 본 가맹점 선택.
+2. *시크릿 키 재발급* 버튼 클릭 → 신규 ``live_sk_<...>`` 생성. 기존 키는 *7일 grace
+   동안 동시 유효*(Toss 정책 — 운영 중단 회피).
+3. 신규 키를 *비밀번호 매니저* 또는 *Railway secrets* 임시 슬롯(``TOSS_SECRET_KEY_NEW``)에
+   복사 — 평문 저장 금지.
+
+### 6.2. 겹침 deploy
+
+Railway secrets에 *2개 키 동시 등록*:
+
+```
+TOSS_SECRET_KEY=<old key>          # 기존
+TOSS_SECRET_KEY_NEW=<new live_sk>  # 신규 (deploy 검증용)
+```
+
+API 컨테이너는 ``TOSS_SECRET_KEY``만 읽으므로 본 단계에서는 *현 동작 영향 0건*.
+
+### 6.3. dry-run 결제 검증
+
+테스트 사용자 계정 1건으로 sandbox-equivalent 결제 시도(prod 결제 흐름이 sandbox 카드를
+거부하므로, 외주 운영자가 *최소 금액*인 100원 임시 플랜 등록 후 실 카드 결제 → 즉시
+환불 흐름).
+
+검증 후 staging 환경에서 ``TOSS_SECRET_KEY`` ← ``TOSS_SECRET_KEY_NEW`` 갱신 + API
+재배포 → 정상 결제 1건 → ``payment_logs.status='success'`` row 확인.
+
+### 6.4. prod 갱신 + 구 키 revoke
+
+1. Railway prod 환경 변수 ``TOSS_SECRET_KEY`` ← ``TOSS_SECRET_KEY_NEW`` 갱신.
+2. ``TOSS_SECRET_KEY_NEW`` Railway env에서 삭제(slot 정리).
+3. API 컨테이너 재배포 — `app/adapters/toss.py` lazy 어댑터가 신규 키로 첫 호출.
+4. Toss 개발자 콘솔에서 *기존 시크릿 키 만료* 처리 — 7일 grace 단축.
+
+### 6.5. rollback (장애 시)
+
+신규 키로 결제가 실패하는 경우(``payments.toss.secret_key_missing`` 503 또는 ``payments.
+provider.unavailable`` 502 다발):
+
+1. Railway prod ``TOSS_SECRET_KEY`` ← *구 키* 즉시 복원(7일 grace 내 가능).
+2. API 재배포 → 회복.
+3. Toss 콘솔에서 *기존 키 만료 취소* 또는 *재 재발급*으로 새 신규 키 생성 후 재시도.
+
+### 6.6. 변경 트리거
+
+- 운영자 퇴사/권한 변경
+- secret_key leak 의심 (Sentry capture에서 raw key 노출 등)
+- 12개월 정기 회전 (캘린더)
+- Toss 측 정책 변경 또는 가맹점 ID 변경
+
+---
+
+## 7-8. 기타 secret 회전 (Story 8.5 polish 단계 채움)
+
+본 단락은 placeholder — Story 8.5 운영 polish 단계에서 Sentry / Cloudflare R2 회전
+절차를 동일 패턴으로 채운다.
 
 ## 회전 캘린더 (Story 8.5에서 박힘)
 
