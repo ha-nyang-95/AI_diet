@@ -995,3 +995,34 @@ class TossSecretKeyMissingError(PaymentError):
     status: ClassVar[int] = 503
     code: ClassVar[str] = "payments.toss.secret_key_missing"
     title: ClassVar[str] = "Toss secret key not configured"
+
+
+# --- Story 6.2 — 해지 + 결제 이력 신규 예외 ---
+
+
+class SubscriptionAlreadyCancelledError(PaymentError):
+    """이미 ``status='cancelled'`` 상태에서 ``POST /v1/payments/cancel`` 재호출 — 멱등 200
+    대신 *명시 409*로 사용자 UX 명확(*"이미 해지되었습니다 — {expires_at}까지 이용 가능"*).
+
+    클라이언트는 catch 후 활성 카드 갱신. ``SubscriptionAlreadyActiveError(409, code=
+    payments.subscription.already_active)``와 *반대 분기* — 같은 409 status, code 분리로
+    UX/audit-trail 명확.
+    """
+
+    status: ClassVar[int] = 409
+    code: ClassVar[str] = "payments.subscription.already_cancelled"
+    title: ClassVar[str] = "Subscription already cancelled"
+
+
+class PaymentHistoryCursorInvalidError(PaymentError):
+    """``GET /v1/payments/history?cursor=...`` 형식 위반(base64 디코드 실패 / `:` 분리 실패 /
+    ``datetime.fromisoformat`` ValueError / ``uuid.UUID`` ValueError).
+
+    클라이언트는 cursor를 *opaque*로 취급하므로 직접 조립한 invalid cursor가 아닌 한
+    실제 발생 가능성은 낮음 — *adversarial / schema drift* 방어. ``MealQueryValidationError
+    (400, meals.query.invalid)`` 패턴 정합.
+    """
+
+    status: ClassVar[int] = 400
+    code: ClassVar[str] = "payments.history.cursor.invalid"
+    title: ClassVar[str] = "Pagination cursor invalid"

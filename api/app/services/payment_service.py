@@ -1,8 +1,9 @@
-"""Payment service — Story 6.1 (정기결제 sandbox 신청 + 1플랜 + Idempotency-Key 멱등).
+"""Payment service — Story 6.1 / 6.2 (정기결제 sandbox 신청 + 해지 + 결제 이력 조회).
 
 Epic 6 결제 도메인 비즈니스 로직 SOT. ``app/api/v1/payments.py`` 라우터가 본 모듈을
-호출 → Toss adapter ``confirm_payment`` 호출 → ``subscriptions``/``payment_logs`` 양 row
-INSERT (동일 트랜잭션). architecture.md:704 *"`payment_service.py` (가설)"* 정합.
+호출 → (subscribe) Toss adapter ``confirm_payment`` 호출 → ``subscriptions``/``payment_
+logs`` 양 row INSERT, 또는 (cancel) DB-only ``status='cancelled'`` 전이, 또는 (history)
+``payment_logs`` 시계열 page 조회. architecture.md:704 *"`payment_service.py` (가설)"* 정합.
 
 3 SOT 패턴:
 1. **Idempotency-Key SOT** — Story 2.5 ``meals.py:_create_meal_idempotent_or_replay``
@@ -14,41 +15,43 @@ INSERT (동일 트랜잭션). architecture.md:704 *"`payment_service.py` (가설
    레이어에서 ``sentry_sdk.capture_message("payment.confirm_failed")`` 명시 호출
    (운영 모니터링 명시 신호 — 카드 거절 빈도 abnormal 시 dashboard alert).
 
-흐름 (5단계):
-1. **input 검증** — ``amount != MONTHLY_PLAN_PRICE_KRW`` → ``PaymentAmountInvalidError``.
-2. **Idempotency-Key replay** — 헤더 송신 시 ``payment_logs.idempotency_key``로 1차 조회,
-   있으면 기존 ``(subscription, log, was_replay=True)`` 반환.
-3. **active subscription 중복 가드** — ``subscriptions.status='active'`` 1차 조회,
-   있으면 ``SubscriptionAlreadyActiveError(409)``.
-4. **Toss API 호출** — ``confirm_payment``. 거절 시 *failed payment_log INSERT* +
-   ``PaymentConfirmFailedError`` raise. 5xx는 그대로 propagate(``PaymentProvider
-   UnavailableError``).
-5. **DB 작성** — ``subscription`` + ``payment_log`` 양 row INSERT (동일 트랜잭션).
-   commit은 라우터 책임.
+Story 6.2 추가 흐름:
+- ``cancel_subscription`` — DB-only 해지 (Toss API cancel 호출 X — Story 6.1 baseline은
+  1회 결제 + billing key 미발급으로 자동 갱신 자체가 없음). cancel audit ``payment_log``
+  row 1건 INSERT(``event_type='cancel'`` + ``amount_krw=0``).
+- ``list_payment_history`` — ``(occurred_at, id)`` 복합 row-value compare base64 cursor
+  pagination. 인덱스 ``idx_payment_logs_user_id_occurred_at`` hit.
+- ``_extract_receipt_url`` — ``raw_payload['receipt']['url']`` ``https://``/``http://``
+  prefix 검증 (XSS hardening).
 
-스코프: 자동 갱신 / webhook / 해지 / 환불은 Story 6.2/6.3 forward.
+스코프: webhook(자동 갱신) / 환불 자동화는 Story 6.3 forward.
 """
 
 from __future__ import annotations
 
+import base64
+import binascii
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Final
+from typing import Any, Final
 
 import sentry_sdk
 import structlog
-from sqlalchemy import insert, select
+from sqlalchemy import insert, literal, select, tuple_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters import toss as toss_adapter
 from app.core.exceptions import (
     BalanceNoteError,
+    NoActiveSubscriptionError,
     PaymentAmountInvalidError,
     PaymentConfirmFailedError,
+    PaymentHistoryCursorInvalidError,
     PaymentProviderRejectedError,
     PaymentRetryAfterFailedError,
     SubscriptionAlreadyActiveError,
+    SubscriptionAlreadyCancelledError,
 )
 from app.db.models.payment_log import PaymentLog
 from app.db.models.subscription import Subscription
@@ -427,3 +430,226 @@ async def subscribe(
         was_replay=was_replay,
     )
     return subscription, payment_log, was_replay
+
+
+# ---------------------------------------------------------------------------
+# Story 6.2 — cancel_subscription (DB-only 해지 + cancel audit log INSERT)
+# ---------------------------------------------------------------------------
+
+
+async def cancel_subscription(
+    session: AsyncSession, *, user_id: uuid.UUID
+) -> tuple[Subscription, PaymentLog]:
+    """구독 해지 — DB-only ``status='cancelled'`` 전이 + cancel audit ``payment_log`` 1건.
+
+    epics.md:852 invariant — *"즉시 차단 X — 다음 결제일까지 활성"*. Toss API cancel
+    호출 X (Story 6.1 baseline은 1회 결제 + billing key 미발급으로 자동 갱신 없음).
+    ``expires_at`` 변경 0 — webhook(Story 6.3)이 도래 시 ``status='expired'`` 전이.
+
+    분기:
+    - active row → ``status='cancelled'`` + ``cancelled_at=now()`` UPDATE +
+      cancel audit log INSERT → ``(cancelled_subscription, cancel_log)`` 반환.
+    - active row 부재 + cancelled-but-not-expired row 존재 →
+      ``SubscriptionAlreadyCancelledError(409)``.
+    - active row 부재 + cancelled-but-not-expired row 부재 →
+      ``NoActiveSubscriptionError(404)`` (expired만 존재 또는 완전 미신청).
+
+    commit은 라우터 책임.
+    """
+    logger.info(
+        "payments.cancel.requested",
+        user_id=_mask_user_id(user_id),
+    )
+
+    # 단일 timestamp — ``cancelled_at`` 와 cancel audit log ``occurred_at`` 정합 (µs drift X).
+    now = datetime.now(UTC)
+
+    # Step 1 — atomic state transition. UPDATE ... WHERE status='active' RETURNING은
+    # 동시 cancel 2건이 들어와도 한 트랜잭션만 row를 가져가므로 race-free
+    # (이전 SELECT-then-UPDATE 패턴은 두 트랜잭션이 모두 active를 보고 중복 cancel
+    # audit log를 INSERT할 수 있었음).
+    update_stmt = (
+        update(Subscription)
+        .where(
+            Subscription.user_id == user_id,
+            Subscription.status == "active",
+        )
+        .values(status="cancelled", cancelled_at=now)
+        .returning(Subscription)
+        .execution_options(synchronize_session="fetch")
+    )
+    update_result = await session.execute(update_stmt)
+    active = update_result.scalar_one_or_none()
+
+    if active is None:
+        # 분기 — cancelled-but-not-expired row 존재 시 409, 그 외 404.
+        result = await session.execute(
+            select(Subscription)
+            .where(
+                Subscription.user_id == user_id,
+                Subscription.status == "cancelled",
+                Subscription.expires_at > now,
+            )
+            .limit(1)
+        )
+        already_cancelled = result.scalar_one_or_none()
+        if already_cancelled is not None:
+            raise SubscriptionAlreadyCancelledError(
+                "이미 해지되었습니다 — 다음 결제일까지 이용 가능합니다"
+            )
+        raise NoActiveSubscriptionError("활성 구독이 없습니다")
+
+    # Step 2 — cancel audit log INSERT. ``occurred_at`` 도 위 ``now`` 재사용.
+    log_result = await session.execute(
+        insert(PaymentLog)
+        .values(
+            user_id=user_id,
+            subscription_id=active.id,
+            event_type="cancel",
+            provider=active.provider,
+            provider_payment_key=None,
+            provider_order_id=None,
+            amount_krw=0,
+            status="success",
+            idempotency_key=None,
+            raw_payload={"reason": "user_initiated"},
+            occurred_at=now,
+        )
+        .returning(PaymentLog)
+    )
+    cancel_log = log_result.scalar_one()
+
+    logger.info(
+        "payments.cancel.succeeded",
+        user_id=_mask_user_id(user_id),
+        subscription_id=str(active.id),
+    )
+    return active, cancel_log
+
+
+# ---------------------------------------------------------------------------
+# Story 6.2 — list_payment_history (cursor pagination + receipt URL 추출)
+# ---------------------------------------------------------------------------
+
+# cursor 인코딩 SOT — base64 + ``:`` 분리로 ``(occurred_at_iso, id)`` 쌍 영속화.
+# 클라이언트는 cursor를 *opaque*로 취급(파싱 X — 그대로 다음 호출에 전달).
+_CURSOR_SEPARATOR: Final[str] = ":"
+
+
+def _encode_history_cursor(occurred_at: datetime, log_id: uuid.UUID) -> str:
+    """``(occurred_at, id)`` → base64(``<isoformat>:<uuid>``) 인코딩.
+
+    안정 정렬 invariant — ``occurred_at_iso``는 microsecond 정밀도 보존(``.isoformat()``).
+    같은 ``occurred_at`` row가 다수일 때 ``id`` tie-breaker로 결정성 보장.
+    """
+    payload = f"{occurred_at.isoformat()}{_CURSOR_SEPARATOR}{log_id}"
+    return base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii")
+
+
+def _decode_history_cursor(cursor: str) -> tuple[datetime, uuid.UUID]:
+    """base64 cursor → ``(occurred_at, id)`` 디코딩 + Pydantic-수준 형식 검증.
+
+    형식 위반은 모두 ``PaymentHistoryCursorInvalidError(400)``로 변환. base64 디코드 실패,
+    ``:`` 분리 실패, ``datetime.fromisoformat`` ValueError, ``uuid.UUID`` ValueError 모두
+    동일 응답(클라이언트는 cursor를 *opaque*로 취급해야 하므로 세분화 불필요).
+    """
+    try:
+        decoded = base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError, ValueError) as exc:
+        raise PaymentHistoryCursorInvalidError(f"cursor base64 decode failed: {exc!r}") from exc
+
+    # ISO 8601 datetime은 ``T``/``:``를 포함하므로 *마지막* ``:``로 분리(``rsplit``).
+    # UUID hex 표기에는 ``:`` 미포함이라 충돌 없음.
+    parts = decoded.rsplit(_CURSOR_SEPARATOR, 1)
+    if len(parts) != 2:
+        raise PaymentHistoryCursorInvalidError("cursor format invalid (separator missing)")
+
+    occurred_at_str, id_str = parts
+    try:
+        occurred_at = datetime.fromisoformat(occurred_at_str)
+    except ValueError as exc:
+        raise PaymentHistoryCursorInvalidError(f"cursor occurred_at invalid: {exc!r}") from exc
+
+    try:
+        log_id = uuid.UUID(id_str)
+    except ValueError as exc:
+        raise PaymentHistoryCursorInvalidError(f"cursor id invalid: {exc!r}") from exc
+
+    return occurred_at, log_id
+
+
+def _extract_receipt_url(raw_payload: dict[str, Any] | None) -> str | None:
+    """Toss raw_payload에서 ``receipt.url`` 추출 + XSS hardening.
+
+    Toss 표준 응답은 ``receipt.url`` 필드에 ``"https://dashboard.tosspayments.com/receipt/..."``
+    포맷의 영수증 URL 노출. ``_mask_payment_payload``가 ``receipt`` 키를 보존하므로 ``payment_
+    logs.raw_payload``에 그대로 영속화됨.
+
+    검증:
+    - ``raw_payload`` None 또는 dict 아니면 None.
+    - ``receipt`` 키 부재 또는 dict 아니면 None.
+    - ``receipt.url`` str 아니면 None.
+    - prefix가 ``https://`` 또는 ``http://``가 아니면 None (``javascript:`` / ``data:`` URL
+      차단 — 클라이언트 ``Linking.openURL`` / ``<a href>`` 클릭 시 XSS 방어).
+    """
+    if not isinstance(raw_payload, dict):
+        return None
+    receipt = raw_payload.get("receipt")
+    if not isinstance(receipt, dict):
+        return None
+    url = receipt.get("url")
+    if not isinstance(url, str):
+        return None
+    if not (url.startswith("https://") or url.startswith("http://")):
+        return None
+    return url
+
+
+async def list_payment_history(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    limit: int,
+    cursor: str | None,
+) -> tuple[list[PaymentLog], str | None]:
+    """결제 이력 cursor pagination — ``(occurred_at DESC, id DESC)`` 정렬.
+
+    cursor 부재 → 1페이지(최신 ``limit``건). cursor 송신 → ``(occurred_at, id) <
+    (cursor_occurred_at, cursor_id)`` 필터로 다음 페이지. ``len(rows) > limit`` 시 마지막
+    row의 ``(occurred_at, id)``를 ``next_cursor``로 인코딩.
+
+    인덱스: ``idx_payment_logs_user_id_occurred_at = (user_id, occurred_at DESC)`` hit
+    (시계열 sort). ``id`` tie-breaker는 in-memory(드문 케이스라 비용 무시).
+
+    오류:
+    - cursor 형식 위반 → ``PaymentHistoryCursorInvalidError(400)``.
+    """
+    stmt = (
+        select(PaymentLog)
+        .where(PaymentLog.user_id == user_id)
+        .order_by(PaymentLog.occurred_at.desc(), PaymentLog.id.desc())
+        .limit(limit + 1)
+    )
+
+    if cursor is not None:
+        cursor_occurred_at, cursor_id = _decode_history_cursor(cursor)
+        # Postgres native row-value compare — ``(a, b) < (c, d)``는 ``a < c OR (a = c AND
+        # b < d)`` 동등(SQL 표준). 인덱스 sort 정합. Python literal은 ``literal()``로 감싸
+        # SQLAlchemy ColumnElement 타입 정합 (mypy stub 요구).
+        stmt = stmt.where(
+            tuple_(PaymentLog.occurred_at, PaymentLog.id)
+            < tuple_(literal(cursor_occurred_at), literal(cursor_id))
+        )
+
+    result = await session.execute(stmt)
+    rows = list(result.scalars().all())
+
+    if len(rows) > limit:
+        boundary = rows[limit - 1]
+        next_cursor = _encode_history_cursor(boundary.occurred_at, boundary.id)
+        items = rows[:limit]
+    else:
+        next_cursor = None
+        items = rows
+
+    return items, next_cursor

@@ -705,13 +705,84 @@ export interface paths {
         };
         /**
          * Get Subscription
-         * @description 자기 active 구독 단일 조회 — PIPA Art.35 정합 (``current_user`` 단독, 동의 게이트 X).
+         * @description 자기 *유효* 구독 단일 조회 — PIPA Art.35 정합 (``current_user`` 단독, 동의 게이트 X).
+         *
+         *     Story 6.2 contract 변경 (Story 6.1 deferred ``cancelled-but-not-expired`` UX gap 흡수):
+         *     - ``status='active'`` 또는 ``status='cancelled' AND expires_at > now()`` 1차 조회.
+         *     - ``expired`` row는 항상 미반환(과거 구독 — 신규 신청 가능 케이스 → 404).
+         *
+         *     클라이언트는 ``status === "cancelled"`` 분기로 *"해지됨 — {expires_at}까지 이용 가능"*
+         *     표시.
          *
          *     오류:
-         *     - 404 ``code=payments.subscription.not_found`` — 활성 구독 0건 (신청 안 한 사용자
-         *       정상 케이스).
+         *     - 404 ``code=payments.subscription.not_found`` — 유효 구독 0건 (미신청 또는 expired만
+         *       존재).
          */
         get: operations["get_subscription_v1_payments_subscription_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/payments/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Cancel Subscription
+         * @description 구독 해지 — DB-only ``status='cancelled'`` + cancel audit log INSERT.
+         *
+         *     PIPA Art.35 정합 — ``current_user`` 단독(``require_basic_consents`` 미적용). *해지권은
+         *     동의 철회와 독립*된 약관 명시 사용자 권리(epics.md:847).
+         *
+         *     epics.md:852 invariant — *"즉시 차단 X — 다음 결제일까지 활성"*. ``expires_at`` 변경 0,
+         *     Toss API cancel 호출 X. webhook(Story 6.3)이 ``expires_at`` 도래 시 ``status='expired'``
+         *     전이.
+         *
+         *     오류:
+         *     - 404 ``code=payments.subscription.not_found`` — 활성 구독 0건 (미신청 또는 expired만).
+         *     - 409 ``code=payments.subscription.already_cancelled`` — 이미 cancelled-but-not-expired.
+         *
+         *     응답:
+         *     - 200 — 신규 cancellation. ``status_code=200``(상태 전이 — RFC 9110 정합, 신규 리소스
+         *       생성 아니라 201 X).
+         */
+        post: operations["cancel_subscription_v1_payments_cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/payments/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Payment History
+         * @description 결제 이력 cursor pagination — ``(occurred_at DESC, id DESC)`` 정렬.
+         *
+         *     PIPA Art.35 정합 — ``current_user`` 단독. 자기 결제 이력 조회는 동의 철회와 독립.
+         *
+         *     cursor 부재 → 1페이지(최신 ``limit``건). cursor 송신 → 다음 페이지. ``next_cursor=None``
+         *     이면 마지막 페이지. 클라이언트는 cursor를 *opaque*로 취급.
+         *
+         *     오류:
+         *     - 400 ``code=payments.history.cursor.invalid`` — cursor 형식 위반.
+         *     - 422 — ``limit`` 또는 ``cursor`` Pydantic 검증 실패(``ge=1``/``le=50``/``max_length=200``).
+         */
+        get: operations["get_payment_history_v1_payments_history_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -869,6 +940,22 @@ export interface components {
         AutomatedDecisionGrantRequest: {
             /** Automated Decision Version */
             automated_decision_version: string;
+        };
+        /**
+         * CancelSubscriptionRequest
+         * @description ``POST /v1/payments/cancel`` body — 본문 0필드 (UI에서 명시 확인 처리).
+         *
+         *     forward-compat — 향후 ``reason: str`` 추가 시 필드 추가만으로 확장. ``extra="forbid"``
+         *     로 silent unknown field 차단(Story 1.4/2.x 패턴 정합).
+         */
+        CancelSubscriptionRequest: Record<string, never>;
+        /**
+         * CancelSubscriptionResponse
+         * @description ``POST /v1/payments/cancel`` 응답 wrapper — cancelled subscription + cancel audit log.
+         */
+        CancelSubscriptionResponse: {
+            subscription: components["schemas"]["SubscriptionResponse"];
+            payment: components["schemas"]["PaymentLogResponse"];
         };
         /** ConsentStatusResponse */
         ConsentStatusResponse: {
@@ -1396,6 +1483,57 @@ export interface components {
             quantity: string;
             /** Confidence */
             confidence: number;
+        };
+        /**
+         * PaymentHistoryItem
+         * @description ``GET /v1/payments/history`` row wire shape — ``PaymentLogResponse`` baseline +
+         *     ``receipt_url`` 추출(Toss 표준 응답 ``raw_payload['receipt']['url']``).
+         *
+         *     영수증 URL 부재 시 None(cancel/failed event는 일반적으로 receipt 부재).
+         */
+        PaymentHistoryItem: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /**
+             * Event Type
+             * @enum {string}
+             */
+            event_type: "subscribe" | "cancel" | "renew" | "failed" | "refund";
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "success" | "failed" | "pending";
+            /** Amount Krw */
+            amount_krw: number;
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            /**
+             * Provider
+             * @enum {string}
+             */
+            provider: "toss" | "stripe";
+            /** Receipt Url */
+            receipt_url: string | null;
+        };
+        /**
+         * PaymentHistoryResponse
+         * @description ``GET /v1/payments/history`` page 응답 — items + opaque cursor.
+         *
+         *     ``next_cursor=None``이면 마지막 페이지. 클라이언트는 cursor를 *opaque*로 취급
+         *     (파싱 X — 그대로 다음 호출 ``?cursor=...`` 파라미터에 전달).
+         */
+        PaymentHistoryResponse: {
+            /** Items */
+            items: components["schemas"]["PaymentHistoryItem"][];
+            /** Next Cursor */
+            next_cursor: string | null;
         };
         /**
          * PaymentLogResponse
@@ -3039,7 +3177,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Active subscription found */
+            /** @description Active or cancelled-but-not-expired subscription found */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -3050,6 +3188,100 @@ export interface operations {
             };
             /** @description No active subscription */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    cancel_subscription_v1_payments_cancel_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                Authorization?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                bn_access?: string | null;
+            };
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["CancelSubscriptionRequest"];
+            };
+        };
+        responses: {
+            /** @description Subscription cancelled (active until expires_at) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CancelSubscriptionResponse"];
+                };
+            };
+            /** @description No active subscription */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Subscription already cancelled */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_payment_history_v1_payments_history_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                cursor?: string | null;
+            };
+            header?: {
+                Authorization?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                bn_access?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Payment history page (most-recent-first) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaymentHistoryResponse"];
+                };
+            };
+            /** @description Invalid cursor */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };

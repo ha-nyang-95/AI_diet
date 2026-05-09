@@ -1,19 +1,28 @@
 /**
- * Story 6.1 — 활성 구독 조회 query 훅 + Web 결제 진입 URL 헬퍼.
+ * Story 6.1 / 6.2 — 활성 구독 조회 + 해지 + 결제 이력 query/mutation 훅.
  *
  * 모바일은 *결제 위젯 미노출* (App Store IAP 정책 정합 — prd.md:676 SOT). 사용자가
  * "구독 신청" 버튼을 누르면 ``Linking.openURL(getSubscribeWebUrl())``로 외부 브라우저에
  * Web ``/account/subscribe`` 페이지를 노출한다.
  *
- * 본 훅은:
- * - ``useSubscriptionQuery()`` — ``GET /v1/payments/subscription`` 호출. 200이면
- *   ``SubscriptionDto``, 404이면 ``null``로 정규화(미신청 사용자 정상 케이스).
+ * 본 훅:
+ * - ``useSubscriptionQuery()`` — ``GET /v1/payments/subscription``. 200/404 정규화.
+ * - ``useCancelSubscriptionMutation()`` — ``POST /v1/payments/cancel`` (Story 6.2 AC1).
+ *   성공 시 ``SUBSCRIPTION_QUERY_KEY_PREFIX`` + ``PAYMENT_HISTORY_QUERY_KEY_PREFIX``
+ *   둘 다 invalidate.
+ * - ``usePaymentHistoryQuery(userId)`` — ``GET /v1/payments/history`` page-1 (Story
+ *   6.2 AC4). 모바일은 *최근 20건* 단일 page만 노출(무한 스크롤 미스코프).
  * - ``getSubscribeWebUrl()`` — Web 결제 페이지 URL 헬퍼.
- *   ``EXPO_PUBLIC_WEB_BASE_URL || 'https://balancenote.app'`` fallback.
  *
  * Story 5.x ``useDataExport`` / ``useAccountDelete`` 패턴 정합 — typed status + code.
  */
-import { useQuery, type UseQueryResult } from '@tanstack/react-query';
+import {
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type UseMutationResult,
+  type UseQueryResult,
+} from '@tanstack/react-query';
 
 import { authFetch } from '@/lib/auth';
 
@@ -112,6 +121,141 @@ export function useSubscriptionQuery(
   return useQuery({
     queryKey: getSubscriptionQueryKey(userId),
     queryFn: fetchActiveSubscription,
+    staleTime: 30_000,
+    enabled: userId.length > 0,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Story 6.2 — cancel mutation + payment history query
+// ---------------------------------------------------------------------------
+
+export class SubscriptionCancelError extends Error {
+  status: number;
+  code?: string;
+  detail?: string;
+
+  constructor(status: number, code?: string, detail?: string) {
+    super(detail ?? `subscription cancel failed (${status})`);
+    this.name = 'SubscriptionCancelError';
+    this.status = status;
+    this.code = code;
+    this.detail = detail;
+  }
+}
+
+export type PaymentLogEventType = 'subscribe' | 'cancel' | 'renew' | 'failed' | 'refund';
+export type PaymentLogStatus = 'success' | 'failed' | 'pending';
+
+export interface PaymentHistoryItemDto {
+  id: string;
+  event_type: PaymentLogEventType;
+  status: PaymentLogStatus;
+  amount_krw: number;
+  occurred_at: string;
+  provider: SubscriptionProvider;
+  receipt_url: string | null;
+}
+
+export interface PaymentHistoryDto {
+  items: PaymentHistoryItemDto[];
+  next_cursor: string | null;
+}
+
+export interface CancelSubscriptionResponseDto {
+  subscription: SubscriptionDto;
+  payment: {
+    id: string;
+    event_type: PaymentLogEventType;
+    status: PaymentLogStatus;
+    amount_krw: number;
+    occurred_at: string;
+    provider: SubscriptionProvider;
+  };
+}
+
+export const PAYMENT_HISTORY_QUERY_KEY_PREFIX = ['payments', 'history'] as const;
+export function getPaymentHistoryQueryKey(userId: string): readonly [string, string, string] {
+  return [...PAYMENT_HISTORY_QUERY_KEY_PREFIX, userId] as const;
+}
+
+async function cancelSubscription(): Promise<CancelSubscriptionResponseDto> {
+  const response = await authFetch('/v1/payments/cancel', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  });
+  if (!response.ok) {
+    let code: string | undefined;
+    let detail: string | undefined;
+    try {
+      const problem = (await response.json()) as { code?: string; detail?: string };
+      code = problem.code;
+      detail = problem.detail;
+    } catch {
+      // RFC 7807 본문 아니면 status만 사용.
+    }
+    throw new SubscriptionCancelError(response.status, code, detail);
+  }
+  return (await response.json()) as CancelSubscriptionResponseDto;
+}
+
+/**
+ * Story 6.2 AC1 — 구독 해지 mutation.
+ *
+ * 성공 시 ``SUBSCRIPTION_QUERY_KEY_PREFIX`` + ``PAYMENT_HISTORY_QUERY_KEY_PREFIX``
+ * 둘 다 invalidate (해지 후 카드 자동 갱신 + cancel 이벤트가 history list에 즉시 노출).
+ *
+ * 오류 분기:
+ * - 404 ``code=payments.subscription.not_found`` — 활성 구독 0건.
+ * - 409 ``code=payments.subscription.already_cancelled`` — 이미 cancelled.
+ * - 그 외 → ``SubscriptionCancelError``.
+ */
+export function useCancelSubscriptionMutation(): UseMutationResult<
+  CancelSubscriptionResponseDto,
+  SubscriptionCancelError,
+  void
+> {
+  const queryClient = useQueryClient();
+  return useMutation<CancelSubscriptionResponseDto, SubscriptionCancelError, void>({
+    mutationFn: cancelSubscription,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: SUBSCRIPTION_QUERY_KEY_PREFIX });
+      void queryClient.invalidateQueries({ queryKey: PAYMENT_HISTORY_QUERY_KEY_PREFIX });
+    },
+  });
+}
+
+async function fetchPaymentHistory(limit: number): Promise<PaymentHistoryDto> {
+  const response = await authFetch(`/v1/payments/history?limit=${limit}`);
+  if (!response.ok) {
+    let code: string | undefined;
+    let detail: string | undefined;
+    try {
+      const problem = (await response.json()) as { code?: string; detail?: string };
+      code = problem.code;
+      detail = problem.detail;
+    } catch {
+      // RFC 7807 본문 아니면 status만 사용.
+    }
+    throw new SubscriptionFetchError(response.status, code, detail);
+  }
+  return (await response.json()) as PaymentHistoryDto;
+}
+
+/**
+ * Story 6.2 AC4 — 결제 이력 page-1 query (모바일은 무한 스크롤 미스코프).
+ *
+ * cache key ``["payments", "history", userId]`` — cancel mutation 성공 시 invalidate.
+ * staleTime 30s — 같은 화면 내 새로고침은 cache hit.
+ */
+export function usePaymentHistoryQuery(
+  userId: string,
+  limit = 20,
+): UseQueryResult<PaymentHistoryDto, SubscriptionFetchError> {
+  return useQuery({
+    queryKey: getPaymentHistoryQueryKey(userId),
+    queryFn: () => fetchPaymentHistory(limit),
     staleTime: 30_000,
     enabled: userId.length > 0,
   });

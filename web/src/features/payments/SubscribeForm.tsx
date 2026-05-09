@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Web 정기결제 신청 위젯 — Story 6.1 AC8.
+ * Web 정기결제 신청 위젯 — Story 6.1 AC8 / Story 6.2 (해지 + 결제 이력 link 통합).
  *
  * Toss Payments 공식 widget SDK + (a) 결제 위젯 패턴 (최초 1회 결제 confirm). 빌링키
  * 발급 + 자동 갱신은 Story 6.3 forward(`requestBillingAuth` API).
@@ -15,11 +15,15 @@
  * 4. success/fail 라우트(``/account/subscribe/success`` / ``/account/subscribe/fail``)가
  *    callback 처리.
  *
- * 활성 구독 분기: mount 시 ``apiFetch("/v1/payments/subscription")`` GET — 200 응답이면
- * widget 렌더 X + *"중복 구독 불가"* 안내 (Story 6.2 cancel forward).
+ * 활성 구독 분기 (Story 6.2 contract):
+ * - ``status='active'`` + ``cancelled_at=null`` → 활성 카드 + *"구독 해지"* + *"결제 이력 보기"*.
+ * - ``status='cancelled'`` + ``expires_at > now()`` → *"해지됨"* 카드(해지 버튼 미노출) +
+ *   *"이용 가능 종료일"* + *"결제 이력 보기"*.
+ * - 404 → widget 렌더(신규 신청 분기).
  *
  * App Store IAP 정합과 직교(본 컴포넌트는 Web 한정).
  */
+import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import {
   loadPaymentWidget,
@@ -44,7 +48,20 @@ interface ActiveSubscription {
   plan_price_krw: number;
   started_at: string;
   expires_at: string | null;
+  cancelled_at: string | null;
   provider: "toss" | "stripe";
+}
+
+interface CancelSubscriptionResponse {
+  subscription: ActiveSubscription;
+  payment: {
+    id: string;
+    event_type: string;
+    status: string;
+    amount_krw: number;
+    occurred_at: string;
+    provider: string;
+  };
 }
 
 interface SubscribeFormProps {
@@ -57,8 +74,16 @@ export function SubscribeForm({ userId, customerEmail }: SubscribeFormProps) {
   const [widget, setWidget] = useState<PaymentWidgetInstance | null>(null);
   const [active, setActive] = useState<ActiveSubscription | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
-  const [error, setError] = useState<string | null>(null);
+  // CR P6 — TOSS_CLIENT_KEY가 빈 문자열이면 *초기 렌더부터* fail-closed 안내.
+  // ``react-hooks/set-state-in-effect`` rule 정합 — 환경 변수는 초기 mount 시점에 결정되므로
+  // useEffect 내부 setState 대신 useState 초기값으로 이동.
+  const [error, setError] = useState<string | null>(
+    TOSS_CLIENT_KEY === ""
+      ? "결제 설정 오류가 발생했습니다. 관리자에게 문의해 주세요."
+      : null,
+  );
   const [submitting, setSubmitting] = useState<boolean>(false);
+  const [cancelling, setCancelling] = useState<boolean>(false);
   // CR P9 — 같은 mount 동안 idempotencyKey 불변(retry 시 재사용 — Story 2.5 패턴).
   // useEffect 후 세팅 X — 첫 렌더부터 안정 값 보유(StrictMode double-mount + fast click
   // race 차단).
@@ -98,8 +123,8 @@ export function SubscribeForm({ userId, customerEmail }: SubscribeFormProps) {
     if (loading) return;
     if (active !== null) return; // 활성 구독 — widget 렌더 X.
     if (TOSS_CLIENT_KEY === "") {
-      // CR P6 — 환경 변수 누락 시 fail-closed.
-      setError("결제 설정 오류가 발생했습니다. 관리자에게 문의해 주세요.");
+      // CR P6 — 환경 변수 누락 시 fail-closed. ``error`` 초기값에서 이미 안내 메시지가
+      // 세팅되므로 여기서는 widget mount만 skip.
       return;
     }
 
@@ -169,27 +194,114 @@ export function SubscribeForm({ userId, customerEmail }: SubscribeFormProps) {
     );
   }
 
+  const handleCancel = async () => {
+    if (active === null) return;
+    const confirmMsg = `구독을 해지하시겠습니까? 다음 결제일(${
+      active.expires_at !== null
+        ? new Date(active.expires_at).toLocaleDateString("ko-KR")
+        : "-"
+    })까지 모든 기능을 이용할 수 있습니다.`;
+    if (!window.confirm(confirmMsg)) return;
+
+    setError(null);
+    setCancelling(true);
+    try {
+      const response = await apiFetch("/v1/payments/cancel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      if (!response.ok) {
+        let detail: string | undefined;
+        try {
+          const problem = (await response.json()) as { detail?: string };
+          detail = problem.detail;
+        } catch {
+          // RFC 7807 본문 아니면 status만.
+        }
+        setError(detail ?? `구독 해지 실패 (${response.status})`);
+        return;
+      }
+      const body = (await response.json()) as CancelSubscriptionResponse;
+      setActive(body.subscription);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "구독 해지 실패");
+    } finally {
+      setCancelling(false);
+    }
+  };
+
   if (active !== null) {
+    const isCancelled = active.status === "cancelled";
+    const headerText = isCancelled ? "해지됨" : "활성 구독";
+    const expiresLabel = isCancelled ? "이용 가능 종료일" : "다음 결제일";
     return (
       <div className="space-y-4">
-        <div className="rounded-md border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800">
-          <p className="font-medium">활성 구독이 있습니다.</p>
-          <p className="mt-1">
-            중복 구독은 신청할 수 없습니다. 구독 해지는 다음 업데이트에서 가능합니다.
-          </p>
+        <div
+          className={
+            isCancelled
+              ? "rounded-md border border-zinc-300 bg-zinc-50 p-4 text-sm text-zinc-800"
+              : "rounded-md border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800"
+          }
+        >
+          <p className="font-medium">{headerText}</p>
+          {isCancelled ? (
+            <p className="mt-1">
+              구독이 해지되었습니다. 이용 가능 종료일까지 모든 기능을 이용할 수 있습니다.
+            </p>
+          ) : (
+            <p className="mt-1">
+              매월 자동으로 결제됩니다. 언제든 해지할 수 있습니다.
+            </p>
+          )}
         </div>
         <dl className="grid grid-cols-2 gap-2 text-sm">
           <dt className="text-zinc-600">플랜</dt>
           <dd className="text-zinc-900">월 {active.plan_price_krw.toLocaleString("ko-KR")}원</dd>
           <dt className="text-zinc-600">시작일</dt>
           <dd className="text-zinc-900">{new Date(active.started_at).toLocaleDateString("ko-KR")}</dd>
-          <dt className="text-zinc-600">다음 결제일</dt>
+          <dt className="text-zinc-600">{expiresLabel}</dt>
           <dd className="text-zinc-900">
             {active.expires_at !== null
               ? new Date(active.expires_at).toLocaleDateString("ko-KR")
               : "-"}
           </dd>
+          <dt className="text-zinc-600">결제 수단</dt>
+          <dd className="text-zinc-900">
+            {active.provider === "toss" ? "토스페이먼츠" : "Stripe"}
+          </dd>
         </dl>
+
+        {error !== null ? (
+          <div
+            role="alert"
+            className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800"
+          >
+            {error}
+          </div>
+        ) : null}
+
+        <div className="flex flex-col gap-2 pt-2 sm:flex-row">
+          {isCancelled ? null : (
+            <button
+              type="button"
+              onClick={() => {
+                void handleCancel();
+              }}
+              disabled={cancelling}
+              className="rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:bg-red-300"
+              aria-label="구독 해지"
+            >
+              {cancelling ? "해지 중…" : "구독 해지"}
+            </button>
+          )}
+          <Link
+            href="/account/subscribe/history"
+            className="inline-flex items-center justify-center rounded-md border border-zinc-300 bg-white px-4 py-2 text-sm font-medium text-zinc-800 hover:bg-zinc-50"
+          >
+            결제 이력 보기
+          </Link>
+        </div>
       </div>
     );
   }
@@ -232,6 +344,15 @@ export function SubscribeForm({ userId, customerEmail }: SubscribeFormProps) {
           ? "결제 진행 중…"
           : `월 ${PLAN_PRICE_KRW.toLocaleString("ko-KR")}원 구독 신청`}
       </button>
+
+      <div className="pt-2">
+        <Link
+          href="/account/subscribe/history"
+          className="inline-flex items-center justify-center rounded-md border border-zinc-300 bg-white px-4 py-2 text-sm font-medium text-zinc-800 hover:bg-zinc-50"
+        >
+          결제 이력 보기
+        </Link>
+      </div>
     </div>
   );
 }
