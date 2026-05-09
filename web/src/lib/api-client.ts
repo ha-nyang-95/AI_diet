@@ -744,7 +744,7 @@ export interface paths {
          *     동의 철회와 독립*된 약관 명시 사용자 권리(epics.md:847).
          *
          *     epics.md:852 invariant — *"즉시 차단 X — 다음 결제일까지 활성"*. ``expires_at`` 변경 0,
-         *     Toss API cancel 호출 X. webhook(Story 6.3)이 ``expires_at`` 도래 시 ``status='expired''``
+         *     Toss API cancel 호출 X. webhook(Story 6.3)이 ``expires_at`` 도래 시 ``status='expired'``
          *     전이.
          *
          *     오류:
