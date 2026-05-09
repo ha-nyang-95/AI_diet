@@ -219,3 +219,30 @@ async def test_confirm_payment_secret_key_missing_raises_toss_secret_key_missing
 
     # HTTP 호출 자체 발생 X.
     assert call_count["value"] == 0
+
+
+def test_mask_payment_payload_preserves_receipt_url_for_history_endpoint() -> None:
+    """Story 6.2 AC5 — ``receipt`` 키 보존 회귀 가드.
+
+    Story 6.1 ``_mask_payment_payload`` baseline은 ``_MASK_REMOVE_KEYS``에 ``receipt``
+    미포함 → 자동 보존. 본 테스트는 *invariant 가드* — 미래에 ``_MASK_REMOVE_KEYS``에
+    ``receipt``를 잘못 추가하면 즉시 회귀 신호. ``GET /v1/payments/history``가 영수증 URL을
+    노출하려면 ``payment_logs.raw_payload['receipt']['url']``이 마스킹 통과 후에도 보존돼야
+    한다.
+    """
+    raw = {
+        "paymentKey": "pk_receipt",
+        "orderId": "order_receipt",
+        "status": "DONE",
+        "receipt": {"url": "https://dashboard.tosspayments.com/receipt/abc123"},
+        "customerEmail": "user@example.com",  # 마스킹되어야 함.
+    }
+    masked = toss._mask_payment_payload(raw)
+
+    # receipt 키 + 내부 url 무손실 보존.
+    assert "receipt" in masked
+    assert isinstance(masked["receipt"], dict)
+    assert masked["receipt"]["url"] == "https://dashboard.tosspayments.com/receipt/abc123"
+
+    # 동시에 customerEmail은 정상 마스킹.
+    assert "customerEmail" not in masked

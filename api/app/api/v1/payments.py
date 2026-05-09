@@ -1,13 +1,15 @@
-"""``/v1/payments`` — 결제 신청 + 활성 구독 조회 (Story 6.1).
+"""``/v1/payments`` — 결제 신청 + 활성 구독 조회 + 해지 + 결제 이력 (Story 6.1 / 6.2).
 
-2 endpoint:
+4 endpoint:
 - ``POST /v1/payments/subscribe``     — 정기결제 신청 (require_basic_consents)
-- ``GET /v1/payments/subscription``   — 자기 active 구독 조회 (인증만 — PIPA Art.35)
+- ``POST /v1/payments/cancel``        — 구독 해지 (current_user 단독 — PIPA Art.35)
+- ``GET /v1/payments/subscription``   — 자기 active/cancelled 구독 조회 (current_user)
+- ``GET /v1/payments/history``        — 자기 결제 이력 page (current_user)
 
 핵심 결정:
 - *작성 경로*(POST subscribe)에만 ``Depends(require_basic_consents)`` wire — 결제는
-  자기 데이터 작성이라 동의 게이트 의무. *조회* 경로는 ``current_user`` 단독 — PIPA
-  Art.35 정보주체 권리 (자기 결제 상태 *조회*는 동의 철회와 독립).
+  자기 데이터 작성이라 동의 게이트 의무. *조회 + 해지* 경로는 ``current_user`` 단독 —
+  PIPA Art.35 정보주체 권리 (해지권/이력 조회는 동의 철회와 독립).
 - ``Idempotency-Key`` UUID v4 형식 강제 + race-free SELECT-INSERT-CATCH-SELECT
   (Story 2.5 ``meals.py`` SOT 1:1 정합).
 - ``raw_text``/``image_key`` 같은 PII 미포함 — 본 라우터는 ``payment_key``/``order_id``/
@@ -15,21 +17,28 @@
 - ``orderId`` Toss 표준 alias — 클라이언트가 camelCase 송신, 서버는 snake_case 처리.
 - RFC 7807 ``application/problem+json`` 글로벌 핸들러가 자동 변환.
 
-scope 분리: 본 endpoint는 *최초 신청 + active 1건 조회*만. Story 6.2 cancel /
-``GET /v1/payments/history`` / Story 6.3 webhook은 forward.
+Story 6.2 추가:
+- cancel은 *DB-only* 전이(Toss API 호출 X — Story 6.1 baseline은 1회 결제 + billing
+  key 미발급으로 자동 갱신 자체가 없음). epics.md:852 *"즉시 차단 X — 다음 결제일까지 활성"*.
+- ``GET /subscription`` contract 변경 — ``status.in_(['active', 'cancelled'])`` AND
+  ``(expires_at IS NULL OR expires_at > now())`` 1차 조회. cancelled-but-not-expired
+  케이스도 200 반환(Story 6.1 deferred UX gap 흡수).
+- ``GET /history``는 ``(occurred_at, id)`` 복합 row-value compare base64 cursor pagination.
+
+scope 분리: webhook(자동 갱신) / 환불 자동화는 Story 6.3 forward.
 """
 
 from __future__ import annotations
 
 import re
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated, Final, Literal
 
 import structlog
-from fastapi import APIRouter, Depends, Header, Response, status
+from fastapi import APIRouter, Depends, Header, Query, Response, status
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from app.api.deps import DbSession, current_user, require_basic_consents
 from app.core.exceptions import (
@@ -137,6 +146,53 @@ class SubscribeResponse(BaseModel):
     payment: PaymentLogResponse
 
 
+# --- Story 6.2 — cancel + history schemas ----------------------------------
+
+
+class CancelSubscriptionRequest(BaseModel):
+    """``POST /v1/payments/cancel`` body — 본문 0필드 (UI에서 명시 확인 처리).
+
+    forward-compat — 향후 ``reason: str`` 추가 시 필드 추가만으로 확장. ``extra="forbid"``
+    로 silent unknown field 차단(Story 1.4/2.x 패턴 정합).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class CancelSubscriptionResponse(BaseModel):
+    """``POST /v1/payments/cancel`` 응답 wrapper — cancelled subscription + cancel audit log."""
+
+    subscription: SubscriptionResponse
+    payment: PaymentLogResponse
+
+
+class PaymentHistoryItem(BaseModel):
+    """``GET /v1/payments/history`` row wire shape — ``PaymentLogResponse`` baseline +
+    ``receipt_url`` 추출(Toss 표준 응답 ``raw_payload['receipt']['url']``).
+
+    영수증 URL 부재 시 None(cancel/failed event는 일반적으로 receipt 부재).
+    """
+
+    id: uuid.UUID
+    event_type: Literal["subscribe", "cancel", "renew", "failed", "refund"]
+    status: Literal["success", "failed", "pending"]
+    amount_krw: int
+    occurred_at: datetime
+    provider: Literal["toss", "stripe"]
+    receipt_url: str | None
+
+
+class PaymentHistoryResponse(BaseModel):
+    """``GET /v1/payments/history`` page 응답 — items + opaque cursor.
+
+    ``next_cursor=None``이면 마지막 페이지. 클라이언트는 cursor를 *opaque*로 취급
+    (파싱 X — 그대로 다음 호출 ``?cursor=...`` 파라미터에 전달).
+    """
+
+    items: list[PaymentHistoryItem]
+    next_cursor: str | None
+
+
 def _subscription_to_response(subscription: Subscription) -> SubscriptionResponse:
     return SubscriptionResponse(
         id=subscription.id,
@@ -160,6 +216,30 @@ def _payment_log_to_response(log: PaymentLog) -> PaymentLogResponse:
         amount_krw=log.amount_krw,
         occurred_at=log.occurred_at,
         provider=log.provider,
+    )
+
+
+def _payment_log_to_history_item(log: PaymentLog) -> PaymentHistoryItem:
+    """``PaymentLog`` → ``PaymentHistoryItem`` — ``receipt_url`` 추출 포함.
+
+    ``_payment_log_to_response``와 *분리* — ``subscribe`` endpoint 응답은 ``receipt_url``
+    없는 baseline 유지(스코프 분리). history endpoint만 영수증 URL 노출.
+
+    Toss는 ``status='success'``인 결제에만 영수증 URL을 발급. defense in depth로
+    실패/대기 row의 ``receipt_url``은 서버에서 ``None``으로 마스킹 — 클라이언트 status
+    필터에 의존하지 않게 (모바일/웹 모두 안전).
+    """
+    receipt_url = (
+        payment_service._extract_receipt_url(log.raw_payload) if log.status == "success" else None
+    )
+    return PaymentHistoryItem(
+        id=log.id,
+        event_type=log.event_type,
+        status=log.status,
+        amount_krw=log.amount_krw,
+        occurred_at=log.occurred_at,
+        provider=log.provider,
+        receipt_url=receipt_url,
     )
 
 
@@ -242,7 +322,7 @@ async def subscribe(
     status_code=status.HTTP_200_OK,
     response_model=SubscriptionResponse,
     responses={
-        200: {"description": "Active subscription found"},
+        200: {"description": "Active or cancelled-but-not-expired subscription found"},
         404: {"description": "No active subscription"},
     },
 )
@@ -250,15 +330,30 @@ async def get_subscription(
     db: DbSession,
     user: Annotated[User, Depends(current_user)],
 ) -> SubscriptionResponse:
-    """자기 active 구독 단일 조회 — PIPA Art.35 정합 (``current_user`` 단독, 동의 게이트 X).
+    """자기 *유효* 구독 단일 조회 — PIPA Art.35 정합 (``current_user`` 단독, 동의 게이트 X).
+
+    Story 6.2 contract 변경 (Story 6.1 deferred ``cancelled-but-not-expired`` UX gap 흡수):
+    - ``status='active'`` 또는 ``status='cancelled' AND expires_at > now()`` 1차 조회.
+    - ``expired`` row는 항상 미반환(과거 구독 — 신규 신청 가능 케이스 → 404).
+
+    클라이언트는 ``status === "cancelled"`` 분기로 *"해지됨 — {expires_at}까지 이용 가능"*
+    표시.
 
     오류:
-    - 404 ``code=payments.subscription.not_found`` — 활성 구독 0건 (신청 안 한 사용자
-      정상 케이스).
+    - 404 ``code=payments.subscription.not_found`` — 유효 구독 0건 (미신청 또는 expired만
+      존재).
     """
+    now = datetime.now(UTC)
     result = await db.execute(
         select(Subscription)
-        .where(Subscription.user_id == user.id, Subscription.status == "active")
+        .where(
+            Subscription.user_id == user.id,
+            or_(
+                Subscription.status == "active",
+                # cancelled-but-not-expired는 *유효* 구독으로 노출 (Story 6.2 AC2).
+                (Subscription.status == "cancelled") & (Subscription.expires_at > now),
+            ),
+        )
         .order_by(Subscription.started_at.desc())
         .limit(1)
     )
@@ -267,3 +362,87 @@ async def get_subscription(
         raise NoActiveSubscriptionError("활성 구독이 없습니다")
 
     return _subscription_to_response(subscription)
+
+
+@router.post(
+    "/cancel",
+    status_code=status.HTTP_200_OK,
+    response_model=CancelSubscriptionResponse,
+    responses={
+        200: {"description": "Subscription cancelled (active until expires_at)"},
+        404: {"description": "No active subscription"},
+        409: {"description": "Subscription already cancelled"},
+    },
+)
+async def cancel_subscription(
+    db: DbSession,
+    user: Annotated[User, Depends(current_user)],
+    body: CancelSubscriptionRequest = CancelSubscriptionRequest(),  # noqa: B008
+) -> CancelSubscriptionResponse:
+    """구독 해지 — DB-only ``status='cancelled'`` + cancel audit log INSERT.
+
+    PIPA Art.35 정합 — ``current_user`` 단독(``require_basic_consents`` 미적용). *해지권은
+    동의 철회와 독립*된 약관 명시 사용자 권리(epics.md:847).
+
+    epics.md:852 invariant — *"즉시 차단 X — 다음 결제일까지 활성"*. ``expires_at`` 변경 0,
+    Toss API cancel 호출 X. webhook(Story 6.3)이 ``expires_at`` 도래 시 ``status='expired'``
+    전이.
+
+    오류:
+    - 404 ``code=payments.subscription.not_found`` — 활성 구독 0건 (미신청 또는 expired만).
+    - 409 ``code=payments.subscription.already_cancelled`` — 이미 cancelled-but-not-expired.
+
+    응답:
+    - 200 — 신규 cancellation. ``status_code=200``(상태 전이 — RFC 9110 정합, 신규 리소스
+      생성 아니라 201 X).
+    """
+    # ``body``는 forward-compat placeholder — 본 스토리는 0필드. lint 회피 명시 참조.
+    _ = body
+
+    subscription, cancel_log = await payment_service.cancel_subscription(db, user_id=user.id)
+    await db.commit()
+
+    return CancelSubscriptionResponse(
+        subscription=_subscription_to_response(subscription),
+        payment=_payment_log_to_response(cancel_log),
+    )
+
+
+@router.get(
+    "/history",
+    status_code=status.HTTP_200_OK,
+    response_model=PaymentHistoryResponse,
+    responses={
+        200: {"description": "Payment history page (most-recent-first)"},
+        400: {"description": "Invalid cursor"},
+    },
+)
+async def get_payment_history(
+    db: DbSession,
+    user: Annotated[User, Depends(current_user)],
+    limit: Annotated[int, Query(ge=1, le=50)] = 20,
+    cursor: Annotated[str | None, Query(max_length=200)] = None,
+) -> PaymentHistoryResponse:
+    """결제 이력 cursor pagination — ``(occurred_at DESC, id DESC)`` 정렬.
+
+    PIPA Art.35 정합 — ``current_user`` 단독. 자기 결제 이력 조회는 동의 철회와 독립.
+
+    cursor 부재 → 1페이지(최신 ``limit``건). cursor 송신 → 다음 페이지. ``next_cursor=None``
+    이면 마지막 페이지. 클라이언트는 cursor를 *opaque*로 취급.
+
+    오류:
+    - 400 ``code=payments.history.cursor.invalid`` — cursor 형식 위반.
+    - 422 — ``limit`` 또는 ``cursor`` Pydantic 검증 실패(``ge=1``/``le=50``/``max_length=200``).
+    """
+    # 빈 문자열 cursor (?cursor=) → 1페이지로 정규화 (decode 실패 400 회피).
+    items, next_cursor = await payment_service.list_payment_history(
+        db,
+        user_id=user.id,
+        limit=limit,
+        cursor=cursor or None,
+    )
+
+    return PaymentHistoryResponse(
+        items=[_payment_log_to_history_item(log) for log in items],
+        next_cursor=next_cursor,
+    )

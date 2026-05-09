@@ -22,12 +22,15 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.adapters import toss as toss_adapter
 from app.core.exceptions import (
+    NoActiveSubscriptionError,
     PaymentAmountInvalidError,
     PaymentConfirmFailedError,
+    PaymentHistoryCursorInvalidError,
     PaymentProviderRejectedError,
     PaymentProviderUnavailableError,
     PaymentRetryAfterFailedError,
     SubscriptionAlreadyActiveError,
+    SubscriptionAlreadyCancelledError,
 )
 from app.db.models.payment_log import PaymentLog
 from app.db.models.subscription import Subscription
@@ -602,3 +605,224 @@ async def test_subscribe_failed_log_idempotent_skip_on_duplicate_key(
         # failure_reason은 1차 그대로 보존(2차 INSERT skip).
         assert rows[0].raw_payload is not None
         assert rows[0].raw_payload["failure_reason"] == "1차"
+
+
+# ---------------------------------------------------------------------------
+# Story 6.2 — cancel_subscription / list_payment_history / _extract_receipt_url
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cancel_subscription_happy_path_inserts_cancel_log(
+    session_maker, user_factory
+) -> None:
+    """Story 6.2 AC1 — active → cancelled 전이 + cancel ``payment_log`` row 1건 INSERT.
+
+    invariant 검증:
+    - ``status='cancelled'`` + ``cancelled_at != None``.
+    - ``expires_at`` 변경 0(epics.md:852 *"다음 결제일까지 활성"*).
+    - cancel log: ``event_type='cancel'`` + ``amount_krw=0`` + ``status='success'`` +
+      ``provider_payment_key=None`` + ``raw_payload={"reason": "user_initiated"}`` +
+      ``subscription_id`` set.
+    """
+    user = await user_factory()
+    now = datetime.now(UTC)
+    expires_at_original = now + timedelta(days=30)
+
+    async with session_maker() as session:
+        subscription = Subscription(
+            user_id=user.id,
+            status="active",
+            plan="monthly",
+            plan_price_krw=9900,
+            started_at=now,
+            expires_at=expires_at_original,
+            provider="toss",
+        )
+        session.add(subscription)
+        await session.commit()
+        await session.refresh(subscription)
+        subscription_id = subscription.id
+
+    async with session_maker() as session:
+        cancelled, cancel_log = await payment_service.cancel_subscription(session, user_id=user.id)
+        await session.commit()
+
+    assert cancelled.id == subscription_id
+    assert cancelled.status == "cancelled"
+    assert cancelled.cancelled_at is not None
+    # epics.md:852 invariant — expires_at 변경 0(다음 결제일까지 활성).
+    assert cancelled.expires_at == expires_at_original
+
+    assert cancel_log.user_id == user.id
+    assert cancel_log.subscription_id == subscription_id
+    assert cancel_log.event_type == "cancel"
+    assert cancel_log.amount_krw == 0
+    assert cancel_log.status == "success"
+    assert cancel_log.provider == "toss"
+    assert cancel_log.provider_payment_key is None
+    assert cancel_log.provider_order_id is None
+    assert cancel_log.idempotency_key is None
+    assert cancel_log.raw_payload == {"reason": "user_initiated"}
+
+
+@pytest.mark.asyncio
+async def test_cancel_subscription_no_active_raises_not_found(session_maker, user_factory) -> None:
+    """Story 6.2 AC3 — 활성/cancelled 모두 부재 → ``NoActiveSubscriptionError(404)``."""
+    user = await user_factory()
+
+    async with session_maker() as session:
+        with pytest.raises(NoActiveSubscriptionError):
+            await payment_service.cancel_subscription(session, user_id=user.id)
+
+
+@pytest.mark.asyncio
+async def test_cancel_subscription_already_cancelled_raises_409(
+    session_maker, user_factory
+) -> None:
+    """Story 6.2 AC3 — cancelled-but-not-expired 재호출 → ``SubscriptionAlreadyCancelledError``."""
+    user = await user_factory()
+    now = datetime.now(UTC)
+
+    async with session_maker() as session:
+        subscription = Subscription(
+            user_id=user.id,
+            status="cancelled",
+            plan="monthly",
+            plan_price_krw=9900,
+            started_at=now - timedelta(days=5),
+            expires_at=now + timedelta(days=25),  # not yet expired.
+            cancelled_at=now - timedelta(hours=1),
+            provider="toss",
+        )
+        session.add(subscription)
+        await session.commit()
+
+    async with session_maker() as session:
+        with pytest.raises(SubscriptionAlreadyCancelledError):
+            await payment_service.cancel_subscription(session, user_id=user.id)
+
+
+@pytest.mark.asyncio
+async def test_cancel_subscription_expired_only_raises_not_found(
+    session_maker, user_factory
+) -> None:
+    """Story 6.2 AC3 — expired row만 있으면 ``NoActiveSubscriptionError(404)``
+    (*expired는 활성 미신청 동등*).
+    """
+    user = await user_factory()
+    now = datetime.now(UTC)
+
+    async with session_maker() as session:
+        subscription = Subscription(
+            user_id=user.id,
+            status="expired",
+            plan="monthly",
+            plan_price_krw=9900,
+            started_at=now - timedelta(days=60),
+            expires_at=now - timedelta(days=30),
+            provider="toss",
+        )
+        session.add(subscription)
+        await session.commit()
+
+    async with session_maker() as session:
+        with pytest.raises(NoActiveSubscriptionError):
+            await payment_service.cancel_subscription(session, user_id=user.id)
+
+
+@pytest.mark.asyncio
+async def test_list_payment_history_pagination_round_trip(session_maker, user_factory) -> None:
+    """Story 6.2 AC4 — 5건 fixture + ``limit=2`` → 1페이지(2건+cursor) → 2페이지(2건+cursor)
+    → 3페이지(1건+null cursor). row-value compare invariant 가드.
+    """
+    user = await user_factory()
+    base = datetime.now(UTC).replace(microsecond=0)
+
+    async with session_maker() as session:
+        for i in range(5):
+            log = PaymentLog(
+                user_id=user.id,
+                subscription_id=None,
+                event_type="subscribe",
+                provider="toss",
+                provider_payment_key=f"pk_{i}",
+                provider_order_id=f"order_{i}",
+                amount_krw=9900,
+                status="success",
+                idempotency_key=None,
+                raw_payload=None,
+                # 시계열 — i=0이 가장 오래됨, i=4가 최신.
+                occurred_at=base - timedelta(minutes=10 - i),
+            )
+            session.add(log)
+        await session.commit()
+
+    # 1페이지 — limit=2.
+    async with session_maker() as session:
+        items_p1, next_cursor_p1 = await payment_service.list_payment_history(
+            session, user_id=user.id, limit=2, cursor=None
+        )
+    assert len(items_p1) == 2
+    assert next_cursor_p1 is not None
+    # 최신순 — i=4, i=3.
+    assert items_p1[0].provider_payment_key == "pk_4"
+    assert items_p1[1].provider_payment_key == "pk_3"
+
+    # 2페이지 — cursor 송신.
+    async with session_maker() as session:
+        items_p2, next_cursor_p2 = await payment_service.list_payment_history(
+            session, user_id=user.id, limit=2, cursor=next_cursor_p1
+        )
+    assert len(items_p2) == 2
+    assert next_cursor_p2 is not None
+    assert items_p2[0].provider_payment_key == "pk_2"
+    assert items_p2[1].provider_payment_key == "pk_1"
+
+    # 3페이지 — 1건 + null cursor.
+    async with session_maker() as session:
+        items_p3, next_cursor_p3 = await payment_service.list_payment_history(
+            session, user_id=user.id, limit=2, cursor=next_cursor_p2
+        )
+    assert len(items_p3) == 1
+    assert next_cursor_p3 is None
+    assert items_p3[0].provider_payment_key == "pk_0"
+
+
+@pytest.mark.asyncio
+async def test_list_payment_history_invalid_cursor_raises_400(session_maker, user_factory) -> None:
+    """Story 6.2 AC4 — cursor 형식 위반 → ``PaymentHistoryCursorInvalidError(400)``."""
+    user = await user_factory()
+
+    async with session_maker() as session:
+        with pytest.raises(PaymentHistoryCursorInvalidError):
+            await payment_service.list_payment_history(
+                session, user_id=user.id, limit=20, cursor="!!!not-base64!!!"
+            )
+
+
+@pytest.mark.parametrize(
+    ("raw_payload", "expected"),
+    [
+        (
+            {"receipt": {"url": "https://dashboard.tosspayments.com/receipt/abc"}},
+            "https://dashboard.tosspayments.com/receipt/abc",
+        ),
+        ({"receipt": {"url": "http://example.com/r"}}, "http://example.com/r"),
+        ({"receipt": {"url": "javascript:alert(1)"}}, None),
+        ({"receipt": {"url": "data:text/html,<script>"}}, None),
+        ({"receipt": "not-a-dict"}, None),
+        ({"receipt": {"url": 12345}}, None),  # 비-string.
+        ({"receipt": {}}, None),  # url key 부재.
+        ({"otherkey": "x"}, None),  # receipt key 부재.
+        (None, None),
+        ({}, None),
+    ],
+)
+def test_extract_receipt_url_xss_hardening(raw_payload: dict | None, expected: str | None) -> None:
+    """Story 6.2 AC4 #6 — ``_extract_receipt_url`` XSS hardening 단위.
+
+    ``https://``/``http://`` prefix만 통과, 그 외 (javascript:/data:/dict 아님/url 부재)는
+    None 반환.
+    """
+    assert payment_service._extract_receipt_url(raw_payload) == expected

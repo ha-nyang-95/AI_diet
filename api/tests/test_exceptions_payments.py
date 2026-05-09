@@ -16,12 +16,14 @@ from app.core.exceptions import (
     PaymentAmountInvalidError,
     PaymentConfirmFailedError,
     PaymentError,
+    PaymentHistoryCursorInvalidError,
     PaymentIdempotencyKeyInvalidError,
     PaymentProviderError,
     PaymentProviderPayloadInvalidError,
     PaymentProviderRejectedError,
     PaymentProviderUnavailableError,
     SubscriptionAlreadyActiveError,
+    SubscriptionAlreadyCancelledError,
     TossSecretKeyMissingError,
 )
 
@@ -33,6 +35,8 @@ from app.core.exceptions import (
         (PaymentAmountInvalidError, 400, "payments.amount.invalid"),
         (PaymentConfirmFailedError, 400, "payments.confirm_failed"),
         (SubscriptionAlreadyActiveError, 409, "payments.subscription.already_active"),
+        (SubscriptionAlreadyCancelledError, 409, "payments.subscription.already_cancelled"),
+        (PaymentHistoryCursorInvalidError, 400, "payments.history.cursor.invalid"),
         (NoActiveSubscriptionError, 404, "payments.subscription.not_found"),
         (PaymentProviderRejectedError, 400, "payments.provider.rejected"),
         (PaymentProviderUnavailableError, 502, "payments.provider.unavailable"),
@@ -73,3 +77,25 @@ def test_payment_provider_base_default_status_502() -> None:
     instance = PaymentProviderError("provider boundary error")
     assert instance.status == 502
     assert instance.code == "payments.provider.error"
+
+
+def test_subscription_already_cancelled_to_problem_shape() -> None:
+    """Story 6.2 AC3 — ``SubscriptionAlreadyCancelledError.to_problem`` RFC 7807 dict shape."""
+    exc = SubscriptionAlreadyCancelledError("이미 해지되었습니다")
+    problem = exc.to_problem(instance="/v1/payments/cancel")
+    assert problem.status == 409
+    assert problem.code == "payments.subscription.already_cancelled"
+    assert problem.title == "Subscription already cancelled"
+    assert problem.detail == "이미 해지되었습니다"
+    assert problem.instance == "/v1/payments/cancel"
+
+
+def test_payment_history_cursor_invalid_to_problem_shape() -> None:
+    """Story 6.2 AC4 — ``PaymentHistoryCursorInvalidError.to_problem`` RFC 7807 dict shape."""
+    exc = PaymentHistoryCursorInvalidError("cursor format invalid")
+    problem = exc.to_problem(instance="/v1/payments/history")
+    assert problem.status == 400
+    assert problem.code == "payments.history.cursor.invalid"
+    assert problem.title == "Pagination cursor invalid"
+    assert problem.detail == "cursor format invalid"
+    assert problem.instance == "/v1/payments/history"
