@@ -21,6 +21,10 @@
 
 from __future__ import annotations
 
+import base64 as _b64
+import hashlib as _hashlib
+import hmac as _hmac
+import json as _json
 import uuid
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
@@ -815,3 +819,386 @@ async def test_get_payment_history_limit_over_50_returns_400(
     )
     assert response.status_code == 400
     assert response.json()["code"] == "validation.error"
+
+
+# ---------------------------------------------------------------------------
+# Story 6.3 — POST /v1/payments/webhook 단위 테스트 (~7건) + DF135 회귀 가드 (~2건)
+# ---------------------------------------------------------------------------
+
+
+def _build_webhook_signature(*, raw_body: bytes, secret: str, timestamp: int) -> str:
+    """webhook 시그니처 헤더 합성 helper."""
+    signed = f"{timestamp}.".encode() + raw_body
+    digest = _hmac.new(secret.encode(), signed, _hashlib.sha256).digest()
+    v1 = _b64.b64encode(digest).decode()
+    return f"t={timestamp},v1={v1}"
+
+
+def _webhook_body_dict(
+    *,
+    event_id: str = "evt_router_1",
+    event_type: str = "PAYMENT.STATUS_CHANGED",
+    payment_key: str = "pk_router_renew",
+    order_id: str = "order_router_renew",
+    status_str: str = "DONE",
+    total_amount: int = 9900,
+) -> dict:
+    return {
+        "eventId": event_id,
+        "eventType": event_type,
+        "createdAt": "2026-05-09T12:00:00+09:00",
+        "data": {
+            "paymentKey": payment_key,
+            "orderId": order_id,
+            "status": status_str,
+            "totalAmount": total_amount,
+            "approvedAt": "2026-05-09T12:00:00+09:00",
+        },
+    }
+
+
+async def _seed_subscribe_log_for_webhook(user_id: uuid.UUID, payment_key: str) -> uuid.UUID:
+    """webhook payment_key 매칭에 필요한 baseline subscribe row INSERT."""
+    session_maker = app.state.session_maker
+    now = datetime.now(UTC)
+    async with session_maker() as session:
+        sub = Subscription(
+            user_id=user_id,
+            status="active",
+            plan="monthly",
+            plan_price_krw=9900,
+            started_at=now,
+            expires_at=now + timedelta(days=30),
+            provider="toss",
+        )
+        session.add(sub)
+        await session.commit()
+        await session.refresh(sub)
+
+        log = PaymentLog(
+            user_id=user_id,
+            subscription_id=sub.id,
+            event_type="subscribe",
+            provider="toss",
+            provider_payment_key=payment_key,
+            provider_order_id="order_seed",
+            amount_krw=9900,
+            status="success",
+            occurred_at=now,
+            raw_payload={"seed": True},
+        )
+        session.add(log)
+        await session.commit()
+        return sub.id
+
+
+@pytest.mark.asyncio
+async def test_webhook_secret_key_missing_returns_503(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """1. ``TOSS_WEBHOOK_SECRET_KEY`` 미설정 → 503 + secret_key_missing 코드."""
+    monkeypatch.setattr("app.core.config.settings.toss_webhook_secret_key", "")
+
+    response = await client.post(
+        "/v1/payments/webhook",
+        json=_webhook_body_dict(),
+    )
+    assert response.status_code == 503
+    body = response.json()
+    assert body["code"] == "payments.webhook.secret_key_missing"
+
+
+@pytest.mark.asyncio
+async def test_webhook_signature_header_missing_returns_401(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """2. 시그니처 헤더 missing → 401 + ``code=payments.webhook.signature_invalid``."""
+    monkeypatch.setattr("app.core.config.settings.toss_webhook_secret_key", "whsec_test")
+
+    response = await client.post(
+        "/v1/payments/webhook",
+        json=_webhook_body_dict(),
+    )
+    assert response.status_code == 401
+    body = response.json()
+    assert body["code"] == "payments.webhook.signature_invalid"
+
+
+@pytest.mark.asyncio
+async def test_webhook_signature_mismatch_returns_401(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """3. 시그니처 mismatch(다른 secret으로 sign) → 401 + sentry warning."""
+    secret = "whsec_real"
+    monkeypatch.setattr("app.core.config.settings.toss_webhook_secret_key", secret)
+
+    body_dict = _webhook_body_dict()
+    raw = _json.dumps(body_dict).encode()
+    # 다른 secret으로 sign.
+    bad_header = _build_webhook_signature(
+        raw_body=raw, secret="whsec_attacker", timestamp=int(datetime.now(UTC).timestamp())
+    )
+
+    with patch("app.api.v1.payments.sentry_sdk") as mock_sentry:
+        response = await client.post(
+            "/v1/payments/webhook",
+            content=raw,
+            headers={
+                toss_adapter.TOSS_WEBHOOK_SIGNATURE_HEADER: bad_header,
+                "Content-Type": "application/json",
+            },
+        )
+    assert response.status_code == 401
+    assert response.json()["code"] == "payments.webhook.signature_invalid"
+
+    # sentry capture 호출 검증.
+    assert any(
+        call.args[0] == "payments.webhook.signature_invalid"
+        for call in mock_sentry.capture_message.call_args_list
+    )
+
+
+@pytest.mark.asyncio
+async def test_webhook_renew_happy_path_returns_200_extends_expires_at(
+    client: AsyncClient, user_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """4. happy-path renew → 200 + expires_at +30일 + ``event_type='renew'`` row INSERT."""
+    secret = "whsec_test_happy"
+    monkeypatch.setattr("app.core.config.settings.toss_webhook_secret_key", secret)
+
+    user = await user_factory()
+    payment_key = "pk_webhook_happy"
+    sub_id = await _seed_subscribe_log_for_webhook(user.id, payment_key)
+
+    # original expires_at 기록.
+    async with app.state.session_maker() as session:
+        sub_row = await session.get(Subscription, sub_id)
+        assert sub_row is not None
+        original_expires = sub_row.expires_at
+
+    body_dict = _webhook_body_dict(payment_key=payment_key, event_type="PAYMENT.STATUS_CHANGED")
+    raw = _json.dumps(body_dict).encode()
+    timestamp = int(datetime.now(UTC).timestamp())
+    sig = _build_webhook_signature(raw_body=raw, secret=secret, timestamp=timestamp)
+
+    response = await client.post(
+        "/v1/payments/webhook",
+        content=raw,
+        headers={
+            toss_adapter.TOSS_WEBHOOK_SIGNATURE_HEADER: sig,
+            "Content-Type": "application/json",
+        },
+    )
+
+    assert response.status_code == 200
+    # Toss ack 표준 — 빈 body.
+    assert response.text == ""
+
+    # subscription.expires_at +30일 검증.
+    async with app.state.session_maker() as session:
+        sub_after = await session.get(Subscription, sub_id)
+    assert sub_after is not None
+    assert original_expires is not None
+    assert sub_after.expires_at == original_expires + timedelta(days=30)
+
+    # renew row INSERT 검증.
+    async with app.state.session_maker() as session:
+        renew_logs = (
+            (
+                await session.execute(
+                    select(PaymentLog).where(
+                        PaymentLog.user_id == user.id, PaymentLog.event_type == "renew"
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(list(renew_logs)) == 1
+
+
+@pytest.mark.asyncio
+async def test_webhook_replay_same_event_id_returns_200_no_extra_row(
+    client: AsyncClient, user_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """5. 같은 ``event_id`` 재전송 → 200 + 추가 row INSERT X (replay 분기)."""
+    secret = "whsec_test_replay"
+    monkeypatch.setattr("app.core.config.settings.toss_webhook_secret_key", secret)
+
+    user = await user_factory()
+    payment_key = "pk_webhook_replay"
+    await _seed_subscribe_log_for_webhook(user.id, payment_key)
+
+    body_dict = _webhook_body_dict(
+        event_id="evt_router_replay_xyz",
+        payment_key=payment_key,
+        event_type="PAYMENT.STATUS_CHANGED",
+    )
+    raw = _json.dumps(body_dict).encode()
+    timestamp = int(datetime.now(UTC).timestamp())
+    sig = _build_webhook_signature(raw_body=raw, secret=secret, timestamp=timestamp)
+    headers = {
+        toss_adapter.TOSS_WEBHOOK_SIGNATURE_HEADER: sig,
+        "Content-Type": "application/json",
+    }
+
+    first = await client.post("/v1/payments/webhook", content=raw, headers=headers)
+    assert first.status_code == 200
+
+    second = await client.post("/v1/payments/webhook", content=raw, headers=headers)
+    assert second.status_code == 200
+
+    # renew row count = 1 (replay은 추가 INSERT 없음).
+    async with app.state.session_maker() as session:
+        renew_logs = (
+            (
+                await session.execute(
+                    select(PaymentLog).where(
+                        PaymentLog.user_id == user.id, PaymentLog.event_type == "renew"
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(list(renew_logs)) == 1
+
+
+@pytest.mark.asyncio
+async def test_webhook_payload_schema_violation_returns_400(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """6. body schema 위반(``eventType`` 누락) → 400 + ``code=payments.webhook.payload_invalid``."""
+    secret = "whsec_test_invalid_body"
+    monkeypatch.setattr("app.core.config.settings.toss_webhook_secret_key", secret)
+
+    invalid_body = {
+        "eventId": "evt_invalid",
+        # eventType 누락.
+        "createdAt": "2026-05-09T12:00:00+09:00",
+        "data": {
+            "paymentKey": "pk_x",
+            "orderId": "order_x",
+            "status": "DONE",
+            "totalAmount": 9900,
+        },
+    }
+    raw = _json.dumps(invalid_body).encode()
+    timestamp = int(datetime.now(UTC).timestamp())
+    sig = _build_webhook_signature(raw_body=raw, secret=secret, timestamp=timestamp)
+
+    response = await client.post(
+        "/v1/payments/webhook",
+        content=raw,
+        headers={
+            toss_adapter.TOSS_WEBHOOK_SIGNATURE_HEADER: sig,
+            "Content-Type": "application/json",
+        },
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "payments.webhook.payload_invalid"
+
+
+@pytest.mark.asyncio
+async def test_webhook_payment_key_missing_returns_200_with_no_log_row(
+    client: AsyncClient, user_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """7. paymentKey 미매칭(subscribe row 부재) → 200 + sentry warning + payment_logs row 0건.
+
+    Toss 재시도 회피(200 ack) — 외주 운영 incident 신호로 sentry warning만.
+    """
+    secret = "whsec_test_no_match"
+    monkeypatch.setattr("app.core.config.settings.toss_webhook_secret_key", secret)
+
+    user = await user_factory()  # subscribe row 미생성.
+    body_dict = _webhook_body_dict(payment_key="pk_unknown_router")
+    raw = _json.dumps(body_dict).encode()
+    timestamp = int(datetime.now(UTC).timestamp())
+    sig = _build_webhook_signature(raw_body=raw, secret=secret, timestamp=timestamp)
+
+    response = await client.post(
+        "/v1/payments/webhook",
+        content=raw,
+        headers={
+            toss_adapter.TOSS_WEBHOOK_SIGNATURE_HEADER: sig,
+            "Content-Type": "application/json",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.text == ""
+
+    # payment_logs row 0건.
+    async with app.state.session_maker() as session:
+        rows = (
+            (await session.execute(select(PaymentLog).where(PaymentLog.user_id == user.id)))
+            .scalars()
+            .all()
+        )
+    assert len(list(rows)) == 0
+
+
+# --- DF135 회귀 가드 (~2건) -------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_subscription_active_but_expired_returns_404(
+    client: AsyncClient, user_factory
+) -> None:
+    """DF135 흡수 — ``GET /subscription`` active branch에
+    ``(expires_at IS NULL OR expires_at > now())`` lazy gate 추가. ``status='active'`` AND
+    ``expires_at < now()`` row는 *비정상 race window* 상태로 *유효 구독 노출 X* → 404.
+
+    sweep cron이 expired 전이 전이라도 lazy gate가 차단.
+    """
+    user = await user_factory()
+
+    # active-but-expired row 직접 INSERT.
+    async with app.state.session_maker() as session:
+        sub = Subscription(
+            user_id=user.id,
+            status="active",
+            plan="monthly",
+            plan_price_krw=9900,
+            started_at=datetime.now(UTC) - timedelta(days=60),
+            expires_at=datetime.now(UTC) - timedelta(hours=1),  # 과거.
+            provider="toss",
+        )
+        session.add(sub)
+        await session.commit()
+
+    response = await client.get(
+        "/v1/payments/subscription",
+        headers=auth_headers(user),
+    )
+    assert response.status_code == 404
+    assert response.json()["code"] == "payments.subscription.not_found"
+
+
+@pytest.mark.asyncio
+async def test_get_subscription_active_normal_returns_200(
+    client: AsyncClient, user_factory
+) -> None:
+    """DF135 회귀 0건 — 정상 active(``expires_at > now()``)는 그대로 200 반환."""
+    user = await user_factory()
+
+    async with app.state.session_maker() as session:
+        sub = Subscription(
+            user_id=user.id,
+            status="active",
+            plan="monthly",
+            plan_price_krw=9900,
+            started_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(days=30),
+            provider="toss",
+        )
+        session.add(sub)
+        await session.commit()
+
+    response = await client.get(
+        "/v1/payments/subscription",
+        headers=auth_headers(user),
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "active"

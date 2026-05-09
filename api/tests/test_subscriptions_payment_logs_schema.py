@@ -129,6 +129,104 @@ async def test_subscriptions_enum_invariants(client: AsyncClient) -> None:
     assert provider_values == ["toss", "stripe"]
 
 
+async def test_payment_logs_provider_key_event_type_composite_unique_blocks_same_event(
+    client: AsyncClient,
+    user_factory: UserFactory,
+) -> None:
+    """Story 6.3 alembic 0020 (D9 흡수) — composite UNIQUE 회귀 가드.
+
+    같은 ``(provider, provider_payment_key, event_type)`` 2건 INSERT → IntegrityError.
+    0019 baseline ``(provider, provider_payment_key)`` partial UNIQUE의 invariant 보존
+    (*같은 결제건 같은 event 2번 INSERT 방지*).
+    """
+    _ = client
+    user = await user_factory()
+    session_maker: async_sessionmaker[AsyncSession] = app.state.session_maker
+
+    payment_key = f"pk_{uuid.uuid4()}"
+    now = datetime.now(UTC)
+    async with session_maker() as session:
+        first = PaymentLog(
+            user_id=user.id,
+            event_type="subscribe",
+            provider="toss",
+            provider_payment_key=payment_key,
+            amount_krw=9900,
+            status="success",
+            occurred_at=now,
+        )
+        session.add(first)
+        await session.commit()
+
+    # 같은 (provider, payment_key, event_type) 중복 → 차단.
+    async with session_maker() as session:
+        duplicate = PaymentLog(
+            user_id=user.id,
+            event_type="subscribe",  # 동일 event_type.
+            provider="toss",
+            provider_payment_key=payment_key,
+            amount_krw=9900,
+            status="success",
+            occurred_at=now,
+        )
+        session.add(duplicate)
+        with pytest.raises(IntegrityError):
+            await session.commit()
+
+
+async def test_payment_logs_provider_key_event_type_composite_unique_allows_different_event(
+    client: AsyncClient,
+    user_factory: UserFactory,
+) -> None:
+    """Story 6.3 alembic 0020 (D9 흡수) — 같은 paymentKey 다른 event_type 정상 INSERT.
+
+    Webhook 흐름 invariant — 같은 paymentKey가 *multiple event_type* INSERT 가능
+    (예: ``subscribe`` → ``refund`` / ``renew`` → ``failed``). 0019 baseline은 두 번째
+    INSERT를 차단했으나 0020 composite UNIQUE는 허용.
+    """
+    _ = client
+    user = await user_factory()
+    session_maker: async_sessionmaker[AsyncSession] = app.state.session_maker
+
+    payment_key = f"pk_{uuid.uuid4()}"
+    now = datetime.now(UTC)
+    async with session_maker() as session:
+        subscribe_log = PaymentLog(
+            user_id=user.id,
+            event_type="subscribe",
+            provider="toss",
+            provider_payment_key=payment_key,
+            amount_krw=9900,
+            status="success",
+            occurred_at=now,
+        )
+        session.add(subscribe_log)
+        await session.commit()
+
+    # 같은 paymentKey + 다른 event_type → 허용 (0020 composite UNIQUE invariant).
+    async with session_maker() as session:
+        refund_log = PaymentLog(
+            user_id=user.id,
+            event_type="refund",  # 다른 event_type.
+            provider="toss",
+            provider_payment_key=payment_key,
+            amount_krw=9900,
+            status="success",
+            occurred_at=now,
+        )
+        session.add(refund_log)
+        await session.commit()  # 성공해야 함.
+
+        result = await session.execute(
+            text(
+                "SELECT count(*) FROM payment_logs WHERE provider=:p AND provider_payment_key=:pk"
+            ),
+            {"p": "toss", "pk": payment_key},
+        )
+        count = result.scalar_one()
+    assert count == 2
+
+
 async def test_payment_logs_subscription_fk_set_null_on_subscription_delete(
     client: AsyncClient,
     user_factory: UserFactory,

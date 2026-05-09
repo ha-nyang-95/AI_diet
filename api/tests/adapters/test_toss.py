@@ -15,6 +15,9 @@ NFR-S5 — secret_key는 logger 출력 X (어댑터 코드에서 차단). 테스
 
 from __future__ import annotations
 
+import base64 as _b64
+import hashlib as _hashlib
+import hmac as _hmac
 from typing import Any
 from unittest.mock import patch
 
@@ -27,6 +30,7 @@ from app.core.exceptions import (
     PaymentProviderRejectedError,
     PaymentProviderUnavailableError,
     TossSecretKeyMissingError,
+    WebhookSignatureInvalidError,
 )
 
 
@@ -246,3 +250,138 @@ def test_mask_payment_payload_preserves_receipt_url_for_history_endpoint() -> No
 
     # 동시에 customerEmail은 정상 마스킹.
     assert "customerEmail" not in masked
+
+
+# ---------------------------------------------------------------------------
+# Story 6.3 — webhook 시그니처 검증 + Pydantic body 모델 단위 테스트 (~6건)
+# ---------------------------------------------------------------------------
+
+
+def _build_signature_header(*, raw_body: bytes, secret: str, timestamp: int) -> str:
+    """테스트 헬퍼 — 올바른 ``t=...,v1=...`` 시그니처 헤더 합성."""
+    signed = f"{timestamp}.".encode() + raw_body
+    digest = _hmac.new(secret.encode(), signed, _hashlib.sha256).digest()
+    v1 = _b64.b64encode(digest).decode()
+    return f"t={timestamp},v1={v1}"
+
+
+def test_verify_webhook_signature_happy_path() -> None:
+    """올바른 timestamp + signature → silent return (None)."""
+    secret = "whsec_test"
+    body = b'{"eventId":"evt_1","eventType":"PAYMENT_FAILED"}'
+    now = 1_700_000_000
+    header = _build_signature_header(raw_body=body, secret=secret, timestamp=now)
+
+    # silent return — 예외 없음.
+    assert (
+        toss.verify_webhook_signature(
+            raw_body=body, signature_header=header, secret=secret, now_unix=now
+        )
+        is None
+    )
+
+
+def test_verify_webhook_signature_malformed_header_raises() -> None:
+    """``t=`` 또는 ``v1=`` key 부재 → ``WebhookSignatureInvalidError(401)``."""
+    with pytest.raises(WebhookSignatureInvalidError):
+        toss.verify_webhook_signature(
+            raw_body=b"body",
+            signature_header="v1=abcd",  # t= missing.
+            secret="secret",
+            now_unix=1_700_000_000,
+        )
+
+    with pytest.raises(WebhookSignatureInvalidError):
+        toss.verify_webhook_signature(
+            raw_body=b"body",
+            signature_header="t=1700000000",  # v1= missing.
+            secret="secret",
+            now_unix=1_700_000_000,
+        )
+
+    # 빈 문자열도 거부.
+    with pytest.raises(WebhookSignatureInvalidError):
+        toss.verify_webhook_signature(
+            raw_body=b"body",
+            signature_header="",
+            secret="secret",
+            now_unix=1_700_000_000,
+        )
+
+
+def test_verify_webhook_signature_timestamp_outside_tolerance_raises() -> None:
+    """timestamp drift 5분 초과 → ``WebhookSignatureInvalidError`` (replay attack 차단)."""
+    secret = "whsec_test"
+    body = b'{"eventId":"evt_1"}'
+    past_timestamp = 1_700_000_000
+    # 5분(300초) 초과 = 301초 후.
+    now_outside = past_timestamp + 301
+    header = _build_signature_header(raw_body=body, secret=secret, timestamp=past_timestamp)
+
+    with pytest.raises(WebhookSignatureInvalidError, match="tolerance"):
+        toss.verify_webhook_signature(
+            raw_body=body, signature_header=header, secret=secret, now_unix=now_outside
+        )
+
+
+def test_verify_webhook_signature_mismatch_raises() -> None:
+    """다른 secret으로 sign → mismatch → ``WebhookSignatureInvalidError``."""
+    body = b'{"eventId":"evt_1"}'
+    now = 1_700_000_000
+    # 시그니처는 다른 secret으로 만들고, 검증은 진짜 secret으로.
+    wrong_header = _build_signature_header(raw_body=body, secret="wrong_secret", timestamp=now)
+
+    with pytest.raises(WebhookSignatureInvalidError, match="mismatch"):
+        toss.verify_webhook_signature(
+            raw_body=body, signature_header=wrong_header, secret="real_secret", now_unix=now
+        )
+
+
+def test_verify_webhook_signature_uses_compare_digest() -> None:
+    """``hmac.compare_digest`` 사용 검증 — timing-safe 비교 invariant 가드.
+
+    *Why*: ``==`` 비교는 timing attack에 취약. ``compare_digest`` 사용을 코드 mock으로 강제 검증
+    (코드 회귀 시 이 테스트가 즉시 실패).
+    """
+    secret = "whsec_test"
+    body = b'{"eventId":"evt_1"}'
+    now = 1_700_000_000
+    header = _build_signature_header(raw_body=body, secret=secret, timestamp=now)
+
+    with patch("app.adapters.toss.hmac.compare_digest", return_value=True) as mock_compare:
+        toss.verify_webhook_signature(
+            raw_body=body, signature_header=header, secret=secret, now_unix=now
+        )
+
+    mock_compare.assert_called_once()
+
+
+def test_toss_webhook_event_body_pydantic_validation() -> None:
+    """``TossWebhookEventBody`` happy-path + 미지원 ``event_type`` 거부.
+
+    Story 6.3 AC1 — 4 event_type만 허용 (PAYMENT.STATUS_CHANGED / PAYMENT_FAILED /
+    REFUND_COMPLETED / REFUND_PARTIAL). 그 외는 Pydantic Literal 1차 차단.
+    """
+    from pydantic import ValidationError as _PydErr
+
+    valid = {
+        "eventId": "evt_test_123",
+        "eventType": "PAYMENT.STATUS_CHANGED",
+        "createdAt": "2026-05-09T12:00:00+09:00",
+        "data": {"paymentKey": "pk_test", "orderId": "order_test"},
+    }
+    parsed = toss.TossWebhookEventBody.model_validate(valid)
+    assert parsed.event_id == "evt_test_123"
+    assert parsed.event_type == "PAYMENT.STATUS_CHANGED"
+    assert isinstance(parsed.data, dict)
+    assert parsed.data["paymentKey"] == "pk_test"
+
+    # 미지원 event_type 거부.
+    invalid = {**valid, "eventType": "ORDER_CREATED"}
+    with pytest.raises(_PydErr):
+        toss.TossWebhookEventBody.model_validate(invalid)
+
+    # event_id 필수.
+    invalid_missing = {k: v for k, v in valid.items() if k != "eventId"}
+    with pytest.raises(_PydErr):
+        toss.TossWebhookEventBody.model_validate(invalid_missing)

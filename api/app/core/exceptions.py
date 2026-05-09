@@ -1026,3 +1026,61 @@ class PaymentHistoryCursorInvalidError(PaymentError):
     status: ClassVar[int] = 400
     code: ClassVar[str] = "payments.history.cursor.invalid"
     title: ClassVar[str] = "Pagination cursor invalid"
+
+
+# --- Story 6.3 — 결제 webhook 신규 예외 ---
+
+
+class WebhookSignatureInvalidError(PaymentError):
+    """Toss webhook 시그니처 검증 미통과 — *replay attack 또는 위변조 시도*.
+
+    분기 사유:
+    - 헤더 누락(``TossPayments-Webhook-Signature``).
+    - 헤더 형식 위반(``t=<unix>,v1=<base64>`` regex/key 부재).
+    - timestamp drift 5분 초과(``_TIMESTAMP_TOLERANCE_SECONDS``).
+    - HMAC-SHA256 mismatch (``hmac.compare_digest`` False).
+
+    모두 단일 401 응답 + ``code=payments.webhook.signature_invalid`` 코드(분기 세분화는
+    Sentry breadcrumb extras에 ``reason``로 기록 — 외부 응답 enumeration 방지).
+    """
+
+    status: ClassVar[int] = 401
+    code: ClassVar[str] = "payments.webhook.signature_invalid"
+    title: ClassVar[str] = "Webhook signature invalid"
+
+
+class WebhookPayloadInvalidError(PaymentError):
+    """Toss webhook body 검증 위반 — JSON 파싱 실패 / Pydantic ValidationError / amount mismatch.
+
+    400 — RFC 9110 §15.5.1 정합(*malformed request*). Toss 측 webhook subscription 잘못
+    설정 또는 Toss 응답 schema drift 신호. ``WebhookSignatureInvalidError(401)``과 *분리* —
+    시그니처는 통과했으나 본문이 invalid한 케이스.
+
+    분기:
+    - JSON 파싱 실패(``JSONDecodeError``).
+    - ``TossWebhookEventBody`` Pydantic ValidationError(``eventId``/``eventType``/``data`` 등
+      필수 필드 누락).
+    - ``TossWebhookPaymentData`` Pydantic ValidationError(``paymentKey``/``orderId``/
+      ``totalAmount`` 검증).
+    - amount mismatch(renew event ``data.totalAmount != MONTHLY_PLAN_PRICE_KRW`` — race
+      attack 방어).
+    """
+
+    status: ClassVar[int] = 400
+    code: ClassVar[str] = "payments.webhook.payload_invalid"
+    title: ClassVar[str] = "Webhook payload invalid"
+
+
+class WebhookSecretKeyMissingError(PaymentError):
+    """``settings.toss_webhook_secret_key`` 빈 문자열 — fail-fast(retry 무효 + cost 0).
+
+    503 — RFC 9110 §15.6.4 정합(*service unavailable*). 운영 부팅 시 staging/prod 환경에서
+    *부팅 검증* 미수행(Story 8 hardening forward) — runtime fail-fast로 우선 안전.
+
+    ``TossSecretKeyMissingError(503, payments.toss.secret_key_missing)``와 *분리* —
+    webhook secret은 별 키(`whsec_*`/`wsk_*` prefix), confirm secret과 혼동 회피.
+    """
+
+    status: ClassVar[int] = 503
+    code: ClassVar[str] = "payments.webhook.secret_key_missing"
+    title: ClassVar[str] = "Webhook secret key not configured"

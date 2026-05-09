@@ -176,6 +176,12 @@ class Settings(BaseSettings):
 
     # --- 결제 ---
     toss_secret_key: str = ""
+    # Story 6.3 — Toss webhook secret. ``TOSS_SECRET_KEY``와 *별 키*(Toss 콘솔에서
+    # webhook용 별도 발급 — ``whsec_*``/``wsk_*`` prefix). 빈 문자열이면 webhook
+    # endpoint가 503 ``payments.webhook.secret_key_missing`` 반환(runtime fail-fast).
+    # dev/ci/test는 빈 값 허용(테스트는 fixture 시크릿 주입). prod/staging *부팅 검증*은
+    # Story 8 hardening forward — 현 baseline은 runtime fail-fast로 우선 안전.
+    toss_webhook_secret_key: str = ""
 
     # --- 환경 ---
     environment: str = Field(default="dev", description="dev | staging | prod | ci | test")
