@@ -332,7 +332,10 @@ async def test_logout_web_clears_all_three_cookies_with_max_age_zero(
     # 발급 시 path와 일치해야 브라우저가 매칭해 expire.
     assert "Path=/" in by_key["bn_access"] and "Path=/v1/auth" not in by_key["bn_access"]
     assert "Path=/v1/auth" in by_key["bn_refresh"]
-    assert "Path=/v1/admin" in by_key["bn_admin_access"]
+    # Story 7.1 CR — bn_admin_access path 변경 (/v1/admin → /). 발급/expire 동기화.
+    admin_cookie_str = by_key["bn_admin_access"]
+    assert "Path=/" in admin_cookie_str
+    assert "Path=/v1/admin" not in admin_cookie_str
 
 
 async def test_admin_exchange_succeeds_for_admin(
@@ -361,34 +364,28 @@ async def test_admin_exchange_succeeds_for_admin(
 
 
 async def test_admin_exchange_web_returns_cookie_only_no_body_token(
-    client: AsyncClient, stubbed_google: None, user_factory: UserFactory
+    client: AsyncClient, user_factory: UserFactory
 ) -> None:
-    """P20 — Web 분기(`bn_refresh` 쿠키 보유): body의 admin_access_token=None + Set-Cookie 발급."""
-    # admin 사용자 + Web 로그인으로 bn_refresh 쿠키 부여.
-    admin = await user_factory(role="admin", google_sub="admin-sub-web-flow")
-    # _stub_google이 기본 GOOGLE_SUB_FIXTURE를 사용하므로 admin sub으로 재 stub.
-    import pytest as _pytest
+    """P20 — Web 분기(`?platform=web` 쿼리): body의 admin_access_token=None + Set-Cookie 발급.
 
-    monkeypatch = _pytest.MonkeyPatch()
-    try:
-        _stub_google(monkeypatch, google_sub=admin.google_sub, email=admin.email)
-        web_login = await client.post("/v1/auth/google", json=_login_payload("web"))
-        assert web_login.status_code == 200
-    finally:
-        monkeypatch.undo()
-
-    # Web admin exchange — 쿠키가 자동 동봉되며 별도 Authorization 헤더도 필요.
-    response = await client.post("/v1/auth/admin/exchange", headers=auth_headers(admin))
+    Story 7.1 CR — 이전엔 `bn_refresh` 쿠키 존재 여부로 추론했으나 cookie path scope 불일치
+    (`/v1/auth`)로 Next.js proxy 경유 시 cookie 누락 → 항상 mobile 분기 추론 → Web에 admin
+    JWT 평문 leak. 명시 query param으로 detection.
+    """
+    admin = await user_factory(role="admin")
+    response = await client.post(
+        "/v1/auth/admin/exchange?platform=web", headers=auth_headers(admin)
+    )
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["admin_access_token"] is None  # NFR-S2 — Web은 body에 token 노출 X.
     assert body["expires_in_seconds"] == 8 * 60 * 60
 
-    # bn_admin_access Set-Cookie 발급 + Path=/v1/admin.
+    # Story 7.1 CR — bn_admin_access Set-Cookie 발급 + Path=/ (이전 /v1/admin → / 동기화).
     cookies = response.headers.get_list("set-cookie")
     admin_cookie = next((c for c in cookies if c.startswith("bn_admin_access=")), None)
     assert admin_cookie is not None, cookies
-    assert "Path=/v1/admin" in admin_cookie
+    assert "Path=/" in admin_cookie and "Path=/v1/admin" not in admin_cookie
     assert "HttpOnly" in admin_cookie
     assert "samesite=lax" in admin_cookie.lower()
 

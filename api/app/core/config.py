@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import re
 from pathlib import Path
 from typing import Any
@@ -191,6 +192,28 @@ class Settings(BaseSettings):
     cors_allowed_origins: list[str] = Field(
         default_factory=lambda: ["http://localhost:3000", "http://localhost:8081"]
     )
+
+    # --- Admin IP allowlist (Story 7.1, NFR-S8) ---
+    # comma-separated CIDR(IPv4/IPv6 모두 지원). 빈 list → 화이트리스트 비활성(MVP
+    # default — 외주 클라이언트별 옵션). 잘못된 CIDR 형식은 부팅 시 ValueError raise
+    # (fail-fast — 잘못된 설정으로 prod 가동 차단).
+    admin_ip_allowlist: list[str] = Field(default_factory=list)
+
+    @field_validator("admin_ip_allowlist", mode="before")
+    @classmethod
+    def _split_admin_ip_allowlist(cls, v: str | list[str] | None) -> list[str]:
+        if v is None or v == "":
+            return []
+        if isinstance(v, str):
+            cidrs = [cidr.strip() for cidr in v.split(",") if cidr.strip()]
+        else:
+            cidrs = list(v)
+        for cidr in cidrs:
+            try:
+                ipaddress.ip_network(cidr, strict=False)
+            except ValueError as exc:
+                raise ValueError(f"invalid admin IP allowlist CIDR {cidr!r}: {exc}") from exc
+        return cidrs
 
     @field_validator("cors_allowed_origins", mode="before")
     @classmethod

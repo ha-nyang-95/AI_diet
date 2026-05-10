@@ -129,6 +129,14 @@ class AdminRoleRequiredError(AuthError):
     title: ClassVar[str] = "Admin role required"
 
 
+class AdminIpBlockedError(AuthError):
+    """Story 7.1 NFR-S8 — admin endpoint 접근 IP가 ``ADMIN_IP_ALLOWLIST`` 범위 밖."""
+
+    status: ClassVar[int] = 403
+    code: ClassVar[str] = "auth.admin.ip_blocked"
+    title: ClassVar[str] = "Admin IP not allowed"
+
+
 class AccountDeletedError(AuthError):
     status: ClassVar[int] = 403
     code: ClassVar[str] = "auth.account.deleted"

@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import (
     AccessTokenInvalidError,
+    AdminIpBlockedError,
     AdminRoleRequiredError,
     AutomatedDecisionConsentMissingError,
     BasicConsentMissingError,
@@ -107,11 +108,37 @@ async def current_admin_claims(
     return verify_admin_token(token)
 
 
+async def require_admin_ip_allowed(
+    request: Request,
+    claims: Annotated[AdminTokenClaims, Depends(current_admin_claims)],
+) -> AdminTokenClaims:
+    """Story 7.1 — admin JWT 검증 *직후* IP 화이트리스트 검사. 미통과 시 403.
+
+    JWT 검증 → IP 검증 → DB role 재확인(``current_admin``) 3-tier chain의 2번째 게이트.
+    ``ADMIN_IP_ALLOWLIST``가 빈 list(MVP default)이면 graceful pass — NFR-S8 정합.
+
+    Story 7.1 CR — ``current_admin``이 본 dep을 transitively 포함하도록 체인 재구성
+    (Story 7.2/7.4가 ``Depends(current_admin)``만 wire해도 IP 가드 자동 적용).
+
+    순환 import 회피 — ``settings``/``check_admin_ip_allowed``는 함수 내 lazy import.
+    """
+    from app.core.config import settings
+    from app.core.proxy import check_admin_ip_allowed
+
+    if not check_admin_ip_allowed(request, settings.admin_ip_allowlist):
+        raise AdminIpBlockedError("admin endpoint accessed from non-allowlisted IP")
+    return claims
+
+
 async def current_admin(
     db: DbSession,
-    claims: Annotated[AdminTokenClaims, Depends(current_admin_claims)],
+    claims: Annotated[AdminTokenClaims, Depends(require_admin_ip_allowed)],
 ) -> User:
-    """admin JWT 검증 + DB에서 user 로드 + role==admin 재확인."""
+    """admin JWT 검증 + IP 가드 + DB에서 user 로드 + role==admin 재확인.
+
+    Story 7.1 CR — IP 가드를 transitive dep으로 포함해 *모든* admin endpoint가
+    ``Depends(current_admin)``만 wire해도 NFR-S8 자동 적용 (Story 7.2/7.4 forward-compat).
+    """
     result = await db.execute(select(User).where(User.id == claims.sub, User.deleted_at.is_(None)))
     user = result.scalar_one_or_none()
     if user is None:

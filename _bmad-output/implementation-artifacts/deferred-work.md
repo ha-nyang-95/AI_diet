@@ -2,6 +2,16 @@
 
 리뷰·구현 과정에서 식별되었으나 다음 스토리·시점으로 미룬 항목 모음.
 
+## Deferred from: code review of 7-1-관리자-로그인-admin-jwt-가드 (2026-05-10)
+
+- **`test_admin_whoami_blocked_when_ip_not_allowlisted` 분기 misalignment** [`api/tests/api/v1/test_admin_auth_baseline.py:507-526`] — ASGITransport `request.client=None`으로 인해 deny-by-default 분기를 hit. 스펙 의도(`valid IP가 allowlist 미일치 시 403`) 미검증. 수정에 ASGITransport `client=("ip", port)` 설정 또는 starlette Request 패치 필요. **재검토 시점**: Story 8.x Web E2E test infra(vitest/RTL) 도입 시점 일괄 정비.
+- **AC8 budget(`~21 web 단위 케이스`) vs Tasks 4.3/4.4/5.5/5.6/6.3 deferred 모순** [spec text] — Web 테스트 인프라 부재(Story 4.3 precedent)로 5건 모두 deferred되었으나 AC8 텍스트는 여전히 21건 budget 명시. **재검토 시점**: Story 8.4 polish — vitest/RTL 도입 + admin 흐름 web 단위 테스트 일괄 작성.
+- **`_mask_email`이 짧은 local part(2-3자)에서 식별성 노출** [`api/app/api/v1/auth.py:559-570`] — `ab@x.com` → `a***@x.com`. NFR-S5 contract 자체는 만족하나 33% 정보 노출. **재검토 시점**: 마스킹 정책 재검토 시점 일괄(예: `len(local) <= 2` boundary 확장 또는 hash-based 마스킹).
+- **`atob` 기반 JWT decode가 UTF-8 페이로드에 fragile** [`web/src/lib/admin-auth.ts:38-42`, `web/src/middleware.ts:40-41`] — 현 admin JWT는 ASCII-only로 즉시 영향 0. 미래 claim에 i18n 문자열 추가 시 silent breakage. **재검토 시점**: JWT claim에 비-ASCII 추가 시점 — `Buffer.from(padded, 'base64').toString('utf-8')` 또는 `TextDecoder` 전환.
+- **`evaluateAdminCookie`가 malformed cookie를 `"missing"`으로 분류 — middleware는 `"stale"` 분류 → UX 비대칭** [`web/src/lib/admin-auth.ts:55-57`] — layout과 middleware의 분기 의미 불일치. **재검토 시점**: admin 흐름 UX polish(Story 8.4).
+- **`safeNext` 1024자 cap이 다운스트림 URL 인코딩 폭발(3x) 미반영** [`web/src/lib/safe-next.ts:14`] — 800자 next + URL encode → 414 URI Too Long 가능성. 실 trigger 사례 0. **재검토 시점**: Story 8.x hardening 또는 safeNext 헬퍼 통합 정비 시점.
+- **`_FakeRequest` test helper가 starlette `Headers` 인터페이스와 구조적 불일치** [`api/tests/core/test_admin_ip_allowlist.py:15-47`] — `# type: ignore[arg-type]`로 우회. 현 구현이 `.get`만 사용해 정상 동작하나, `proxy.py` 리팩토링 시 silent test pass 위험. **재검토 시점**: `proxy.py:get_real_client_ip` 리팩토링 시점 또는 conftest fixture 도입 시점.
+
 ## Deferred from: code review of 6-3-결제-webhook-idempotency-키 (2026-05-10)
 
 - **W0a — Toss billingKey paymentKey rotation 가정 검증** [`api/app/services/payment_service.py:707-726`] — `_resolve_subscription_for_payment_key`가 `event_type='subscribe'` row 1건에만 의존. Toss billingKey 자동결제는 매 결제 새 paymentKey 발급이 표준 PG 패턴 — 가정 위반 시 모든 renew webhook이 `subscribe_row_missing` warning + silent drop → expires_at 무한 미갱신. 현 sandbox baseline은 renew webhook 미발사라 영향 0. **재검토 시점**: Story 8.x prod 전환 — Toss billing API 통합 + `subscriptions.billing_key` 컬럼 도입과 함께 billingKey-aware lookup으로 교체.

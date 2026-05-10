@@ -9,7 +9,7 @@
 Cookie 정책:
 - bn_access:        HttpOnly + Secure(prod) + SameSite=Lax + Path=/         (30일)
 - bn_refresh:       HttpOnly + Secure(prod) + SameSite=Lax + Path=/v1/auth  (90일)
-- bn_admin_access:  HttpOnly + Secure(prod) + SameSite=Lax + Path=/v1/admin (8h)
+- bn_admin_access:  HttpOnly + Secure(prod) + SameSite=Lax + Path=/         (8h)
 
 `Secure` flag는 dev/ci/test 환경에서만 생략(NON_SECURE_COOKIE_ENVIRONMENTS).
 SameSite=Lax 채택 사유: Strict는 OAuth callback의 cross-site initiated redirect chain
@@ -23,7 +23,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Cookie, Depends, Request, Response, status
+from fastapi import APIRouter, Cookie, Depends, Query, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
@@ -37,6 +37,8 @@ from app.adapters.google_oauth import (
 )
 from app.api.deps import (
     DbSession,
+    current_admin,
+    current_admin_claims,
     current_user,
 )
 from app.core.config import (
@@ -55,6 +57,7 @@ from app.core.exceptions import (
 )
 from app.core.proxy import get_real_client_ip
 from app.core.security import (
+    AdminTokenClaims,
     create_admin_token,
     create_refresh_token,
     create_user_token,
@@ -143,6 +146,25 @@ class AdminExchangeResponse(BaseModel):
     expires_in_seconds: int
 
 
+class AdminWhoamiResponse(BaseModel):
+    """Story 7.1 — admin 전용 *인증 정보 echo* + Web ``(admin)`` layout.tsx server-side
+    guard fixture.
+
+    이메일은 마스킹된 형태(``j***@example.com``)로 노출(NFR-S5 정합) — 본 endpoint는
+    admin 자기 자신 정보 조회이지만 향후 *audit log*(Story 7.3) 기록 대상이라 response
+    payload 자체에 plaintext 이메일을 포함하지 않는다(server-side log + UI 양쪽 마스킹
+    일관). ``token_expires_at``은 admin JWT exp claim — Web에서 8h countdown UI 등에
+    재사용 가능.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: uuid.UUID
+    email_masked: str
+    role: Literal["admin"]
+    token_expires_at: datetime
+
+
 # --- 쿠키 헬퍼 ------------------------------------------------------------
 
 
@@ -173,6 +195,10 @@ def _set_user_cookies(response: Response, access: str, refresh: str) -> None:
 
 
 def _set_admin_cookie(response: Response, admin_access: str) -> None:
+    # Story 7.1 CR — path=/ (Web ``/admin/*`` route group의 server-side guard가 cookie를
+    # 읽으려면 cookie scope이 해당 URL 공간에 포함되어야 함). 기존 ``/v1/admin``은 ``/v1/admin/*``
+    # backend endpoint와만 prefix 매칭 → Web layout/middleware가 항상 cookie 부재로 처리 →
+    # 무한 redirect. 8h TTL + httpOnly + SameSite=Lax로 noise scope 보완.
     response.set_cookie(
         key="bn_admin_access",
         value=admin_access,
@@ -180,7 +206,7 @@ def _set_admin_cookie(response: Response, admin_access: str) -> None:
         httponly=True,
         secure=_is_secure_environment(),
         samesite="lax",
-        path="/v1/admin",
+        path="/",
     )
 
 
@@ -189,7 +215,7 @@ def clear_auth_cookies(response: Response) -> None:
     for key, path in (
         ("bn_access", "/"),
         ("bn_refresh", "/v1/auth"),
-        ("bn_admin_access", "/v1/admin"),
+        ("bn_admin_access", "/"),
     ):
         response.set_cookie(
             key=key,
@@ -516,16 +542,63 @@ async def logout(
 async def admin_exchange(
     response: Response,
     user: Annotated[User, Depends(current_user)],
-    bn_refresh: Annotated[str | None, Cookie()] = None,
+    platform: Annotated[PlatformLiteral, Query()] = "mobile",
 ) -> AdminExchangeResponse:
+    """user JWT → admin JWT(8h) 교환.
+
+    ``platform`` 쿼리 파라미터로 Web/Mobile 분기:
+    - ``platform=web`` → ``bn_admin_access`` httpOnly 쿠키만 발급, body의
+      ``admin_access_token=None`` (NFR-S2 — JS에서 token 노출 차단).
+    - ``platform=mobile``(default) → 쿠키 + body 둘 다 발급 (모바일은 secure-store 저장).
+
+    Story 7.1 CR — 이전엔 ``bn_refresh`` 쿠키 존재 여부로 추론했으나 cookie path scope
+    불일치(``/v1/auth``)로 Next.js proxy 경유 시 cookie 누락 → 항상 mobile 분기 추론 →
+    Web에 admin JWT 평문 leak. 명시 query param으로 detection 분리.
+    """
     if user.role != "admin":
         raise AdminRoleRequiredError("admin role required")
     admin_token = create_admin_token(user.id)
-    # platform 추론: bn_refresh 쿠키가 있으면 Web → 쿠키만 발급(body는 token 노출 X).
-    # 그 외(모바일)는 body로 token 반환(secure-store 저장).
-    is_web = bool(bn_refresh)
     _set_admin_cookie(response, admin_token)
     return AdminExchangeResponse(
-        admin_access_token=None if is_web else admin_token,
+        admin_access_token=None if platform == "web" else admin_token,
         expires_in_seconds=ADMIN_ACCESS_TOKEN_TTL_SECONDS,
+    )
+
+
+# --- /admin/whoami ------------------------------------------------------
+
+
+def _mask_email(email: str) -> str:
+    """Story 7.1 NFR-S5 — ``j***@example.com`` 패턴 마스킹.
+
+    local part 첫 1자 + ``***`` + ``@domain``. local part 길이 1자 시 ``***@domain``
+    (개인 식별성 0). ``@`` 부재/빈 string은 ``***``로 안전 fallback.
+    """
+    if "@" not in email:
+        return "***"
+    local, _, domain = email.partition("@")
+    if len(local) <= 1:
+        return f"***@{domain}"
+    return f"{local[0]}***@{domain}"
+
+
+@router.get("/admin/whoami")
+async def admin_whoami(
+    user: Annotated[User, Depends(current_admin)],
+    claims: Annotated[AdminTokenClaims, Depends(current_admin_claims)],
+) -> AdminWhoamiResponse:
+    """Story 7.1 — admin JWT 검증 + IP 가드 + DB role 재확인 + 마스킹된 echo.
+
+    Web ``(admin)/admin/layout.tsx`` server-side guard 회복용 + admin auth invariant
+    회귀 가드 fixture. *읽기 전용* — Story 7.3 audit log 기록 대상 X (admin meta-info
+    조회는 enum scope 제외).
+
+    Story 7.1 CR — IP 가드는 ``current_admin``의 transitive dep으로 자동 적용. ``claims``는
+    ``token_expires_at`` echo용 (FastAPI dep cache 공유 — 추가 검증 비용 0).
+    """
+    return AdminWhoamiResponse(
+        user_id=user.id,
+        email_masked=_mask_email(user.email),
+        role="admin",
+        token_expires_at=claims.expires_at,
     )

@@ -64,8 +64,47 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Admin Exchange */
+        /**
+         * Admin Exchange
+         * @description user JWT → admin JWT(8h) 교환.
+         *
+         *     ``platform`` 쿼리 파라미터로 Web/Mobile 분기:
+         *     - ``platform=web`` → ``bn_admin_access`` httpOnly 쿠키만 발급, body의
+         *       ``admin_access_token=None`` (NFR-S2 — JS에서 token 노출 차단).
+         *     - ``platform=mobile``(default) → 쿠키 + body 둘 다 발급 (모바일은 secure-store 저장).
+         *
+         *     Story 7.1 CR — 이전엔 ``bn_refresh`` 쿠키 존재 여부로 추론했으나 cookie path scope
+         *     불일치(``/v1/auth``)로 Next.js proxy 경유 시 cookie 누락 → 항상 mobile 분기 추론 →
+         *     Web에 admin JWT 평문 leak. 명시 query param으로 detection 분리.
+         */
         post: operations["admin_exchange_v1_auth_admin_exchange_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/auth/admin/whoami": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Admin Whoami
+         * @description Story 7.1 — admin JWT 검증 + IP 가드 + DB role 재확인 + 마스킹된 echo.
+         *
+         *     Web ``(admin)/admin/layout.tsx`` server-side guard 회복용 + admin auth invariant
+         *     회귀 가드 fixture. *읽기 전용* — Story 7.3 audit log 기록 대상 X (admin meta-info
+         *     조회는 enum scope 제외).
+         *
+         *     Story 7.1 CR — IP 가드는 ``current_admin``의 transitive dep으로 자동 적용. ``claims``는
+         *     ``token_expires_at`` echo용 (FastAPI dep cache 공유 — 추가 검증 비용 0).
+         */
+        get: operations["admin_whoami_v1_auth_admin_whoami_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -926,6 +965,36 @@ export interface components {
             admin_access_token: string | null;
             /** Expires In Seconds */
             expires_in_seconds: number;
+        };
+        /**
+         * AdminWhoamiResponse
+         * @description Story 7.1 — admin 전용 *인증 정보 echo* + Web ``(admin)`` layout.tsx server-side
+         *     guard fixture.
+         *
+         *     이메일은 마스킹된 형태(``j***@example.com``)로 노출(NFR-S5 정합) — 본 endpoint는
+         *     admin 자기 자신 정보 조회이지만 향후 *audit log*(Story 7.3) 기록 대상이라 response
+         *     payload 자체에 plaintext 이메일을 포함하지 않는다(server-side log + UI 양쪽 마스킹
+         *     일관). ``token_expires_at``은 admin JWT exp claim — Web에서 8h countdown UI 등에
+         *     재사용 가능.
+         */
+        AdminWhoamiResponse: {
+            /**
+             * User Id
+             * Format: uuid
+             */
+            user_id: string;
+            /** Email Masked */
+            email_masked: string;
+            /**
+             * Role
+             * @constant
+             */
+            role: "admin";
+            /**
+             * Token Expires At
+             * Format: date-time
+             */
+            token_expires_at: string;
         };
         /**
          * AllergenExposure
@@ -1937,13 +2006,14 @@ export interface operations {
     };
     admin_exchange_v1_auth_admin_exchange_post: {
         parameters: {
-            query?: never;
+            query?: {
+                platform?: "mobile" | "web";
+            };
             header?: {
                 Authorization?: string | null;
             };
             path?: never;
             cookie?: {
-                bn_refresh?: string | null;
                 bn_access?: string | null;
             };
         };
@@ -1956,6 +2026,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AdminExchangeResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    admin_whoami_v1_auth_admin_whoami_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                Authorization?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                bn_admin_access?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminWhoamiResponse"];
                 };
             };
             /** @description Validation Error */
