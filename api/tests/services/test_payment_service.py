@@ -826,3 +826,544 @@ def test_extract_receipt_url_xss_hardening(raw_payload: dict | None, expected: s
     None 반환.
     """
     assert payment_service._extract_receipt_url(raw_payload) == expected
+
+
+# ---------------------------------------------------------------------------
+# Story 6.3 AC4 — handle_webhook_event 단위 테스트 (~10건)
+# ---------------------------------------------------------------------------
+
+
+def _webhook_event_body(
+    *,
+    event_id: str = "evt_test_1",
+    event_type: str = "PAYMENT.STATUS_CHANGED",
+    payment_key: str = "pk_renew_1",
+    order_id: str = "order_renew_1",
+    status: str = "DONE",
+    total_amount: int = 9900,
+) -> toss_adapter.TossWebhookEventBody:
+    """webhook body fixture — TossWebhookEventBody envelope + data sub-dict."""
+    return toss_adapter.TossWebhookEventBody.model_validate(
+        {
+            "eventId": event_id,
+            "eventType": event_type,
+            "createdAt": "2026-05-09T12:00:00+09:00",
+            "data": {
+                "paymentKey": payment_key,
+                "orderId": order_id,
+                "status": status,
+                "totalAmount": total_amount,
+                "approvedAt": "2026-05-09T12:00:00+09:00",
+            },
+        }
+    )
+
+
+async def _seed_active_subscription_with_subscribe_log(
+    session_maker: async_sessionmaker,
+    *,
+    user_id: uuid.UUID,
+    payment_key: str,
+    started_at: datetime | None = None,
+) -> tuple[Subscription, PaymentLog]:
+    """Webhook 처리에 필요한 baseline — active subscription + subscribe payment_log row."""
+    started = started_at or datetime.now(UTC)
+    expires = started + timedelta(days=30)
+    async with session_maker() as session:
+        subscription = Subscription(
+            user_id=user_id,
+            status="active",
+            plan="monthly",
+            plan_price_krw=9900,
+            started_at=started,
+            expires_at=expires,
+            provider="toss",
+        )
+        session.add(subscription)
+        await session.commit()
+        await session.refresh(subscription)
+
+        log = PaymentLog(
+            user_id=user_id,
+            subscription_id=subscription.id,
+            event_type="subscribe",
+            provider="toss",
+            provider_payment_key=payment_key,
+            provider_order_id="order_subscribe_seed",
+            amount_krw=9900,
+            status="success",
+            occurred_at=started,
+            raw_payload={"seed": True},
+        )
+        session.add(log)
+        await session.commit()
+        await session.refresh(log)
+        await session.refresh(subscription)
+        return subscription, log
+
+
+@pytest.mark.asyncio
+async def test_webhook_renew_happy_path_extends_expires_at(session_maker, user_factory) -> None:
+    """1. happy-path renew(DONE) → ``expires_at += 30일`` + ``event_type='renew'`` row INSERT."""
+    user = await user_factory()
+    payment_key = "pk_renew_happy"
+    subscription, _ = await _seed_active_subscription_with_subscribe_log(
+        session_maker, user_id=user.id, payment_key=payment_key
+    )
+    original_expires = subscription.expires_at
+
+    body = _webhook_event_body(payment_key=payment_key, event_type="PAYMENT.STATUS_CHANGED")
+
+    async with session_maker() as session:
+        payment_log, was_replay = await payment_service.handle_webhook_event(
+            session, event_body=body, idempotency_key=None
+        )
+        await session.commit()
+
+    assert was_replay is False
+    assert payment_log is not None
+    assert payment_log.event_type == "renew"
+    assert payment_log.status == "success"
+    assert payment_log.amount_krw == 9900
+    assert payment_log.idempotency_key == f"toss:event:{body.event_id}"
+
+    # subscription.expires_at +30일 검증.
+    async with session_maker() as session:
+        refreshed = await session.get(Subscription, subscription.id)
+    assert refreshed is not None
+    assert original_expires is not None
+    assert refreshed.expires_at == original_expires + timedelta(days=30)
+
+
+@pytest.mark.asyncio
+async def test_webhook_payment_failed_inserts_audit_with_warning(
+    session_maker, user_factory
+) -> None:
+    """2. PAYMENT_FAILED → ``event_type='failed'`` audit + sentry warning + subscription 변경 X."""
+    user = await user_factory()
+    payment_key = "pk_failed_1"
+    subscription, _ = await _seed_active_subscription_with_subscribe_log(
+        session_maker, user_id=user.id, payment_key=payment_key
+    )
+    original_expires = subscription.expires_at
+
+    body = _webhook_event_body(payment_key=payment_key, event_type="PAYMENT_FAILED")
+
+    with patch("app.services.payment_service.sentry_sdk") as mock_sentry:
+        async with session_maker() as session:
+            payment_log, was_replay = await payment_service.handle_webhook_event(
+                session, event_body=body, idempotency_key=None
+            )
+            await session.commit()
+
+    assert was_replay is False
+    assert payment_log is not None
+    assert payment_log.event_type == "failed"
+    assert payment_log.status == "failed"
+    assert payment_log.subscription_id is None  # 실패는 subscription 무관 audit.
+
+    # subscription unchanged.
+    async with session_maker() as session:
+        refreshed = await session.get(Subscription, subscription.id)
+    assert refreshed is not None
+    assert refreshed.expires_at == original_expires
+    assert refreshed.status == "active"
+
+    # sentry warning 호출 검증.
+    assert any(
+        call.args[0] == "payments.webhook.renew_failed"
+        for call in mock_sentry.capture_message.call_args_list
+    )
+
+
+@pytest.mark.asyncio
+async def test_webhook_refund_completed_inserts_audit(session_maker, user_factory) -> None:
+    """3. REFUND_COMPLETED → ``event_type='refund'`` audit + subscription 변경 X."""
+    user = await user_factory()
+    payment_key = "pk_refund_1"
+    subscription, _ = await _seed_active_subscription_with_subscribe_log(
+        session_maker, user_id=user.id, payment_key=payment_key
+    )
+    original_expires = subscription.expires_at
+
+    body = _webhook_event_body(payment_key=payment_key, event_type="REFUND_COMPLETED")
+
+    async with session_maker() as session:
+        payment_log, was_replay = await payment_service.handle_webhook_event(
+            session, event_body=body, idempotency_key=None
+        )
+        await session.commit()
+
+    assert was_replay is False
+    assert payment_log is not None
+    assert payment_log.event_type == "refund"
+    assert payment_log.status == "success"
+    assert payment_log.subscription_id == subscription.id
+
+    # subscription unchanged.
+    async with session_maker() as session:
+        refreshed = await session.get(Subscription, subscription.id)
+    assert refreshed is not None
+    assert refreshed.expires_at == original_expires
+
+
+@pytest.mark.asyncio
+async def test_webhook_replay_same_event_id_returns_existing_no_extra_row(
+    session_maker, user_factory
+) -> None:
+    """4. 같은 ``event_id`` 재전송 → ``was_replay=True`` + 추가 row INSERT X.
+
+    CR P9 (Story 6.3) — replay 분기에서 ``subscription.expires_at``이 *재차 갱신되지*
+    않음을 명시 검증(미래 refactor가 replay 경로에서도 expires_at을 가산하면 회귀 감지).
+    """
+    user = await user_factory()
+    payment_key = "pk_replay_evt"
+    subscription, _ = await _seed_active_subscription_with_subscribe_log(
+        session_maker, user_id=user.id, payment_key=payment_key
+    )
+    original_expires = subscription.expires_at
+
+    body = _webhook_event_body(
+        event_id="evt_same_id_xyz", payment_key=payment_key, event_type="PAYMENT.STATUS_CHANGED"
+    )
+
+    # 첫 호출.
+    async with session_maker() as session:
+        first_log, first_was_replay = await payment_service.handle_webhook_event(
+            session, event_body=body, idempotency_key=None
+        )
+        await session.commit()
+
+    # 재전송 — 같은 event_id.
+    async with session_maker() as session:
+        replay_log, replay_was_replay = await payment_service.handle_webhook_event(
+            session, event_body=body, idempotency_key=None
+        )
+
+    assert first_was_replay is False
+    assert replay_was_replay is True
+    assert first_log is not None
+    assert replay_log is not None
+    assert replay_log.id == first_log.id
+
+    # renew row count = 1 (replay 진입 시 추가 INSERT 없음).
+    async with session_maker() as session:
+        result = await session.execute(
+            select(PaymentLog).where(
+                PaymentLog.user_id == user.id, PaymentLog.event_type == "renew"
+            )
+        )
+        renew_rows = list(result.scalars().all())
+    assert len(renew_rows) == 1
+
+    # CR P9 — expires_at은 첫 호출에서 +30일, replay에선 변화 없음 (NOT +60일).
+    async with session_maker() as session:
+        refreshed = await session.get(Subscription, subscription.id)
+    assert refreshed is not None
+    assert original_expires is not None
+    assert refreshed.expires_at == original_expires + timedelta(days=30)
+
+
+@pytest.mark.asyncio
+async def test_webhook_header_idempotency_key_takes_priority(session_maker, user_factory) -> None:
+    """5. Header ``Idempotency-Key`` 우선 — 같은 헤더 재호출 → replay 분기."""
+    user = await user_factory()
+    payment_key = "pk_idem_header"
+    await _seed_active_subscription_with_subscribe_log(
+        session_maker, user_id=user.id, payment_key=payment_key
+    )
+
+    header_key = str(uuid.uuid4())
+    body = _webhook_event_body(payment_key=payment_key, event_type="PAYMENT.STATUS_CHANGED")
+
+    async with session_maker() as session:
+        first_log, first_was_replay = await payment_service.handle_webhook_event(
+            session, event_body=body, idempotency_key=header_key
+        )
+        await session.commit()
+
+    # 같은 헤더 재호출.
+    async with session_maker() as session:
+        replay_log, replay_was_replay = await payment_service.handle_webhook_event(
+            session, event_body=body, idempotency_key=header_key
+        )
+
+    assert first_was_replay is False
+    assert replay_was_replay is True
+    assert first_log is not None
+    assert replay_log is not None
+    assert first_log.idempotency_key == header_key  # *not* toss:event:<event_id>.
+    assert replay_log.id == first_log.id
+
+
+@pytest.mark.asyncio
+async def test_webhook_payment_key_missing_returns_none_with_warning(
+    session_maker, user_factory
+) -> None:
+    """6. paymentKey 미매칭(subscribe row 부재) → ``(None, False)`` + sentry warning."""
+    user = await user_factory()  # subscribe row 미생성.
+    body = _webhook_event_body(payment_key="pk_unknown")
+
+    with patch("app.services.payment_service.sentry_sdk") as mock_sentry:
+        async with session_maker() as session:
+            payment_log, was_replay = await payment_service.handle_webhook_event(
+                session, event_body=body, idempotency_key=None
+            )
+
+    assert payment_log is None
+    assert was_replay is False
+    assert any(
+        call.args[0] == "payments.webhook.subscribe_row_missing"
+        for call in mock_sentry.capture_message.call_args_list
+    )
+
+    # payment_logs row 0건(subscribe row 없으므로 webhook도 INSERT 없음).
+    async with session_maker() as session:
+        result = await session.execute(select(PaymentLog).where(PaymentLog.user_id == user.id))
+        rows = list(result.scalars().all())
+    assert len(rows) == 0
+
+
+@pytest.mark.asyncio
+async def test_webhook_renew_amount_mismatch_raises(session_maker, user_factory) -> None:
+    """7. renew amount mismatch(``data.total_amount=100``) → ``WebhookPayloadInvalidError(400)``."""
+    user = await user_factory()
+    payment_key = "pk_amount_mismatch"
+    await _seed_active_subscription_with_subscribe_log(
+        session_maker, user_id=user.id, payment_key=payment_key
+    )
+
+    # totalAmount=100 (mismatch).
+    body = _webhook_event_body(
+        payment_key=payment_key, event_type="PAYMENT.STATUS_CHANGED", total_amount=100
+    )
+
+    from app.core.exceptions import WebhookPayloadInvalidError
+
+    async with session_maker() as session:
+        with pytest.raises(WebhookPayloadInvalidError):
+            await payment_service.handle_webhook_event(
+                session, event_body=body, idempotency_key=None
+            )
+
+
+@pytest.mark.asyncio
+async def test_webhook_renew_on_cancelled_subscription_inserts_audit_with_sentry_error(
+    session_maker, user_factory
+) -> None:
+    """8. cancelled-but-not-expired subscription에 renew → sentry error + renew audit row INSERT.
+
+    *비정상 운영 신호*(외주 운영 incident)지만 audit-trail은 보존 + 200 ack(Toss 재시도 회피).
+    expires_at 변경 X.
+    """
+    user = await user_factory()
+    payment_key = "pk_cancelled_renew"
+    subscription, _ = await _seed_active_subscription_with_subscribe_log(
+        session_maker, user_id=user.id, payment_key=payment_key
+    )
+    original_expires = subscription.expires_at
+
+    # subscription을 cancelled로 전이(미래 expires_at 유지).
+    async with session_maker() as session:
+        target = await session.get(Subscription, subscription.id)
+        assert target is not None
+        target.status = "cancelled"
+        target.cancelled_at = datetime.now(UTC)
+        await session.commit()
+
+    body = _webhook_event_body(payment_key=payment_key, event_type="PAYMENT.STATUS_CHANGED")
+
+    with patch("app.services.payment_service.sentry_sdk") as mock_sentry:
+        async with session_maker() as session:
+            payment_log, was_replay = await payment_service.handle_webhook_event(
+                session, event_body=body, idempotency_key=None
+            )
+            await session.commit()
+
+    assert was_replay is False
+    assert payment_log is not None
+    assert payment_log.event_type == "renew"
+    assert any(
+        call.args[0] == "payments.webhook.cancelled_subscription_renew"
+        for call in mock_sentry.capture_message.call_args_list
+    )
+
+    # expires_at 변경 X.
+    async with session_maker() as session:
+        refreshed = await session.get(Subscription, subscription.id)
+    assert refreshed is not None
+    assert refreshed.expires_at == original_expires
+
+
+@pytest.mark.asyncio
+async def test_webhook_race_concurrent_event_id_one_inserts_other_replays(
+    session_maker, user_factory
+) -> None:
+    """9. race — 다른 worker가 같은 ``event_id``로 INSERT 사이에 들어오면 UNIQUE 위반 catch +
+    replay 분기.
+
+    구현: pre-seed로 같은 ``idempotency_key`` row를 직접 INSERT 후 첫 webhook 호출 simulate.
+    """
+    user = await user_factory()
+    payment_key = "pk_race_evt"
+    subscription, _ = await _seed_active_subscription_with_subscribe_log(
+        session_maker, user_id=user.id, payment_key=payment_key
+    )
+    event_id = "evt_race_xyz"
+    key_used = f"toss:event:{event_id}"
+
+    # Pre-seed: 같은 key_used로 다른 트랜잭션이 INSERT 완료 상태.
+    now = datetime.now(UTC)
+    async with session_maker() as session:
+        race_log = PaymentLog(
+            user_id=user.id,
+            subscription_id=subscription.id,
+            event_type="renew",
+            provider="toss",
+            provider_payment_key=payment_key,
+            provider_order_id="order_race",
+            amount_krw=9900,
+            status="success",
+            idempotency_key=key_used,
+            raw_payload={"raced": True},
+            occurred_at=now,
+        )
+        session.add(race_log)
+        await session.commit()
+        await session.refresh(race_log)
+
+    body = _webhook_event_body(
+        event_id=event_id, payment_key=payment_key, event_type="PAYMENT.STATUS_CHANGED"
+    )
+
+    async with session_maker() as session:
+        payment_log, was_replay = await payment_service.handle_webhook_event(
+            session, event_body=body, idempotency_key=None
+        )
+
+    # 1차 SELECT가 race row를 hit하므로 was_replay=True.
+    assert was_replay is True
+    assert payment_log is not None
+    assert payment_log.id == race_log.id
+
+
+@pytest.mark.asyncio
+async def test_webhook_negative_amount_raises_payload_invalid(session_maker, user_factory) -> None:
+    """10. ``data.total_amount`` 음수 → Pydantic ValidationError → WebhookPayloadInvalidError(400).
+
+    ``TossWebhookPaymentData.total_amount`` ``ge=0`` Pydantic 가드 (race attack 방어).
+    """
+    user = await user_factory()
+    payment_key = "pk_negative"
+    await _seed_active_subscription_with_subscribe_log(
+        session_maker, user_id=user.id, payment_key=payment_key
+    )
+
+    # raw 직접 조립(envelope 통과, sub-data total_amount=-100).
+    body = toss_adapter.TossWebhookEventBody.model_validate(
+        {
+            "eventId": "evt_negative",
+            "eventType": "PAYMENT.STATUS_CHANGED",
+            "createdAt": "2026-05-09T12:00:00+09:00",
+            "data": {
+                "paymentKey": payment_key,
+                "orderId": "order_negative",
+                "status": "DONE",
+                "totalAmount": -100,
+                "approvedAt": "2026-05-09T12:00:00+09:00",
+            },
+        }
+    )
+
+    from app.core.exceptions import WebhookPayloadInvalidError
+
+    async with session_maker() as session:
+        with pytest.raises(WebhookPayloadInvalidError):
+            await payment_service.handle_webhook_event(
+                session, event_body=body, idempotency_key=None
+            )
+
+
+@pytest.mark.asyncio
+async def test_webhook_race_integrity_error_catch_path_recovers(
+    session_maker, user_factory, monkeypatch
+) -> None:
+    """CR P8 (Story 6.3) — 실제 IntegrityError catch 분기 진입 가드.
+
+    Story 6.3 race-recovery 코드(``handle_webhook_event`` IntegrityError catch
+    + ``session.rollback()`` + 재 SELECT)는 *기존 race 테스트가 1차 SELECT hit으로
+    catch 분기 진입하지 못해* 미커버였음. 본 테스트는 1차 SELECT를 monkeypatch로 한 번만
+    None 강제 → INSERT 시 ``idx_payment_logs_provider_payment_key_event_type_unique``
+    위반 → catch + rollback + 재 SELECT → ``(replay_log, True)`` 반환을 검증.
+    """
+    user = await user_factory()
+    payment_key = "pk_race_catch"
+    subscription, _ = await _seed_active_subscription_with_subscribe_log(
+        session_maker, user_id=user.id, payment_key=payment_key
+    )
+    event_id = "evt_race_catch_xyz"
+    key_used = f"toss:event:{event_id}"
+
+    # Pre-seed: 같은 idempotency_key + 같은 (provider, payment_key, event_type='renew')
+    # row가 다른 트랜잭션으로 commit된 상태(다른 worker가 먼저 INSERT 완료).
+    now = datetime.now(UTC)
+    async with session_maker() as session:
+        race_log = PaymentLog(
+            user_id=user.id,
+            subscription_id=subscription.id,
+            event_type="renew",
+            provider="toss",
+            provider_payment_key=payment_key,
+            provider_order_id="order_race_catch",
+            amount_krw=9900,
+            status="success",
+            idempotency_key=key_used,
+            raw_payload={"raced": True},
+            occurred_at=now,
+        )
+        session.add(race_log)
+        await session.commit()
+        await session.refresh(race_log)
+
+    body = _webhook_event_body(
+        event_id=event_id, payment_key=payment_key, event_type="PAYMENT.STATUS_CHANGED"
+    )
+
+    # Monkeypatch — 1차 SELECT(idempotency 전역 lookup) *첫 호출만* None 반환해
+    # INSERT 강제 진입 → composite UNIQUE 위반 catch path 진입. 2차(catch 후 재
+    # SELECT)는 실 helper로 위임해 race_log를 반환.
+    real_fetch = payment_service._fetch_payment_log_by_idempotency_key_global
+    call_count = {"n": 0}
+
+    async def _patched_fetch(session, *, idempotency_key):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return None  # 1차 miss — INSERT 강제.
+        return await real_fetch(session, idempotency_key=idempotency_key)
+
+    monkeypatch.setattr(
+        payment_service, "_fetch_payment_log_by_idempotency_key_global", _patched_fetch
+    )
+
+    original_expires = subscription.expires_at
+    async with session_maker() as session:
+        payment_log, was_replay = await payment_service.handle_webhook_event(
+            session, event_body=body, idempotency_key=None
+        )
+
+    # IntegrityError catch path 진입 검증 — fetch가 정확히 2회 호출됐어야 함
+    # (1차 miss → INSERT → IntegrityError catch → 2차 재 SELECT).
+    assert call_count["n"] == 2, (
+        f"expected 2 fetch calls (1차 miss + catch 재SELECT), got {call_count['n']}"
+    )
+    assert was_replay is True
+    assert payment_log is not None
+    assert payment_log.id == race_log.id
+
+    # rollback이 atomic UPDATE의 expires_at 갱신도 unwind하는지 — D3 안전망 정합.
+    async with session_maker() as session:
+        refreshed_sub = await session.get(Subscription, subscription.id)
+    assert refreshed_sub is not None
+    assert refreshed_sub.expires_at == original_expires, (
+        "expires_at must remain unchanged after IntegrityError catch + rollback"
+    )

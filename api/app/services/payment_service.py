@@ -37,7 +37,8 @@ from typing import Any, Final
 
 import sentry_sdk
 import structlog
-from sqlalchemy import insert, literal, select, tuple_, update
+from pydantic import ValidationError
+from sqlalchemy import func, insert, literal, select, tuple_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -52,6 +53,7 @@ from app.core.exceptions import (
     PaymentRetryAfterFailedError,
     SubscriptionAlreadyActiveError,
     SubscriptionAlreadyCancelledError,
+    WebhookPayloadInvalidError,
 )
 from app.db.models.payment_log import PaymentLog
 from app.db.models.subscription import Subscription
@@ -73,6 +75,23 @@ _IDEMPOTENCY_INDEX_NAME: Final[str] = "idx_payment_logs_user_id_idempotency_key_
 # Story 6.1 CR P2 — subscription active partial UNIQUE catch는 ``SubscriptionAlready
 # ActiveError(409)``로 변환(race 진입 케이스). 인덱스 이름은 0018 마이그레이션과 동기.
 _SUBSCRIPTION_ACTIVE_INDEX_NAME: Final[str] = "idx_subscriptions_user_id_active_unique"
+
+# Story 6.3 — alembic 0020 composite UNIQUE 인덱스 이름. webhook INSERT 시 같은
+# ``(provider, provider_payment_key, event_type)`` 충돌 catch 분기 SOT.
+_PROVIDER_KEY_EVENT_TYPE_INDEX_NAME: Final[str] = (
+    "idx_payment_logs_provider_payment_key_event_type_unique"
+)
+
+# CR follow-up (Gemini G2, Story 6.3) — Toss webhook ``event_type`` → 내부
+# ``payment_logs.event_type`` 매핑 SOT. dispatch 분기와 IntegrityError catch path가
+# 동일 매핑을 참조 — 변경 시 한 곳에서만 수정. ``PAYMENT.STATUS_CHANGED``는 ``status=
+# "DONE"`` branch만 ``renew`` 매핑(non-DONE은 dispatch else에서 early-return).
+_WEBHOOK_EVENT_TYPE_MAP: Final[dict[str, str]] = {
+    "PAYMENT.STATUS_CHANGED": "renew",
+    "PAYMENT_FAILED": "failed",
+    "REFUND_COMPLETED": "refund",
+    "REFUND_PARTIAL": "refund",
+}
 
 
 def _mask_user_id(user_id: uuid.UUID) -> str:
@@ -653,3 +672,403 @@ async def list_payment_history(
         items = rows
 
     return items, next_cursor
+
+
+# ---------------------------------------------------------------------------
+# Story 6.3 — webhook 처리 (renew/failed/refund + idempotency 다층 게이트)
+# ---------------------------------------------------------------------------
+
+
+async def _fetch_payment_log_by_idempotency_key_global(
+    session: AsyncSession, *, idempotency_key: str
+) -> PaymentLog | None:
+    """``idempotency_key``만으로 SELECT — webhook은 ``user_id``를 미리 모름.
+
+    *Why*: webhook event는 *DB-wide unique invariant 보장* — 별 namespace prefix
+    (``toss:event:<event_id>``)로 충돌 가능성 0(같은 Toss event_id가 다른 사용자에 매핑되는
+    케이스 부재). ``idx_payment_logs_user_id_idempotency_key_unique``는 ``(user_id,
+    idempotency_key)`` 복합 UNIQUE이지만, namespace prefix 정합으로 정상 케이스 SELECT는
+    0/1건. 다중 row 발견 시 *비정상 상태*(sentry error + 200 ack — 클라이언트 retry 무용).
+    """
+    result = await session.execute(
+        select(PaymentLog)
+        .where(PaymentLog.idempotency_key == idempotency_key)
+        .order_by(PaymentLog.occurred_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def _fetch_payment_log_by_provider_key_event_type(
+    session: AsyncSession, *, provider: str, provider_payment_key: str, event_type: str
+) -> PaymentLog | None:
+    """0020 composite UNIQUE 위반 catch 후 replay row SELECT — webhook 분기 fallback."""
+    result = await session.execute(
+        select(PaymentLog)
+        .where(
+            PaymentLog.provider == provider,
+            PaymentLog.provider_payment_key == provider_payment_key,
+            PaymentLog.event_type == event_type,
+        )
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def _resolve_subscription_for_payment_key(
+    session: AsyncSession, *, payment_key: str
+) -> tuple[uuid.UUID, uuid.UUID | None] | None:
+    """``data.payment_key`` → 첫 ``subscribe`` row의 ``user_id``/``subscription_id`` 결정.
+
+    Returns ``(user_id, subscription_id)`` 또는 None(매칭 subscribe row 부재).
+    """
+    result = await session.execute(
+        select(PaymentLog.user_id, PaymentLog.subscription_id)
+        .where(
+            PaymentLog.provider == "toss",
+            PaymentLog.provider_payment_key == payment_key,
+            PaymentLog.event_type == "subscribe",
+        )
+        .limit(1)
+    )
+    row = result.first()
+    if row is None:
+        return None
+    return row.user_id, row.subscription_id
+
+
+async def _handle_renew_event(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    subscription: Subscription | None,
+    data: toss_adapter.TossWebhookPaymentData,
+    event_body: toss_adapter.TossWebhookEventBody,
+    key_used: str,
+    now: datetime,
+) -> PaymentLog:
+    """renew(``PAYMENT.STATUS_CHANGED + DONE``) 처리 — ``expires_at +30일`` + audit row.
+
+    분기:
+    - subscription active → ``expires_at += 30d`` UPDATE + audit row.
+    - subscription cancelled-but-not-expired → sentry error(*비정상 상태*) + audit row INSERT
+      (``expires_at`` 변경 X, audit-trail은 보존 — Story 6.3 AC4 (a) invariant).
+    - subscription expired/None → sentry warning + audit row INSERT(*subscription_id=NULL*).
+
+    amount mismatch(``data.total_amount != MONTHLY_PLAN_PRICE_KRW``) →
+    ``WebhookPayloadInvalidError(400)`` raise(race attack 방어).
+    """
+    if data.total_amount != MONTHLY_PLAN_PRICE_KRW:
+        sentry_sdk.capture_message(
+            "payments.webhook.amount_mismatch",
+            level="warning",
+        )
+        logger.warning(
+            "payments.webhook.amount_mismatch",
+            user_id=_mask_user_id(user_id),
+            expected=MONTHLY_PLAN_PRICE_KRW,
+            received=data.total_amount,
+        )
+        raise WebhookPayloadInvalidError(
+            f"webhook renew amount mismatch (expected {MONTHLY_PLAN_PRICE_KRW}, "
+            f"received {data.total_amount})"
+        )
+
+    subscription_id_for_log: uuid.UUID | None = None
+    if subscription is not None and subscription.status == "active":
+        # CR P3 (Story 6.3) — atomic UPDATE로 lost-update race 차단(Story 6.2
+        # ``cancel_subscription`` SOT 정합). 동시 webhook 2건이 같은 ``expires_at``
+        # snapshot을 읽고 +30일을 *덮어쓰는* race를 SQL expression(``coalesce(expires_at,
+        # :now) + INTERVAL``)으로 차단 — 각 UPDATE가 row의 *현재* DB 값에 가산.
+        # 동시 INSERT는 composite UNIQUE catch + ``session.rollback()``으로 unwind되어
+        # 다중 가산 차단(D3 안전망 정합).
+        update_stmt = (
+            update(Subscription)
+            .where(
+                Subscription.id == subscription.id,
+                Subscription.status == "active",
+            )
+            .values(
+                expires_at=func.coalesce(Subscription.expires_at, literal(now))
+                + timedelta(days=MONTHLY_PLAN_PERIOD_DAYS)
+            )
+            .execution_options(synchronize_session="fetch")
+        )
+        await session.execute(update_stmt)
+        subscription_id_for_log = subscription.id
+    elif (
+        subscription is not None
+        and subscription.status == "cancelled"
+        and subscription.expires_at is not None
+        and subscription.expires_at > now
+    ):
+        # 비정상 — cancelled 구독에 자동 갱신 webhook 도래. audit-trail은 보존.
+        sentry_sdk.capture_message(
+            "payments.webhook.cancelled_subscription_renew",
+            level="error",
+        )
+        logger.error(
+            "payments.webhook.cancelled_subscription_renew",
+            user_id=_mask_user_id(user_id),
+            subscription_id=str(subscription.id),
+        )
+        subscription_id_for_log = subscription.id
+    else:
+        # expired / None 등 — audit-trail만 (subscription_id NULL).
+        sentry_sdk.capture_message(
+            "payments.webhook.renew_subscription_inactive",
+            level="warning",
+        )
+        logger.warning(
+            "payments.webhook.renew_subscription_inactive",
+            user_id=_mask_user_id(user_id),
+            subscription_status=(subscription.status if subscription else None),
+        )
+
+    masked_payload = toss_adapter._mask_payment_payload(event_body.data)
+    log_result = await session.execute(
+        insert(PaymentLog)
+        .values(
+            user_id=user_id,
+            subscription_id=subscription_id_for_log,
+            event_type="renew",
+            provider="toss",
+            provider_payment_key=data.payment_key,
+            provider_order_id=data.order_id,
+            amount_krw=data.total_amount,
+            status="success",
+            idempotency_key=key_used,
+            raw_payload=masked_payload,
+            occurred_at=data.approved_at or now,
+        )
+        .returning(PaymentLog)
+    )
+    return log_result.scalar_one()
+
+
+async def _handle_failed_event(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    data: toss_adapter.TossWebhookPaymentData,
+    event_body: toss_adapter.TossWebhookEventBody,
+    key_used: str,
+    now: datetime,
+) -> PaymentLog:
+    """``PAYMENT_FAILED`` (renew 실패) 처리 — subscription 변경 X + audit row.
+
+    *"다음 시도까지 active 유지"* — 외주 클라이언트가 dunning 정책 결정. MVP는 audit log만.
+    sentry warning(*"renew 실패 — dunning 정책 검토 필요"*).
+    """
+    sentry_sdk.capture_message(
+        "payments.webhook.renew_failed",
+        level="warning",
+    )
+    logger.warning(
+        "payments.webhook.renew_failed",
+        user_id=_mask_user_id(user_id),
+        payment_key_prefix=data.payment_key[:8],
+    )
+
+    masked_payload = toss_adapter._mask_payment_payload(event_body.data)
+    log_result = await session.execute(
+        insert(PaymentLog)
+        .values(
+            user_id=user_id,
+            subscription_id=None,  # 실패는 subscription 무관 audit.
+            event_type="failed",
+            provider="toss",
+            provider_payment_key=data.payment_key,
+            provider_order_id=data.order_id,
+            amount_krw=data.total_amount,
+            status="failed",
+            idempotency_key=key_used,
+            raw_payload=masked_payload,
+            occurred_at=data.approved_at or now,
+        )
+        .returning(PaymentLog)
+    )
+    return log_result.scalar_one()
+
+
+async def _handle_refund_event(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    subscription_id: uuid.UUID | None,
+    data: toss_adapter.TossWebhookPaymentData,
+    event_body: toss_adapter.TossWebhookEventBody,
+    key_used: str,
+    now: datetime,
+) -> PaymentLog:
+    """``REFUND_COMPLETED`` / ``REFUND_PARTIAL`` 처리 — subscription 변경 X + audit row.
+
+    즉시 환불은 OUT(Story 6.2 정합 + epics.md:825 *"PG 본 계약·세금정산은 OUT"*). 외주
+    클라이언트가 자체 환불 정책 + Toss 환불 API 통합. 본 스토리는 audit-trail만.
+    """
+    masked_payload = toss_adapter._mask_payment_payload(event_body.data)
+    log_result = await session.execute(
+        insert(PaymentLog)
+        .values(
+            user_id=user_id,
+            subscription_id=subscription_id,
+            event_type="refund",
+            provider="toss",
+            provider_payment_key=data.payment_key,
+            provider_order_id=data.order_id,
+            amount_krw=data.total_amount,
+            status="success",
+            idempotency_key=key_used,
+            raw_payload=masked_payload,
+            occurred_at=data.approved_at or now,
+        )
+        .returning(PaymentLog)
+    )
+    return log_result.scalar_one()
+
+
+async def handle_webhook_event(
+    session: AsyncSession,
+    *,
+    event_body: toss_adapter.TossWebhookEventBody,
+    idempotency_key: str | None,
+) -> tuple[PaymentLog | None, bool]:
+    """Toss webhook 처리 비즈니스 로직 SOT — Story 6.3 AC4.
+
+    Returns ``(payment_log, was_replay)``:
+    - ``payment_log=None``: 무시된 event (*활성 paymentKey 매칭 부재* 등 — *200 ack*).
+    - ``was_replay=True``: 같은 idempotency_key로 이미 처리됨 (*Toss retry 정합*).
+
+    *commit은 라우터 책임* — 본 함수는 INSERT/UPDATE만(부분 commit 차단).
+
+    Idempotency 다층 게이트:
+    1. body ``event_id`` namespace 정규화 (``toss:event:<event_id>``).
+    2. Header ``Idempotency-Key`` 우선 (송신 시).
+    3. 1차 SELECT (``payment_logs.idempotency_key``) → hit 시 replay 분기.
+    4. INSERT 시점 ``idempotency_key`` UNIQUE 위반 catch → race recovery + replay.
+    5. INSERT 시점 ``provider/payment_key/event_type`` composite UNIQUE 위반 catch →
+       Toss retry 누락 케이스 fallback + replay.
+    """
+    # Step 1 — body sub-schema 검증 (event_type별 의미 분기 전 invariant 가드).
+    try:
+        data = toss_adapter.TossWebhookPaymentData.model_validate(event_body.data)
+    except ValidationError as exc:
+        raise WebhookPayloadInvalidError(f"webhook data sub-schema invalid: {exc}") from exc
+
+    # Step 2 — idempotency key 결정. Header 우선, 미송신 시 body event_id namespace.
+    if idempotency_key is not None:
+        key_used = idempotency_key
+    else:
+        key_used = f"toss:event:{event_body.event_id}"
+
+    logger.info(
+        "payments.webhook.handle_event",
+        event_type=event_body.event_type,
+        event_id_prefix=event_body.event_id[:8],
+        key_used_prefix=key_used[:16],
+    )
+
+    # Step 3 — 1차 SELECT (replay 분기).
+    existing = await _fetch_payment_log_by_idempotency_key_global(session, idempotency_key=key_used)
+    if existing is not None:
+        logger.info(
+            "payments.webhook.replay_detected",
+            event_id_prefix=event_body.event_id[:8],
+            payment_log_id=str(existing.id),
+        )
+        return existing, True
+
+    # Step 4 — paymentKey로 user_id + subscription_id 결정 (subscribe row 의존).
+    resolved = await _resolve_subscription_for_payment_key(session, payment_key=data.payment_key)
+    if resolved is None:
+        # *비정상 — subscribe row 부재 paymentKey*. 200 ack(Toss 재시도 회피).
+        sentry_sdk.capture_message(
+            "payments.webhook.subscribe_row_missing",
+            level="warning",
+        )
+        logger.warning(
+            "payments.webhook.subscribe_row_missing",
+            event_id_prefix=event_body.event_id[:8],
+            payment_key_prefix=data.payment_key[:8],
+        )
+        return None, False
+
+    user_id, subscription_id = resolved
+    now = datetime.now(UTC)
+
+    # Step 5 — event_type 분기 + race-aware INSERT.
+    try:
+        if event_body.event_type == "PAYMENT.STATUS_CHANGED" and data.status == "DONE":
+            subscription = (
+                await session.get(Subscription, subscription_id) if subscription_id else None
+            )
+            payment_log = await _handle_renew_event(
+                session,
+                user_id=user_id,
+                subscription=subscription,
+                data=data,
+                event_body=event_body,
+                key_used=key_used,
+                now=now,
+            )
+        elif event_body.event_type == "PAYMENT_FAILED":
+            payment_log = await _handle_failed_event(
+                session,
+                user_id=user_id,
+                data=data,
+                event_body=event_body,
+                key_used=key_used,
+                now=now,
+            )
+        elif event_body.event_type in ("REFUND_COMPLETED", "REFUND_PARTIAL"):
+            payment_log = await _handle_refund_event(
+                session,
+                user_id=user_id,
+                subscription_id=subscription_id,
+                data=data,
+                event_body=event_body,
+                key_used=key_used,
+                now=now,
+            )
+        else:
+            # Pydantic Literal로 1차 차단되므로 도달 불가(defensive 분기는 dead code 회피).
+            sentry_sdk.capture_message(
+                "payments.webhook.unsupported_event_type",
+                level="error",
+            )
+            return None, False
+    except IntegrityError as exc:
+        exc_str = str(exc.orig)
+        if _IDEMPOTENCY_INDEX_NAME in exc_str:
+            # 동시 webhook 2건 race — 다른 worker가 같은 key로 INSERT. rollback + 재 SELECT.
+            await session.rollback()
+            replay_log = await _fetch_payment_log_by_idempotency_key_global(
+                session, idempotency_key=key_used
+            )
+            if replay_log is None:
+                raise BalanceNoteError(
+                    "webhook idempotency replay race resolution failed"
+                ) from None
+            return replay_log, True
+        if _PROVIDER_KEY_EVENT_TYPE_INDEX_NAME in exc_str:
+            # Toss retry지만 우리 측 idempotency_key가 누락된 케이스(Toss 미일관 send).
+            # 같은 (provider, payment_key, event_type) row 1건 SELECT → replay 분기.
+            await session.rollback()
+            sentry_sdk.capture_message(
+                "payments.webhook.composite_unique_replay",
+                level="warning",
+            )
+            event_type_for_replay = _WEBHOOK_EVENT_TYPE_MAP[event_body.event_type]
+            replay_log = await _fetch_payment_log_by_provider_key_event_type(
+                session,
+                provider="toss",
+                provider_payment_key=data.payment_key,
+                event_type=event_type_for_replay,
+            )
+            if replay_log is None:
+                raise BalanceNoteError("webhook composite replay race resolution failed") from None
+            return replay_log, True
+        # 그 외 IntegrityError(FK/CHECK 등) — 비정상 상태, propagate.
+        raise
+
+    return payment_log, False

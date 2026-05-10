@@ -30,21 +30,28 @@ scope 분리: webhook(자동 갱신) / 환불 자동화는 Story 6.3 forward.
 
 from __future__ import annotations
 
-import re
+import json
 import uuid
 from datetime import UTC, datetime
 from typing import Annotated, Final, Literal
 
+import sentry_sdk
 import structlog
-from fastapi import APIRouter, Depends, Header, Query, Response, status
-from pydantic import BaseModel, ConfigDict, Field
+from fastapi import APIRouter, Depends, Header, Query, Request, Response, status
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import or_, select
 
+from app.adapters import toss as toss_adapter
 from app.api.deps import DbSession, current_user, require_basic_consents
+from app.core.config import settings
 from app.core.exceptions import (
     NoActiveSubscriptionError,
     PaymentIdempotencyKeyInvalidError,
+    WebhookPayloadInvalidError,
+    WebhookSecretKeyMissingError,
+    WebhookSignatureInvalidError,
 )
+from app.core.idempotency import validate_idempotency_key_uuid_v4
 from app.db.models.payment_log import PaymentLog
 from app.db.models.subscription import Subscription
 from app.db.models.user import User
@@ -54,35 +61,27 @@ logger = structlog.get_logger(__name__)
 
 router = APIRouter()
 
-
-# Story 2.5 ``_IDEMPOTENCY_KEY_PATTERN`` SOT 1:1 정합 — UUID v4 regex + 길이 36.
-# payments-specific 헬퍼 분리(``MealIdempotencyKeyInvalidError``와 catalog code 분리).
-_IDEMPOTENCY_KEY_PATTERN: Final[str] = (
-    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
-)
-_IDEMPOTENCY_KEY_REGEX: Final[re.Pattern[str]] = re.compile(_IDEMPOTENCY_KEY_PATTERN)
-_IDEMPOTENCY_KEY_LENGTH: Final[int] = 36
+# CR P1 (Story 6.3) — webhook body 크기 cap. 익명 endpoint(시그니처 검증 *전*) DoS
+# 표면 차단. Toss webhook 실 body는 수 KB — 64KB cap은 안전 마진 + 정상 트래픽 영향 0.
+_WEBHOOK_BODY_MAX_BYTES: Final[int] = 64 * 1024
 
 
 def _validate_payment_idempotency_key(key: str | None) -> str | None:
-    """``Idempotency-Key`` 헤더 형식 검증 + 정규화 (Story 2.5 SOT 1:1 정합).
+    """``Idempotency-Key`` 헤더 형식 검증 + 정규화 (Story 6.1 + Story 6.3 DF49 흡수).
 
-    None / 빈 / 공백 패딩 → ``None`` 반환 (미송신과 동등). 비공백 패딩 후 형식 위반은
-    ``PaymentIdempotencyKeyInvalidError(400)`` raise.
+    UUID v4 regex/길이 검증 SOT는 ``app.core.idempotency.validate_idempotency_key_uuid_v4``로
+    위임. 본 함수는 *payments 도메인 예외 변환 어댑터*만 — ``ValueError`` →
+    ``PaymentIdempotencyKeyInvalidError(400)``. ``meals`` 도메인의 동일 어댑터
+    (``_validate_idempotency_key``)와 *catalog code prefix(``payments.*`` vs ``meals.*``)*만 다름.
 
-    Story 2.5 ``_validate_idempotency_key``와 동일 검증 로직이지만, *catalog code prefix*
-    (``payments.*`` vs ``meals.*``)와 *후속 분기 차이* 때문에 함수 분리 (DF49 갱신 결정).
+    None / 빈 / 공백 패딩 → ``None`` 반환 (미송신과 동등).
     """
-    if key is None:
-        return None
-    stripped = key.strip()
-    if not stripped:
-        return None
-    if len(stripped) != _IDEMPOTENCY_KEY_LENGTH or not _IDEMPOTENCY_KEY_REGEX.match(stripped):
+    try:
+        return validate_idempotency_key_uuid_v4(key)
+    except ValueError as exc:
         raise PaymentIdempotencyKeyInvalidError(
             "Idempotency-Key must be a valid UUID v4 (RFC 4122)"
-        )
-    return stripped
+        ) from exc
 
 
 # --- Pydantic 스키마 ---------------------------------------------------------
@@ -349,7 +348,12 @@ async def get_subscription(
         .where(
             Subscription.user_id == user.id,
             or_(
-                Subscription.status == "active",
+                # Story 6.3 DF135 흡수 — active branch에도 ``(expires_at IS NULL OR
+                # expires_at > now())`` lazy gate 추가. sweep cron(``app/workers/
+                # subscription_expire.py``) 도달 전이라도 active-but-expired row는
+                # *비정상 race window* 상태로 유효 구독 노출 X.
+                (Subscription.status == "active")
+                & (Subscription.expires_at.is_(None) | (Subscription.expires_at > now)),
                 # cancelled-but-not-expired는 *유효* 구독으로 노출 (Story 6.2 AC2).
                 (Subscription.status == "cancelled") & (Subscription.expires_at > now),
             ),
@@ -446,3 +450,132 @@ async def get_payment_history(
         items=[_payment_log_to_history_item(log) for log in items],
         next_cursor=next_cursor,
     )
+
+
+# --- Story 6.3 — POST /v1/payments/webhook ----------------------------------
+
+
+@router.post(
+    "/webhook",
+    status_code=status.HTTP_200_OK,
+    response_class=Response,  # 빈 body 200 (Toss ack 표준 — Toss는 응답 body 무시).
+    responses={
+        200: {
+            "description": ("Webhook processed (or idempotent replay or non-matching paymentKey)")
+        },
+        400: {
+            "description": (
+                "Webhook body schema invalid / amount mismatch / unsupported event_type"
+            )
+        },
+        401: {"description": "Webhook signature invalid / timestamp outside tolerance"},
+        503: {"description": "TOSS_WEBHOOK_SECRET_KEY not configured"},
+    },
+)
+async def handle_payment_webhook(
+    request: Request,
+    db: DbSession,
+    signature: Annotated[
+        str | None, Header(alias=toss_adapter.TOSS_WEBHOOK_SIGNATURE_HEADER)
+    ] = None,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+) -> Response:
+    """Toss webhook 수신 — server-to-server, JWT 미보유. 시그니처 검증이 인증 SOT.
+
+    흐름:
+    1. ``settings.toss_webhook_secret_key`` 검증 → ``WebhookSecretKeyMissingError(503)``.
+    2. ``TossPayments-Webhook-Signature`` 헤더 존재 검증 → ``WebhookSignatureInvalidError(401)``.
+    3. ``raw_body = await request.body()`` (bytes 보존 — JSON 파싱 *전*에 시그니처 검증 의무).
+    4. ``toss_adapter.verify_webhook_signature(...)`` HMAC-SHA256 + timing-safe + 5분 drift cap.
+    5. ``json.loads(raw_body)`` → ``TossWebhookEventBody.model_validate(...)``.
+       ValidationError/JSONDecodeError → ``WebhookPayloadInvalidError(400)``.
+    6. ``_validate_payment_idempotency_key(idempotency_key)`` (헤더 송신 시 형식 검증).
+    7. ``payment_service.handle_webhook_event(...)`` → service 분기.
+    8. ``await db.commit()`` 트랜잭션 commit.
+    9. ``return Response(status_code=200)`` 빈 body — Toss ack 표준.
+
+    Sentry 명시 capture:
+    - 401(``signature_invalid``) → ``capture_message(level="warning")`` (위변조 시도 감지).
+    - 503(``secret_key_missing``) → ``capture_message(level="error")`` (prod fail-fast 신호).
+    """
+    secret = settings.toss_webhook_secret_key
+    if not secret:
+        sentry_sdk.capture_message(
+            "payments.webhook.secret_missing",
+            level="error",
+        )
+        logger.error("payments.webhook.secret_missing")
+        raise WebhookSecretKeyMissingError("TOSS_WEBHOOK_SECRET_KEY not configured")
+
+    if signature is None:
+        sentry_sdk.capture_message(
+            "payments.webhook.signature_invalid",
+            level="warning",
+        )
+        logger.warning("payments.webhook.signature_invalid", reason="header_missing")
+        raise WebhookSignatureInvalidError("webhook signature header missing")
+
+    # CR P1 (Story 6.3) — body 크기 cap. 익명 endpoint(시그니처 검증 *전*)에서
+    # ``await request.body()``가 무제한 bytes 읽으면 DoS 표면. Toss webhook 실 body는
+    # 수 KB. ``Content-Length`` 헤더 누락은 chunked transfer 가능성이라 미가드 시 reject.
+    content_length = request.headers.get("content-length")
+    if content_length is None:
+        raise WebhookPayloadInvalidError("webhook body content-length header missing")
+    try:
+        body_size = int(content_length)
+    except ValueError as exc:
+        raise WebhookPayloadInvalidError("webhook body content-length invalid") from exc
+    if body_size < 0 or body_size > _WEBHOOK_BODY_MAX_BYTES:
+        raise WebhookPayloadInvalidError(
+            f"webhook body too large (max {_WEBHOOK_BODY_MAX_BYTES} bytes)"
+        )
+
+    # *raw bytes* 보존 — JSON 파싱 후 re-serialize는 위변조 가능.
+    raw_body = await request.body()
+
+    try:
+        toss_adapter.verify_webhook_signature(
+            raw_body=raw_body,
+            signature_header=signature,
+            secret=secret,
+        )
+    except WebhookSignatureInvalidError:
+        sentry_sdk.capture_message(
+            "payments.webhook.signature_invalid",
+            level="warning",
+        )
+        raise
+
+    # JSON 파싱. CR P4 (Story 6.3) — Pydantic/JSON 예외 메시지를 RFC 7807 detail에
+    # echo하지 않음(입력 echo + schema hint 누출 회피). 전체 exc는 logger에만.
+    try:
+        body_dict = json.loads(raw_body)
+    except json.JSONDecodeError as exc:
+        logger.warning("payments.webhook.body_not_json", reason=str(exc))
+        raise WebhookPayloadInvalidError("webhook body invalid") from exc
+
+    if not isinstance(body_dict, dict):
+        raise WebhookPayloadInvalidError("webhook body invalid")
+
+    # Pydantic 검증 (envelope).
+    try:
+        event_body = toss_adapter.TossWebhookEventBody.model_validate(body_dict)
+    except ValidationError as exc:
+        logger.warning("payments.webhook.envelope_invalid", reason=str(exc))
+        raise WebhookPayloadInvalidError("webhook payload schema invalid") from exc
+
+    # Header Idempotency-Key 형식 검증(송신 시).
+    validated_key = _validate_payment_idempotency_key(idempotency_key)
+
+    payment_log, was_replay = await payment_service.handle_webhook_event(
+        db, event_body=event_body, idempotency_key=validated_key
+    )
+    await db.commit()
+
+    logger.info(
+        "payments.webhook.processed",
+        event_type=event_body.event_type,
+        was_replay=was_replay,
+        payment_log_id=str(payment_log.id) if payment_log else None,
+    )
+    return Response(status_code=status.HTTP_200_OK)

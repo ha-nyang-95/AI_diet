@@ -59,6 +59,7 @@ from app.services.analysis_service import AnalysisService
 from app.workers.nudge_scheduler import register_nudge_job
 from app.workers.scheduler import build_scheduler, shutdown_scheduler, start_scheduler
 from app.workers.soft_delete_purge import register_purge_job
+from app.workers.subscription_expire import register_subscription_expire_job
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -209,6 +210,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 app.state.session_maker,
                 r2_adapter=_r2_module,
                 redis=app.state.redis,
+            )
+            # Story 6.3 — expires_at 만료 sweep cron(매시 정각 KST). webhook 미통보 케이스
+            # 안전판 + DF135 active-but-expired race window 차단의 정식 전이 처리.
+            register_subscription_expire_job(
+                scheduler,
+                app.state.session_maker,
+                app.state.redis,
             )
             app.state.scheduler = scheduler
             await start_scheduler(app)

@@ -791,6 +791,42 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/payments/webhook": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Handle Payment Webhook
+         * @description Toss webhook 수신 — server-to-server, JWT 미보유. 시그니처 검증이 인증 SOT.
+         *
+         *     흐름:
+         *     1. ``settings.toss_webhook_secret_key`` 검증 → ``WebhookSecretKeyMissingError(503)``.
+         *     2. ``TossPayments-Webhook-Signature`` 헤더 존재 검증 → ``WebhookSignatureInvalidError(401)``.
+         *     3. ``raw_body = await request.body()`` (bytes 보존 — JSON 파싱 *전*에 시그니처 검증 의무).
+         *     4. ``toss_adapter.verify_webhook_signature(...)`` HMAC-SHA256 + timing-safe + 5분 drift cap.
+         *     5. ``json.loads(raw_body)`` → ``TossWebhookEventBody.model_validate(...)``.
+         *        ValidationError/JSONDecodeError → ``WebhookPayloadInvalidError(400)``.
+         *     6. ``_validate_payment_idempotency_key(idempotency_key)`` (헤더 송신 시 형식 검증).
+         *     7. ``payment_service.handle_webhook_event(...)`` → service 분기.
+         *     8. ``await db.commit()`` 트랜잭션 commit.
+         *     9. ``return Response(status_code=200)`` 빈 body — Toss ack 표준.
+         *
+         *     Sentry 명시 capture:
+         *     - 401(``signature_invalid``) → ``capture_message(level="warning")`` (위변조 시도 감지).
+         *     - 503(``secret_key_missing``) → ``capture_message(level="error")`` (prod fail-fast 신호).
+         */
+        post: operations["handle_payment_webhook_v1_payments_webhook_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/reports/weekly": {
         parameters: {
             query?: never;
@@ -3295,6 +3331,57 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
+            };
+        };
+    };
+    handle_payment_webhook_v1_payments_webhook_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "TossPayments-Webhook-Signature"?: string | null;
+                "Idempotency-Key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Webhook processed (or idempotent replay or non-matching paymentKey) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Webhook body schema invalid / amount mismatch / unsupported event_type */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Webhook signature invalid / timestamp outside tolerance */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description TOSS_WEBHOOK_SECRET_KEY not configured */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

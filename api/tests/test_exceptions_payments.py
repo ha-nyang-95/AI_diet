@@ -25,6 +25,9 @@ from app.core.exceptions import (
     SubscriptionAlreadyActiveError,
     SubscriptionAlreadyCancelledError,
     TossSecretKeyMissingError,
+    WebhookPayloadInvalidError,
+    WebhookSecretKeyMissingError,
+    WebhookSignatureInvalidError,
 )
 
 
@@ -42,6 +45,10 @@ from app.core.exceptions import (
         (PaymentProviderUnavailableError, 502, "payments.provider.unavailable"),
         (PaymentProviderPayloadInvalidError, 502, "payments.provider.payload_invalid"),
         (TossSecretKeyMissingError, 503, "payments.toss.secret_key_missing"),
+        # Story 6.3 — webhook 신규 예외 3건.
+        (WebhookSignatureInvalidError, 401, "payments.webhook.signature_invalid"),
+        (WebhookPayloadInvalidError, 400, "payments.webhook.payload_invalid"),
+        (WebhookSecretKeyMissingError, 503, "payments.webhook.secret_key_missing"),
     ],
 )
 def test_payment_exception_status_code_invariants(
@@ -99,3 +106,36 @@ def test_payment_history_cursor_invalid_to_problem_shape() -> None:
     assert problem.title == "Pagination cursor invalid"
     assert problem.detail == "cursor format invalid"
     assert problem.instance == "/v1/payments/history"
+
+
+def test_webhook_signature_invalid_to_problem_shape() -> None:
+    """Story 6.3 AC1 — ``WebhookSignatureInvalidError.to_problem`` RFC 7807 dict shape."""
+    exc = WebhookSignatureInvalidError("signature mismatch")
+    problem = exc.to_problem(instance="/v1/payments/webhook")
+    assert problem.status == 401
+    assert problem.code == "payments.webhook.signature_invalid"
+    assert problem.title == "Webhook signature invalid"
+    assert problem.detail == "signature mismatch"
+    assert problem.instance == "/v1/payments/webhook"
+
+
+def test_webhook_payload_invalid_to_problem_shape() -> None:
+    """Story 6.3 AC4/AC5 — ``WebhookPayloadInvalidError.to_problem`` RFC 7807 dict shape."""
+    exc = WebhookPayloadInvalidError("body schema violation")
+    problem = exc.to_problem(instance="/v1/payments/webhook")
+    assert problem.status == 400
+    assert problem.code == "payments.webhook.payload_invalid"
+    assert problem.title == "Webhook payload invalid"
+    assert problem.detail == "body schema violation"
+    assert problem.instance == "/v1/payments/webhook"
+
+
+def test_webhook_secret_key_missing_to_problem_shape() -> None:
+    """Story 6.3 AC1/AC5 — ``WebhookSecretKeyMissingError.to_problem`` RFC 7807 dict shape."""
+    exc = WebhookSecretKeyMissingError("toss_webhook_secret_key not configured")
+    problem = exc.to_problem(instance="/v1/payments/webhook")
+    assert problem.status == 503
+    assert problem.code == "payments.webhook.secret_key_missing"
+    assert problem.title == "Webhook secret key not configured"
+    assert problem.detail == "toss_webhook_secret_key not configured"
+    assert problem.instance == "/v1/payments/webhook"

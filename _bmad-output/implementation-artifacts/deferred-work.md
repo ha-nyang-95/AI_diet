@@ -2,6 +2,21 @@
 
 리뷰·구현 과정에서 식별되었으나 다음 스토리·시점으로 미룬 항목 모음.
 
+## Deferred from: code review of 6-3-결제-webhook-idempotency-키 (2026-05-10)
+
+- **W0a — Toss billingKey paymentKey rotation 가정 검증** [`api/app/services/payment_service.py:707-726`] — `_resolve_subscription_for_payment_key`가 `event_type='subscribe'` row 1건에만 의존. Toss billingKey 자동결제는 매 결제 새 paymentKey 발급이 표준 PG 패턴 — 가정 위반 시 모든 renew webhook이 `subscribe_row_missing` warning + silent drop → expires_at 무한 미갱신. 현 sandbox baseline은 renew webhook 미발사라 영향 0. **재검토 시점**: Story 8.x prod 전환 — Toss billing API 통합 + `subscriptions.billing_key` 컬럼 도입과 함께 billingKey-aware lookup으로 교체.
+- **W0b — 취소된 구독 자동결제 webhook 정책 (dunning)** [`api/app/services/payment_service.py:773-789`] — cancelled-but-not-expired 분기는 audit row + sentry error만 기록, *결제 차단·자동 환불·사용자 알림 없음*. epics.md:825 *"PG 본 계약·세금정산은 OUT"* scope-out 정합. **재검토 시점**: 외주 인수 후 클라이언트 정책 결정 — 환불/차단/알림 흐름 도입 시 Story 8.x dunning 스토리.
+- **W1 — service `rollback()` + router `commit()` 트랜잭션 소유권 모호** [`api/app/services/payment_service.py:1018,1030`] — race recovery 시 service가 unilaterally rollback, replay_log fresh SELECT 후 router가 commit. 실용상 동작하지만 spec의 *"commit은 router 책임"* 계약 위반. **재검토 시점**: Story 8.x 트랜잭션 패턴 정비.
+- **W2 — Header Idempotency-Key cross-user 충돌 SELECT** [`api/app/services/payment_service.py:682-688`] — `_fetch_payment_log_by_idempotency_key_global`이 user_id 무관 SELECT. UUID v4 자연 충돌은 1/2^122로 무시 가능, namespace prefix(`toss:event:`) 보호도 있지만 Header 경로는 user-scoped 가드 부재. **재검토 시점**: Story 8.x hardening forward.
+- **W3 — `_release_lock` GET-then-DEL 비원자** [`api/app/workers/subscription_expire.py:91-95`] — TTL 만료 후 다른 worker 락을 침범 가능. 단일 노드 baseline에선 race 0이지만 multi-replica 시 Lua atomic CAS DEL 필수. **재검토 시점**: Story 8.5 multi-replica 전환 시점.
+- **W4 — webhook signature 헤더 `t=` substring 매칭 forward-compat** [`api/app/adapters/toss.py:379-382`] — `startswith("t=")`/`startswith("v1=")`이 너무 permissive — 미래 Toss가 `t1=`/`tn=` 등 추가 시 잘못 매칭. **재검토 시점**: Toss webhook spec drift 관측 시.
+- **W5 — whitespace-only Idempotency-Key가 silent하게 멱등성 비활성** [`api/app/core/idempotency.py:50-51`] — `if not stripped: return None`은 미송신 등가 처리. 클라이언트는 송신했다고 믿지만 서버는 미송신 처리 → 재시도 시 중복 결제 가능. Story 6.1 baseline 동작이라 6.3 scope 외. **재검토 시점**: Story 8.x strict mode 검토.
+- **W6 — renew amount 가드가 `MONTHLY_PLAN_PRICE_KRW` 상수 hardcoded** [`api/app/services/payment_service.py:750-764`] — 단일 MVP 플랜 baseline에선 정합. 다중 플랜 도입 시 `subscription.plan_price_krw` 조회로 교체 필수 — 미수정 시 grandfather 사용자 결제가 모두 400 reject. **재검토 시점**: 다중 플랜 도입 시점(Growth).
+- **W7 — sweep cron 100건 cap이 100+/시간 만료 시 tail row 누적** [`api/app/workers/subscription_expire.py:62`] — 작은 사용자 베이스 baseline OK. cap_exceeded sentry warning은 emit. **재검토 시점**: 100+/시간 만료 사용자 도달 시.
+- **W8 — `redis is None` in-memory lock fallback이 multi-worker race 미보호** [`api/app/workers/subscription_expire.py:70-72`] — gunicorn N workers + redis 미설정 시 N개 sweep 동시 진입. DB-level race 가드로 데이터 정합성 보존되지만 wasted DB load. 단일 노드 baseline 정합. **재검토 시점**: multi-replica 전환 시점.
+- **W9 — alembic 0020 downgrade 시 누적된 multi-event_type row가 0019 partial UNIQUE 충돌** [`api/alembic/versions/0020_payment_logs_event_unique.py:downgrade`] — 0020 적용 후 renew/refund row 누적된 상태에서 downgrade 시 `(provider, payment_key)` UNIQUE 위반. recovery 경로 한정 — 일반 운영 영향 없음. **재검토 시점**: 0020 rollback 필요 incident 발생 시.
+- **W10 — webhook endpoint rate-limit 누락** [`api/app/api/v1/payments.py:471`] — `@limiter.limit(...)` 데코레이터 부재. slowapi limiter는 `main.py`에 wired됐지만 *"라우터 적용은 후속 스토리"*(`main.py:6`) 명시. webhook 단독 적용은 프로젝트 패턴 비일관 — 익명 endpoint DoS 표면(P1 body cap으로 부분 차단됐지만 rate-limit 보강 필요). **재검토 시점**: 라우터 전반 rate-limit rollout 스토리(Story 8.x) — 결제·인증·webhook 일괄 적용.
+
 ## Deferred from: code review of 6-1-정기결제-sandbox-신청 (2026-05-08)
 
 - **D1 — Toss `confirm` blind-retry double-charge 위험(production-grade)** [api/app/adapters/toss.py:1450-1509] — tenacity retry on timeout 시 Toss는 이미 결제 처리, 재시도가 `ALREADY_PROCESSED_PAYMENT` 4xx → 사용자 결제됐으나 우리 DB는 failed log. sandbox 단계 허용. **재검토 시점**: prod 진입 전 — `GET /v1/payments/{paymentKey}` confirm-or-query 패턴 또는 Toss-side `Idempotency-Key` 헤더 도입.

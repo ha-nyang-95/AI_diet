@@ -55,7 +55,6 @@ Story 2.3 추가:
 from __future__ import annotations
 
 import asyncio
-import re
 import uuid
 from datetime import date, datetime, time, timedelta
 from typing import Annotated, Final, Literal
@@ -82,6 +81,7 @@ from app.core.exceptions import (
     MealParsedItemsRequiresImageKeyError,
     MealQueryValidationError,
 )
+from app.core.idempotency import validate_idempotency_key_uuid_v4
 from app.db.models.meal import Meal
 from app.db.models.meal_analysis import MealAnalysis
 from app.db.models.user import User
@@ -113,15 +113,6 @@ PHOTO_ONLY_RAW_TEXT_PLACEHOLDER = "(사진 입력)"
 # AbuseGuard: 영업 데모 한정 합리적 상한 + Story 8 tunable.
 _PARSED_ITEMS_MAX_LENGTH: Final[int] = 20
 
-# Story 2.5 — `Idempotency-Key` 헤더는 UUID v4 형식 강제. Python `uuid.UUID(version=4)`
-# 회피(version arg가 무시되는 케이스 존재) — application-level regex 명시 (Story 2.2
-# `_IMAGE_KEY_PATTERN` 패턴 정합). 길이 36자 hard cap 동시 강제 (over-length DoS 차단).
-_IDEMPOTENCY_KEY_PATTERN: Final[str] = (
-    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
-)
-_IDEMPOTENCY_KEY_REGEX: Final[re.Pattern[str]] = re.compile(_IDEMPOTENCY_KEY_PATTERN)
-_IDEMPOTENCY_KEY_LENGTH: Final[int] = 36
-
 # CR P3 — partial UNIQUE 위반 catch를 인덱스 이름으로 한정 (FK/CHECK 위반 등 비-멱등
 # IntegrityError를 잘못된 replay path로 진입시키지 않기 위함). DB-side index 이름은
 # 마이그레이션 0009와 동기 — 인덱스 rename 시 이 상수도 갱신 필요.
@@ -131,18 +122,19 @@ _IDEMPOTENCY_INDEX_NAME: Final[str] = "idx_meals_user_id_idempotency_key_unique"
 def _validate_idempotency_key(key: str | None) -> str | None:
     """``Idempotency-Key`` 헤더 형식 검증 + 정규화 (Story 2.5, CR P12).
 
+    Story 6.3 DF49 흡수 — UUID v4 regex/길이 검증 SOT는
+    ``app.core.idempotency.validate_idempotency_key_uuid_v4``로 위임. 본 함수는 *meals
+    도메인 예외 변환 어댑터*만 — ``ValueError`` → ``MealIdempotencyKeyInvalidError(400)``.
+
     None / 빈 문자열 / 공백 패딩은 *"미송신과 동등"*으로 처리(``None`` 반환 — 기존
-    baseline 정합 + 정상 흐름). 비공백 패딩 후 형식 위반만 즉시
-    ``MealIdempotencyKeyInvalidError(400)`` raise. UUID v4 regex + 길이 36 강제.
+    baseline 정합 + 정상 흐름).
     """
-    if key is None:
-        return None
-    stripped = key.strip()
-    if not stripped:
-        return None
-    if len(stripped) != _IDEMPOTENCY_KEY_LENGTH or not _IDEMPOTENCY_KEY_REGEX.match(stripped):
-        raise MealIdempotencyKeyInvalidError("Idempotency-Key must be a valid UUID v4 (RFC 4122)")
-    return stripped
+    try:
+        return validate_idempotency_key_uuid_v4(key)
+    except ValueError as exc:
+        raise MealIdempotencyKeyInvalidError(
+            "Idempotency-Key must be a valid UUID v4 (RFC 4122)"
+        ) from exc
 
 
 def _format_parsed_items_to_raw_text(items: list[ParsedMealItem]) -> str:

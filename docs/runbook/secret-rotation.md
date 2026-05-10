@@ -211,7 +211,55 @@ provider.unavailable`` 502 다발):
 
 ---
 
-## 7-8. 기타 secret 회전 (Story 8.5 polish 단계 채움)
+## 7. TOSS_WEBHOOK_SECRET_KEY 회전 5단계 (Story 6.3)
+
+Toss webhook 시그니처 검증에 사용되는 ``TOSS_WEBHOOK_SECRET_KEY``는 ``TOSS_SECRET_KEY``와
+**별 키**(콘솔에서 별도 발급, ``whsec_*`` / ``wsk_*`` prefix). 회전 순서는 confirm secret
+회전과 유사하나 dual-secret 동시 검증은 *Story 8.4 hardening forward* — 본 baseline은
+*current secret 단일* 운영이라 회전 시 *짧은 down*(~수 초)이 발생할 수 있음. Toss 측
+retry(1분 backoff)가 자연 회복.
+
+### 7.1. 신규 secret 발급
+
+1. Toss 콘솔 *"개발자 도구 > Webhook > 시그니처 키"* 메뉴에서 *"새 키 발급"* 클릭.
+2. 발급된 ``whsec_*`` 신규 키를 안전한 노트(1Password 등)에 임시 저장.
+3. 구 secret은 일정 기간(7일 grace) 유효 — 회전 중 webhook이 즉시 끊기지 않도록 *겹침* 보장.
+
+### 7.2. 신규 환경 변수 추가 (겹침 deploy)
+
+1. Railway/staging 환경 변수에 ``TOSS_WEBHOOK_SECRET_KEY_NEW`` 신설(임시 slot).
+2. API 컨테이너 재배포 후 Toss 콘솔 *"테스트 webhook"* 1건 dry-run — sentry breadcrumb +
+   ``payment_logs.event_type='renew'`` row INSERT 확인.
+
+### 7.3. prod 갱신 + 컨테이너 재배포
+
+1. Railway prod ``TOSS_WEBHOOK_SECRET_KEY`` ← ``TOSS_WEBHOOK_SECRET_KEY_NEW`` 값 복사.
+2. ``TOSS_WEBHOOK_SECRET_KEY_NEW`` Railway env에서 삭제(slot 정리).
+3. API 컨테이너 재배포 — ``app/api/v1/payments.py:handle_payment_webhook`` lazy 어댑터가
+   신규 키로 첫 검증.
+4. Toss 콘솔에서 *테스트 webhook* 1건 발송 → ``payments.webhook.processed`` info log 확인.
+
+### 7.4. 구 secret revoke
+
+1. Toss 콘솔에서 *기존 webhook secret 만료* 처리.
+2. 1시간 후 sentry ``payments.webhook.signature_invalid`` warning 0건 확인(구 secret으로
+   여전히 도착하는 webhook이 없음을 검증).
+
+### 7.5. rollback (장애 시)
+
+신규 키로 webhook이 401 다발하는 경우(``payments.webhook.signature_invalid`` sentry 폭증):
+
+1. Railway prod ``TOSS_WEBHOOK_SECRET_KEY`` ← *구 키* 즉시 복원(7일 grace 내 가능).
+2. API 재배포 → 회복.
+3. Toss 콘솔에서 *신규 키 발급 취소* 또는 *재 재발급*으로 새 신규 키 생성 후 재시도.
+
+> **Story 8.4 forward** — *dual-secret 동시 검증*(``TOSS_WEBHOOK_SECRET_KEY`` +
+> ``TOSS_WEBHOOK_SECRET_KEY_PREVIOUS``) 옵션을 추가하면 회전 중 down 0초 가능. 본 스토리
+> baseline은 단일 secret + Toss retry로 자연 회복(*MVP 운영 부담 ↓*).
+
+---
+
+## 8. 기타 secret 회전 (Story 8.5 polish 단계 채움)
 
 본 단락은 placeholder — Story 8.5 운영 polish 단계에서 Sentry / Cloudflare R2 회전
 절차를 동일 패턴으로 채운다.
