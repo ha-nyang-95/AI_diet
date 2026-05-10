@@ -165,10 +165,39 @@ def get_remote_address_with_proxy(request: Request) -> str:
     return get_real_client_ip(request)
 
 
+def check_admin_ip_allowed(request: Request, allowlist: list[str]) -> bool:
+    """admin 요청의 실 클라이언트 IP가 allowlist 범위 내인지 검사 (Story 7.1, NFR-S8).
+
+    allowlist 빈 list → True(미강제 — MVP default).
+    ``get_real_client_ip`` 빈 string(헤더 부재 + ``request.client`` None) → False(deny by default).
+
+    Args:
+        request: FastAPI Request — ``get_real_client_ip`` SOT 재사용.
+        allowlist: ``settings.admin_ip_allowlist`` (이미 부팅 시 형식 검증 통과).
+    """
+    if not allowlist:
+        return True
+    client_ip = get_real_client_ip(request)
+    if not client_ip:
+        return False
+    try:
+        ip = ipaddress.ip_address(client_ip)
+    except ValueError:
+        return False
+    # Story 7.1 CR — Cloudflare/Railway 같은 IPv6 dual-stack 환경에서 client IP가
+    # ``::ffff:203.0.113.42`` 형태(IPv4-mapped IPv6)로 도착할 수 있다. IPv4 CIDR allowlist
+    # ``203.0.113.0/24``에 대해 raw IPv6 비교는 silently False → admin lockout. ipv4_mapped
+    # 형태이면 IPv4로 unwrap 후 비교(IPv6 CIDR allowlist는 unwrap 전 raw IP로 별도 매칭).
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return any(ip in ipaddress.ip_network(cidr, strict=False) for cidr in allowlist)
+
+
 __all__ = [
     "_CLOUDFLARE_IPV4",
     "_CLOUDFLARE_IPV6",
     "_CLOUDFLARE_NETWORKS",
+    "check_admin_ip_allowed",
     "get_real_client_ip",
     "get_remote_address_with_proxy",
     "init_trusted_proxies",

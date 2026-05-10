@@ -1,16 +1,17 @@
 /**
- * Next.js middleware — 보호 route 가드 (Story 1.2 AC#6, #11).
+ * Next.js middleware — 보호 route 가드 (Story 1.2 AC#6, #11 + Story 7.1 AC#7).
  *
  * - `/(user)/*` 그룹 진입 시 `bn_access` 쿠키 부재면 `/login` redirect.
- * - `/(admin)/*` 그룹 진입 시 `bn_admin_access` 쿠키 부재면 `/admin/login` redirect.
+ * - `/(admin)/*` 그룹 진입 시 `bn_admin_access` 쿠키 미유효(부재/형식위반/만료)면
+ *   `/admin/login` redirect + stale 쿠키 자동 expire(self-heal).
  * - `?next=` 파라미터로 원래 URL 보존.
  * - 이미 인증된 사용자가 `/login` 접근 시 `/dashboard`로 redirect (symmetric guard).
  *
- * Stale-cookie self-healing: `bn_access`의 JWT payload(`exp` claim)를 가벼운 base64+JSON
- * 디코드로 검사. 만료/형식불량이면 응답에서 Max-Age=0으로 cookie를 만료시키고 미인증으로
- * 처리 — symmetric guard와 protected guard 사이의 redirect ping-pong(`ERR_TOO_MANY_REDIRECTS`)
- * 회복. 서명 검증은 backend가 책임지므로 middleware는 가벼운 exp 검사만 수행 (Edge runtime
- * 비용 최소화).
+ * Stale-cookie self-healing: `bn_access`/`bn_admin_access` 모두 JWT payload(`exp` claim)를
+ * 가벼운 base64+JSON 디코드로 검사. 만료/형식불량이면 응답에서 Max-Age=0으로 cookie를
+ * 만료시키고 미인증으로 처리 — symmetric guard와 protected guard 사이의 redirect
+ * ping-pong(`ERR_TOO_MANY_REDIRECTS`) 회복. 서명 검증은 backend가 책임지므로 middleware는
+ * 가벼운 exp 검사만 수행 (Edge runtime 비용 최소화).
  */
 import { type NextRequest, NextResponse } from "next/server";
 
@@ -22,6 +23,7 @@ const CLOCK_SKEW_SECONDS = 5;
 
 const COOKIE_BN_ACCESS = "bn_access";
 const COOKIE_BN_REFRESH = "bn_refresh";
+const COOKIE_BN_ADMIN_ACCESS = "bn_admin_access";
 
 type CookieStatus = "missing" | "valid" | "stale";
 
@@ -44,6 +46,16 @@ function decodeJwtExp(token: string): number | null {
 }
 
 function classifyAccessCookie(token: string | undefined): CookieStatus {
+  if (!token) return "missing";
+  const exp = decodeJwtExp(token);
+  if (exp === null) return "stale";
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  if (exp <= nowSeconds + CLOCK_SKEW_SECONDS) return "stale";
+  return "valid";
+}
+
+// Story 7.1 AC#7 — admin 쿠키 stale-self-heal. user 쪽 ``classifyAccessCookie``와 동형.
+function classifyAdminCookie(token: string | undefined): CookieStatus {
   if (!token) return "missing";
   const exp = decodeJwtExp(token);
   if (exp === null) return "stale";
@@ -76,11 +88,15 @@ function expireAuthCookies(response: NextResponse): void {
   });
 }
 
-// 짧은-only(legacy `hasValidLookingCookie`) 검사는 admin 쿠키에만 유지 — 본 스토리에서는
-// admin OAuth 흐름을 고치지 않음. 추후 admin도 동일 stale-self-heal로 확장 가능.
-function hasValidLookingCookie(request: NextRequest, name: string): boolean {
-  const value = request.cookies.get(name)?.value;
-  return typeof value === "string" && value.length >= MIN_TOKEN_LENGTH;
+function expireAdminCookie(response: NextResponse): void {
+  const secure = isProductionEnvironment();
+  response.cookies.set(COOKIE_BN_ADMIN_ACCESS, "", {
+    httpOnly: true,
+    secure,
+    sameSite: "lax",
+    path: "/", // Story 7.1 CR — 발급 path(/v1/admin → /)와 동기화.
+    maxAge: 0,
+  });
 }
 
 export function middleware(request: NextRequest): NextResponse {
@@ -94,10 +110,18 @@ export function middleware(request: NextRequest): NextResponse {
   // /admin/login 자체와 그 하위 path만 가드 우회 — `/admin/loginExtra`는 가드 적용.
   const isAdminLogin = pathname === "/admin/login" || pathname.startsWith("/admin/login/");
   if (pathname.startsWith("/admin") && !isAdminLogin) {
-    if (!hasValidLookingCookie(request, "bn_admin_access")) {
+    const adminStatus = classifyAdminCookie(
+      request.cookies.get(COOKIE_BN_ADMIN_ACCESS)?.value,
+    );
+    if (adminStatus !== "valid") {
       url.pathname = "/admin/login";
       url.searchParams.set("next", pathname + search);
-      return NextResponse.redirect(url);
+      if (adminStatus === "stale") {
+        url.searchParams.set("error", "expired");
+      }
+      const response = NextResponse.redirect(url);
+      if (adminStatus === "stale") expireAdminCookie(response);
+      return response;
     }
     return NextResponse.next();
   }
