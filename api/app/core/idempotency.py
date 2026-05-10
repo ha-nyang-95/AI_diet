@@ -33,11 +33,13 @@ _IDEMPOTENCY_KEY_LENGTH: Final[int] = 36
 
 
 def validate_idempotency_key_uuid_v4(key: str | None) -> str | None:
-    """UUID v4 형식 검증 + None/공백 정규화.
+    """UUID v4 형식 검증 + None/공백 정규화 + lowercase 정규화.
 
     Returns:
         - ``None``: 미송신/빈/공백 패딩 (skip 신호 — 호출 측이 멱등 처리 비활성).
-        - ``str``: 정규화된 36-char UUID v4 (정상).
+        - ``str``: 정규화된 lowercase 36-char UUID v4 (정상). RFC 4122 §3 — UUID hex
+          digit은 case-insensitive. mixed-case 재시도 2건이 *다른 키*로 stored되어
+          멱등성이 깨지는 회귀 차단.
 
     Raises:
         ValueError: 비공백 패딩 후 형식 위반(길이 ≠ 36 또는 regex 불일치). 호출 측이
@@ -51,7 +53,9 @@ def validate_idempotency_key_uuid_v4(key: str | None) -> str | None:
         return None
     if len(stripped) != _IDEMPOTENCY_KEY_LENGTH or not _IDEMPOTENCY_KEY_REGEX.match(stripped):
         raise ValueError(f"Idempotency-Key invalid UUID v4 format: len={len(stripped)}")
-    return stripped
+    # CR P6 (Story 6.3) — RFC 4122 case-insensitivity 정규화. 같은 key의 mixed-case
+    # 재시도가 다른 row로 INSERT 되는 race 차단.
+    return stripped.lower()
 
 
 __all__ = ["validate_idempotency_key_uuid_v4"]

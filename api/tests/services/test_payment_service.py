@@ -1011,12 +1011,17 @@ async def test_webhook_refund_completed_inserts_audit(session_maker, user_factor
 async def test_webhook_replay_same_event_id_returns_existing_no_extra_row(
     session_maker, user_factory
 ) -> None:
-    """4. 같은 ``event_id`` 재전송 → ``was_replay=True`` + 추가 row INSERT X."""
+    """4. 같은 ``event_id`` 재전송 → ``was_replay=True`` + 추가 row INSERT X.
+
+    CR P9 (Story 6.3) — replay 분기에서 ``subscription.expires_at``이 *재차 갱신되지*
+    않음을 명시 검증(미래 refactor가 replay 경로에서도 expires_at을 가산하면 회귀 감지).
+    """
     user = await user_factory()
     payment_key = "pk_replay_evt"
-    await _seed_active_subscription_with_subscribe_log(
+    subscription, _ = await _seed_active_subscription_with_subscribe_log(
         session_maker, user_id=user.id, payment_key=payment_key
     )
+    original_expires = subscription.expires_at
 
     body = _webhook_event_body(
         event_id="evt_same_id_xyz", payment_key=payment_key, event_type="PAYMENT.STATUS_CHANGED"
@@ -1050,6 +1055,13 @@ async def test_webhook_replay_same_event_id_returns_existing_no_extra_row(
         )
         renew_rows = list(result.scalars().all())
     assert len(renew_rows) == 1
+
+    # CR P9 — expires_at은 첫 호출에서 +30일, replay에선 변화 없음 (NOT +60일).
+    async with session_maker() as session:
+        refreshed = await session.get(Subscription, subscription.id)
+    assert refreshed is not None
+    assert original_expires is not None
+    assert refreshed.expires_at == original_expires + timedelta(days=30)
 
 
 @pytest.mark.asyncio
@@ -1270,3 +1282,88 @@ async def test_webhook_negative_amount_raises_payload_invalid(session_maker, use
             await payment_service.handle_webhook_event(
                 session, event_body=body, idempotency_key=None
             )
+
+
+@pytest.mark.asyncio
+async def test_webhook_race_integrity_error_catch_path_recovers(
+    session_maker, user_factory, monkeypatch
+) -> None:
+    """CR P8 (Story 6.3) — 실제 IntegrityError catch 분기 진입 가드.
+
+    Story 6.3 race-recovery 코드(``handle_webhook_event`` IntegrityError catch
+    + ``session.rollback()`` + 재 SELECT)는 *기존 race 테스트가 1차 SELECT hit으로
+    catch 분기 진입하지 못해* 미커버였음. 본 테스트는 1차 SELECT를 monkeypatch로 한 번만
+    None 강제 → INSERT 시 ``idx_payment_logs_provider_payment_key_event_type_unique``
+    위반 → catch + rollback + 재 SELECT → ``(replay_log, True)`` 반환을 검증.
+    """
+    user = await user_factory()
+    payment_key = "pk_race_catch"
+    subscription, _ = await _seed_active_subscription_with_subscribe_log(
+        session_maker, user_id=user.id, payment_key=payment_key
+    )
+    event_id = "evt_race_catch_xyz"
+    key_used = f"toss:event:{event_id}"
+
+    # Pre-seed: 같은 idempotency_key + 같은 (provider, payment_key, event_type='renew')
+    # row가 다른 트랜잭션으로 commit된 상태(다른 worker가 먼저 INSERT 완료).
+    now = datetime.now(UTC)
+    async with session_maker() as session:
+        race_log = PaymentLog(
+            user_id=user.id,
+            subscription_id=subscription.id,
+            event_type="renew",
+            provider="toss",
+            provider_payment_key=payment_key,
+            provider_order_id="order_race_catch",
+            amount_krw=9900,
+            status="success",
+            idempotency_key=key_used,
+            raw_payload={"raced": True},
+            occurred_at=now,
+        )
+        session.add(race_log)
+        await session.commit()
+        await session.refresh(race_log)
+
+    body = _webhook_event_body(
+        event_id=event_id, payment_key=payment_key, event_type="PAYMENT.STATUS_CHANGED"
+    )
+
+    # Monkeypatch — 1차 SELECT(idempotency 전역 lookup) *첫 호출만* None 반환해
+    # INSERT 강제 진입 → composite UNIQUE 위반 catch path 진입. 2차(catch 후 재
+    # SELECT)는 실 helper로 위임해 race_log를 반환.
+    real_fetch = payment_service._fetch_payment_log_by_idempotency_key_global
+    call_count = {"n": 0}
+
+    async def _patched_fetch(session, *, idempotency_key):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return None  # 1차 miss — INSERT 강제.
+        return await real_fetch(session, idempotency_key=idempotency_key)
+
+    monkeypatch.setattr(
+        payment_service, "_fetch_payment_log_by_idempotency_key_global", _patched_fetch
+    )
+
+    original_expires = subscription.expires_at
+    async with session_maker() as session:
+        payment_log, was_replay = await payment_service.handle_webhook_event(
+            session, event_body=body, idempotency_key=None
+        )
+
+    # IntegrityError catch path 진입 검증 — fetch가 정확히 2회 호출됐어야 함
+    # (1차 miss → INSERT → IntegrityError catch → 2차 재 SELECT).
+    assert call_count["n"] == 2, (
+        f"expected 2 fetch calls (1차 miss + catch 재SELECT), got {call_count['n']}"
+    )
+    assert was_replay is True
+    assert payment_log is not None
+    assert payment_log.id == race_log.id
+
+    # rollback이 atomic UPDATE의 expires_at 갱신도 unwind하는지 — D3 안전망 정합.
+    async with session_maker() as session:
+        refreshed_sub = await session.get(Subscription, subscription.id)
+    assert refreshed_sub is not None
+    assert refreshed_sub.expires_at == original_expires, (
+        "expires_at must remain unchanged after IntegrityError catch + rollback"
+    )

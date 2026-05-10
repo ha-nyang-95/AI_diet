@@ -33,7 +33,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import UTC, datetime
-from typing import Annotated, Literal
+from typing import Annotated, Final, Literal
 
 import sentry_sdk
 import structlog
@@ -60,6 +60,10 @@ from app.services import payment_service
 logger = structlog.get_logger(__name__)
 
 router = APIRouter()
+
+# CR P1 (Story 6.3) — webhook body 크기 cap. 익명 endpoint(시그니처 검증 *전*) DoS
+# 표면 차단. Toss webhook 실 body는 수 KB — 64KB cap은 안전 마진 + 정상 트래픽 영향 0.
+_WEBHOOK_BODY_MAX_BYTES: Final[int] = 64 * 1024
 
 
 def _validate_payment_idempotency_key(key: str | None) -> str | None:
@@ -511,6 +515,21 @@ async def handle_payment_webhook(
         logger.warning("payments.webhook.signature_invalid", reason="header_missing")
         raise WebhookSignatureInvalidError("webhook signature header missing")
 
+    # CR P1 (Story 6.3) — body 크기 cap. 익명 endpoint(시그니처 검증 *전*)에서
+    # ``await request.body()``가 무제한 bytes 읽으면 DoS 표면. Toss webhook 실 body는
+    # 수 KB. ``Content-Length`` 헤더 누락은 chunked transfer 가능성이라 미가드 시 reject.
+    content_length = request.headers.get("content-length")
+    if content_length is None:
+        raise WebhookPayloadInvalidError("webhook body content-length header missing")
+    try:
+        body_size = int(content_length)
+    except ValueError as exc:
+        raise WebhookPayloadInvalidError("webhook body content-length invalid") from exc
+    if body_size < 0 or body_size > _WEBHOOK_BODY_MAX_BYTES:
+        raise WebhookPayloadInvalidError(
+            f"webhook body too large (max {_WEBHOOK_BODY_MAX_BYTES} bytes)"
+        )
+
     # *raw bytes* 보존 — JSON 파싱 후 re-serialize는 위변조 가능.
     raw_body = await request.body()
 
@@ -527,20 +546,23 @@ async def handle_payment_webhook(
         )
         raise
 
-    # JSON 파싱.
+    # JSON 파싱. CR P4 (Story 6.3) — Pydantic/JSON 예외 메시지를 RFC 7807 detail에
+    # echo하지 않음(입력 echo + schema hint 누출 회피). 전체 exc는 logger에만.
     try:
         body_dict = json.loads(raw_body)
     except json.JSONDecodeError as exc:
-        raise WebhookPayloadInvalidError(f"webhook body not json: {exc}") from exc
+        logger.warning("payments.webhook.body_not_json", reason=str(exc))
+        raise WebhookPayloadInvalidError("webhook body invalid") from exc
 
     if not isinstance(body_dict, dict):
-        raise WebhookPayloadInvalidError("webhook body must be a JSON object")
+        raise WebhookPayloadInvalidError("webhook body invalid")
 
     # Pydantic 검증 (envelope).
     try:
         event_body = toss_adapter.TossWebhookEventBody.model_validate(body_dict)
     except ValidationError as exc:
-        raise WebhookPayloadInvalidError(f"webhook envelope invalid: {exc}") from exc
+        logger.warning("payments.webhook.envelope_invalid", reason=str(exc))
+        raise WebhookPayloadInvalidError("webhook payload schema invalid") from exc
 
     # Header Idempotency-Key 형식 검증(송신 시).
     validated_key = _validate_payment_idempotency_key(idempotency_key)

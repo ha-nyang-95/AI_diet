@@ -38,7 +38,7 @@ from typing import Any, Final
 import sentry_sdk
 import structlog
 from pydantic import ValidationError
-from sqlalchemy import insert, literal, select, tuple_, update
+from sqlalchemy import func, insert, literal, select, tuple_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -765,10 +765,25 @@ async def _handle_renew_event(
 
     subscription_id_for_log: uuid.UUID | None = None
     if subscription is not None and subscription.status == "active":
-        # 정상 renew — expires_at 갱신.
-        subscription.expires_at = (subscription.expires_at or now) + timedelta(
-            days=MONTHLY_PLAN_PERIOD_DAYS
+        # CR P3 (Story 6.3) — atomic UPDATE로 lost-update race 차단(Story 6.2
+        # ``cancel_subscription`` SOT 정합). 동시 webhook 2건이 같은 ``expires_at``
+        # snapshot을 읽고 +30일을 *덮어쓰는* race를 SQL expression(``coalesce(expires_at,
+        # :now) + INTERVAL``)으로 차단 — 각 UPDATE가 row의 *현재* DB 값에 가산.
+        # 동시 INSERT는 composite UNIQUE catch + ``session.rollback()``으로 unwind되어
+        # 다중 가산 차단(D3 안전망 정합).
+        update_stmt = (
+            update(Subscription)
+            .where(
+                Subscription.id == subscription.id,
+                Subscription.status == "active",
+            )
+            .values(
+                expires_at=func.coalesce(Subscription.expires_at, literal(now))
+                + timedelta(days=MONTHLY_PLAN_PERIOD_DAYS)
+            )
+            .execution_options(synchronize_session="fetch")
         )
+        await session.execute(update_stmt)
         subscription_id_for_log = subscription.id
     elif (
         subscription is not None
