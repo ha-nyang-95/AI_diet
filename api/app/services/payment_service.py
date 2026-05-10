@@ -82,6 +82,17 @@ _PROVIDER_KEY_EVENT_TYPE_INDEX_NAME: Final[str] = (
     "idx_payment_logs_provider_payment_key_event_type_unique"
 )
 
+# CR follow-up (Gemini G2, Story 6.3) — Toss webhook ``event_type`` → 내부
+# ``payment_logs.event_type`` 매핑 SOT. dispatch 분기와 IntegrityError catch path가
+# 동일 매핑을 참조 — 변경 시 한 곳에서만 수정. ``PAYMENT.STATUS_CHANGED``는 ``status=
+# "DONE"`` branch만 ``renew`` 매핑(non-DONE은 dispatch else에서 early-return).
+_WEBHOOK_EVENT_TYPE_MAP: Final[dict[str, str]] = {
+    "PAYMENT.STATUS_CHANGED": "renew",
+    "PAYMENT_FAILED": "failed",
+    "REFUND_COMPLETED": "refund",
+    "REFUND_PARTIAL": "refund",
+}
+
 
 def _mask_user_id(user_id: uuid.UUID) -> str:
     """NFR-S5 정합 — user_id를 8자리 prefix만 노출."""
@@ -1047,13 +1058,7 @@ async def handle_webhook_event(
                 "payments.webhook.composite_unique_replay",
                 level="warning",
             )
-            event_type_for_replay = (
-                "renew"
-                if event_body.event_type == "PAYMENT.STATUS_CHANGED"
-                else "failed"
-                if event_body.event_type == "PAYMENT_FAILED"
-                else "refund"
-            )
+            event_type_for_replay = _WEBHOOK_EVENT_TYPE_MAP[event_body.event_type]
             replay_log = await _fetch_payment_log_by_provider_key_event_type(
                 session,
                 provider="toss",
