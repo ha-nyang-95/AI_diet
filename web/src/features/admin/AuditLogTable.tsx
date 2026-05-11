@@ -8,7 +8,7 @@
  * 한국어 label 매핑(`ACTION_LABEL`). target_user_id 있으면 사용자 상세 페이지 링크.
  */
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 
 import { adminApiFetch } from "@/lib/admin-api";
@@ -98,8 +98,11 @@ export function AuditLogTable({ initial }: { initial: AdminAuditLogListResponse 
   const [items, setItems] = useState<AdminAuditLogItem[]>(initial.items);
   const [cursor, setCursor] = useState<string | null>(initial.next_cursor);
   const [activeCursor, setActiveCursor] = useState<string | null>(null);
+  // cursor-한정 dedup 가드 — TanStack Query refetch(StrictMode double-mount /
+  // 재시도) 시 동일 cursor를 ``items``에 두 번 append하지 않도록 보존.
+  const appliedCursorsRef = useRef<Set<string>>(new Set());
 
-  const { isFetching, error } = useQuery<AdminAuditLogListResponse>({
+  const { isFetching, error, data, refetch } = useQuery<AdminAuditLogListResponse>({
     queryKey: ["admin", "audit-logs", activeCursor],
     queryFn: async () => {
       if (!activeCursor) {
@@ -116,14 +119,25 @@ export function AuditLogTable({ initial }: { initial: AdminAuditLogListResponse 
       if (!response.ok) {
         throw new Error(`fetch audit-logs failed: ${response.status}`);
       }
-      const next = (await response.json()) as AdminAuditLogListResponse;
-      setItems((prev) => [...prev, ...next.items]);
-      setCursor(next.next_cursor);
-      return next;
+      return (await response.json()) as AdminAuditLogListResponse;
     },
     enabled: activeCursor !== null,
-    staleTime: 0,
+    // queryFn 순수화 — 부작용(append/cursor 갱신)은 ``useEffect``로 이동. 재실행
+    // 위험을 함께 차단: refocus/reconnect re-fetch 비활성 + staleTime Infinity로
+    // queryKey 안정성 유지(``items``에 *append* 패턴이라 SWR식 갱신이 의미 없음).
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    refetchOnMount: false,
+    staleTime: Number.POSITIVE_INFINITY,
   });
+
+  useEffect(() => {
+    if (!data || !activeCursor) return;
+    if (appliedCursorsRef.current.has(activeCursor)) return;
+    appliedCursorsRef.current.add(activeCursor);
+    setItems((prev) => [...prev, ...data.items]);
+    setCursor(data.next_cursor);
+  }, [data, activeCursor]);
 
   return (
     <div className="space-y-4">
@@ -162,7 +176,16 @@ export function AuditLogTable({ initial }: { initial: AdminAuditLogListResponse 
 
       {isFetching && <p className="text-sm text-zinc-500">불러오는 중…</p>}
       {error && (
-        <p className="text-sm text-red-600">감사 로그 불러오기 실패. 다시 시도해 주세요.</p>
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="text-sm text-red-600">감사 로그 불러오기 실패.</p>
+          <button
+            type="button"
+            onClick={() => refetch()}
+            className="rounded border border-red-300 px-3 py-1 text-sm text-red-700 hover:bg-red-50"
+          >
+            다시 시도
+          </button>
+        </div>
       )}
 
       {cursor && !isFetching && (

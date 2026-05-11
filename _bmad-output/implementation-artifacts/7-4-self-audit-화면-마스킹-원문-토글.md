@@ -1,6 +1,6 @@
 # Story 7.4: Self-audit 화면 + 민감정보 마스킹 + 원문 보기 토글
 
-Status: review
+Status: done
 
 <!-- Epic 7 마지막 스토리 — Story 7.1(`(admin)` route group + admin layout SSR guard +
 `current_admin` 3-tier transitive 체인 + IP 화이트리스트 + admin_whoami smoke +
@@ -449,7 +449,7 @@ So that 자기 감사가 가능하고 부주의한 민감정보 노출이 차단
        - `useEffect` cleanup에서 listener detach + timer clear
      - **timer**: 1초 interval setInterval → `Date.now() >= expiresAt` 시 `setRevealState({ status: "masked", plaintext: null, expiresAt: null })` + `useEffect` cleanup으로 timer clear
      - **토글 OFF 즉시 마스킹**: 사용자가 토글 OFF 클릭 → state 즉시 `{ status: "masked", plaintext: null }` (활동 추적 불필요 — 명시 의도)
-     - **PROFILE 탭 분기**: `revealState.status === "revealed" && revealState.plaintext` 일 때 plaintext 필드 표시 + 마스킹 필드 hide. 그 외 기본 마스킹 흐름 유지.
+     - **PROFILE 탭 분기**: `revealState.status === "revealed" && revealState.plaintext` 일 때 plaintext 패널을 마스킹 폼 *위에* 추가 표시(병행 노출 — admin이 plaintext 확인 후 마스킹 폼으로 편집하는 *읽기↔편집 직교* 흐름). 기존 `AdminProfileEditForm` 마스킹 흐름 변경 0(Story 7.2 SOT 회귀 invariant 우선 — CR 시 D1 결정 정합).
    - **수정** `web/src/features/admin/AdminProfileEditForm.tsx` (또는 새 sub-component `UserPiiDisplay.tsx`):
      - props로 `revealState` 전달 → revealed 분기 시 plaintext 필드 (email plaintext / age plaintext / `{weight_kg.toFixed(1)} kg` / `{height_cm} cm` / `allergies.join(", ")` or empty state) 노출
      - **마스킹 분기 디폴트** — Story 7.2 SOT 동형 보존 (회귀 0건 invariant)
@@ -575,6 +575,24 @@ So that 자기 감사가 가능하고 부주의한 민감정보 노출이 차단
   - [x] Web `pnpm tsc --noEmit` 0 errors + `pnpm lint` 0 errors + Mobile `pnpm tsc --noEmit` 0 errors.
   - [x] `_bmad-output/implementation-artifacts/sprint-status.yaml` — `7-4-...: ready-for-dev → in-progress → review` 갱신(`epic-7: in-progress → done` 전이는 CR 종료 직전 갱신 — memory `feedback_cr_done_status_in_pr_commit` 정합).
   - [x] `test_admin_routes_audit_coverage.py` — `audit-logs`를 `_AUDIT_SCOPE_EXCLUDED_ROUTE_PATHS`에 등재(meta-audit exclusion SOT 정합) + business 가드 함수에서 exclusion skip 추가.
+
+### Review Findings
+
+(3-layer adversarial CR — Blind / Edge / Acceptance — 2026-05-11)
+
+- [x] **[Review][Decision]** AC5 본문 vs Tasks 불일치 — **D1 해결: Option 2 채택 (Tasks SOT)**. 마스킹 폼은 *편집* 흐름, plaintext 패널은 *읽기* 흐름이라 직교 UX. 현 구현(toggle panel + 마스킹 폼 병행 노출) 유지. Spec body 452행을 *"plaintext 패널을 마스킹 폼 위에 추가 표시(병행 노출)"*로 정정해 self-contradiction 해소. Patch 0건.
+
+- [x] **[Review][Patch]** `weight_kg.toFixed(1)` Decimal→JSON-string 불일치로 런타임 TypeError [`api/app/api/v1/admin.py:303-313, 336-352`] (Blind+Edge+Auditor, **HIGH**) — **Fix 적용**: `AdminUserPiiRevealResponse.weight_kg`를 `Decimal | None` → `float | None`로 변경(Story 7.2 `_build_profile_response` SOT 정합) + `_build_pii_reveal_response`에서 `float(revealed_weight)` 명시 캐스트 + `decimal.Decimal` import 제거(미사용). OpenAPI 자동 생성 정합 위해 `web/src/lib/api-client.ts:1434` + `mobile/lib/api-client.ts:1434` 두 client 모두 `weight_kg: number | null`로 manual 갱신(다음 `gen:api` 실행 시 동일 출력).
+- [x] **[Review][Patch]** `AuditLogTable` `queryFn` 부작용으로 refocus/StrictMode 시 중복 행 누적 [`web/src/features/admin/AuditLogTable.tsx:97-138`] (Blind+Edge, **HIGH**) — **Fix 적용**: `queryFn` 순수화(`setItems`/`setCursor` side effect 제거 + 응답만 return) + `useEffect`로 side effect 이동 + `appliedCursorsRef: Set<string>` dedup 가드(StrictMode double-mount 시 동일 cursor append 차단) + `refetchOnWindowFocus: false` + `refetchOnReconnect: false` + `refetchOnMount: false` + `staleTime: Infinity`로 재실행 위험 일괄 차단.
+- [x] **[Review][Patch]** `since` Query param naive datetime silent wrong-window filter [`api/app/api/v1/admin.py:766-775`] (Edge, MEDIUM) — **Fix 적용**: `datetime | None` → `AwareDatetime | None`(pydantic) — naive datetime은 422→400 자동 reject. Query description에 *"ISO 8601 + tz offset (inclusive) — naive datetime은 400 reject"* 명시.
+- [x] **[Review][Patch]** Background tab throttling이 PII auto-mask SLA(5분) 초과 허용 [`web/src/features/admin/UserPiiToggle.tsx:visibilitychange useEffect 추가`] (Edge, MEDIUM) — **Fix 적용**: `useEffect`(reveal.status === "revealed")에서 `document.addEventListener("visibilitychange", ...)` — tab 비활성(`hidden`) 진입 시 즉시 `setReveal(INITIAL)`. 보수적 선택(re-reveal은 audit row + 명시 액션 재확인 비용 다시 지불 → SLA 정합).
+- [x] **[Review][Patch]** `pii-reveal` double-click race로 중복 POST + 중복 audit row [`web/src/features/admin/UserPiiToggle.tsx:handleReveal`] (Edge, LOW) — **Fix 적용**: `revealInFlightRef: useRef<boolean>` 동기 가드 — `window.confirm` 호출 *직전* `revealInFlightRef.current = true` 설정 + `finally`에서 해제. 2회 클릭 시 두 번째는 early-return.
+- [x] **[Review][Patch]** `AuditLogTable` 페이지 N+ 실패 후 retry affordance 부재로 stuck [`web/src/features/admin/AuditLogTable.tsx:error block`] (Edge, LOW) — **Fix 적용**: error block에 *"다시 시도"* 버튼 추가 — `useQuery.refetch()` 직접 호출. cursor 재set 불필요(refetch는 동일 queryKey로 재실행 + dedup 가드는 새 success 시점에 동작).
+- [x] **[Review][Patch]** structlog leak 검증 assertion이 tautology — height(180) leak 검출 불가 [`api/tests/api/v1/test_admin_pii_reveal.py:317-326`] (Blind, MEDIUM) — **Fix 적용**: `_MASKED_ID_KEYS = {"admin_id", "target_user_id"}` 정의 + `joined` 구성 전 해당 kwargs 사전 제외 + height assertion을 `assert "180" not in joined`로 단순화(tautology 해소). 마스킹 ID(`u_<hex8>`) collision 없이 실제 plaintext leak 검출.
+
+- [x] **[Review][Defer]** DF146 — Filters dropped on cursor pagination ("더 보기") [`web/src/features/admin/AuditLogTable.tsx:108-115` + `audit-logs/page.tsx:22-25`] — deferred, UI가 현재 filter UI 미노출(`actor_id=me&limit=50` 고정)이라 latent. Filter UI 도입(Story 8.4 polish 시점) 직전 일괄 정비.
+- [x] **[Review][Defer]** DF147 — Initial SSR audit-logs 페이지 새로고침 affordance 부재 [`web/src/features/admin/AuditLogTable.tsx:104` `enabled: activeCursor !== null`] — deferred, UX nice-to-have(현 패턴은 새로고침 = 페이지 reload). Audit-logs UX polish(Story 8.4) 시점.
+- [x] **[Review][Defer]** DF148 — soft-deleted admin (`users.deleted_at IS NOT NULL`)이 잔존 JWT로 self-audit/`pii-reveal` 가능 [`api/app/api/deps.py:current_admin` Story 1.2 SOT] — deferred, **pre-existing** in Story 1.2 SOT(7.4가 도입한 결함 아님). `current_admin` 자체에 `deleted_at IS NULL` 가드 추가 필요. Story 5.2 + admin auth 정합 검토와 함께(Story 8.4 또는 audit DB role 분리 시점).
 
 ## Dev Notes
 

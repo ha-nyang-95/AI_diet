@@ -1431,7 +1431,7 @@ export interface components {
             /** Age */
             age: number | null;
             /** Weight Kg */
-            weight_kg: string | null;
+            weight_kg: number | null;
             /** Height Cm */
             height_cm: number | null;
             /** Allergies */

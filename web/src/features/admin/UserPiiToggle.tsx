@@ -79,32 +79,41 @@ export function UserPiiToggle({ userId }: { userId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState<number>(() => Date.now());
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 동기 가드 — confirm 비-modal 브라우저(WebView/dialog suppress 모드)에서 두 번
+  // 클릭 시 두 번의 POST + 두 audit row 생성 race 차단.
+  const revealInFlightRef = useRef<boolean>(false);
 
   const handleReveal = useCallback(async () => {
-    const confirmed = window.confirm(
-      "사용자 개인정보(이메일·체중·신장·알레르기) 원문을 표시합니다. 5분 후 자동 복원됩니다. 계속하시겠습니까?",
-    );
-    if (!confirmed) return;
-    setError(null);
-    setReveal({ status: "loading", plaintext: null, expiresAt: null });
+    if (revealInFlightRef.current) return;
+    revealInFlightRef.current = true;
     try {
-      const response = await adminApiFetch(`/v1/admin/users/${userId}/pii-reveal`, {
-        method: "POST",
-      });
-      if (!response.ok) {
+      const confirmed = window.confirm(
+        "사용자 개인정보(이메일·체중·신장·알레르기) 원문을 표시합니다. 5분 후 자동 복원됩니다. 계속하시겠습니까?",
+      );
+      if (!confirmed) return;
+      setError(null);
+      setReveal({ status: "loading", plaintext: null, expiresAt: null });
+      try {
+        const response = await adminApiFetch(`/v1/admin/users/${userId}/pii-reveal`, {
+          method: "POST",
+        });
+        if (!response.ok) {
+          setError("원문 보기 실패. 잠시 후 다시 시도하세요.");
+          setReveal(INITIAL);
+          return;
+        }
+        const plaintext = (await response.json()) as AdminUserPiiRevealResponse;
+        setReveal({
+          status: "revealed",
+          plaintext,
+          expiresAt: Date.now() + PII_REVEAL_TTL_MS,
+        });
+      } catch {
         setError("원문 보기 실패. 잠시 후 다시 시도하세요.");
         setReveal(INITIAL);
-        return;
       }
-      const plaintext = (await response.json()) as AdminUserPiiRevealResponse;
-      setReveal({
-        status: "revealed",
-        plaintext,
-        expiresAt: Date.now() + PII_REVEAL_TTL_MS,
-      });
-    } catch {
-      setError("원문 보기 실패. 잠시 후 다시 시도하세요.");
-      setReveal(INITIAL);
+    } finally {
+      revealInFlightRef.current = false;
     }
   }, [userId]);
 
@@ -155,6 +164,21 @@ export function UserPiiToggle({ userId }: { userId: string }) {
     }, COUNTDOWN_INTERVAL_MS);
     return () => clearInterval(interval);
   }, [reveal.status, reveal.expiresAt]);
+
+  // 탭 비활성 시 ``setInterval`` throttling(Chromium/Firefox는 비활성 탭의 1s
+  // interval을 ≥60s로 늘림)으로 plaintext가 5분 SLA 초과 잔존 가능. 비활성 진입
+  // 시점에 즉시 마스킹 복귀(가장 보수적 선택 — re-reveal은 audit row + 명시 액션
+  // 재확인 비용을 다시 지불).
+  useEffect(() => {
+    if (reveal.status !== "revealed") return;
+    const handler = () => {
+      if (document.visibilityState === "hidden") {
+        setReveal(INITIAL);
+      }
+    };
+    document.addEventListener("visibilitychange", handler);
+    return () => document.removeEventListener("visibilitychange", handler);
+  }, [reveal.status]);
 
   const remainingMs =
     reveal.status === "revealed" && reveal.expiresAt !== null

@@ -39,12 +39,11 @@ import binascii
 import contextlib
 import uuid
 from datetime import UTC, datetime, time, timedelta
-from decimal import Decimal
 from typing import Annotated, Literal
 
 import structlog
 from fastapi import APIRouter, Depends, Query, Response, status
-from pydantic import BaseModel, ConfigDict
+from pydantic import AwareDatetime, BaseModel, ConfigDict
 from sqlalchemy import String, desc, func, or_, select, update
 from sqlalchemy.orm import selectinload
 
@@ -306,7 +305,10 @@ class AdminUserPiiRevealResponse(BaseModel):
     user_id: uuid.UUID
     email: str
     age: int | None
-    weight_kg: Decimal | None
+    # ``Decimal | None``이 아니라 ``float | None`` — Pydantic v2의 ``Decimal`` JSON
+    # 직렬화는 string이라 web client ``.toFixed()`` 호출이 TypeError. Story 7.2
+    # ``_build_profile_response`` SOT 정합(api/app/api/v1/users.py:226-237).
+    weight_kg: float | None
     height_cm: int | None
     allergies: list[str] | None
     revealed_at: datetime
@@ -340,11 +342,12 @@ def _build_pii_reveal_response(user: User) -> AdminUserPiiRevealResponse:
     호출처가 의도된 plaintext 흐름임을 type-system 차원에서 명시.
     """
     now = datetime.now(UTC)
+    revealed_weight = reveal_weight(user.weight_kg)
     return AdminUserPiiRevealResponse(
         user_id=user.id,
         email=reveal_email(user.email),
         age=user.age,
-        weight_kg=reveal_weight(user.weight_kg),
+        weight_kg=float(revealed_weight) if revealed_weight is not None else None,
         height_cm=reveal_height(user.height_cm),
         allergies=reveal_allergies(user.allergies),
         revealed_at=now,
@@ -761,8 +764,13 @@ async def list_self_audit_logs(
     action: Annotated[AuditLogAction | None, Query(description="action ENUM 필터")] = None,
     target_user_id: Annotated[uuid.UUID | None, Query(description="대상 user UUID 필터")] = None,
     since: Annotated[
-        datetime | None,
-        Query(description="ISO 8601 UTC — 이 시점 이후 audit row (inclusive)"),
+        AwareDatetime | None,
+        Query(
+            description=(
+                "ISO 8601 + tz offset (inclusive) — naive datetime은 400 reject. "
+                "예: '2026-05-10T00:00:00Z' 또는 '2026-05-10T09:00:00+09:00'."
+            ),
+        ),
     ] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     cursor: Annotated[str | None, Query(max_length=200)] = None,

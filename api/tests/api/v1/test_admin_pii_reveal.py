@@ -315,12 +315,17 @@ async def test_reveal_pii_no_plaintext_in_structlog_when_logger_patched(
     assert response.status_code == 200
 
     # 모든 logger.info 호출의 args + kwargs에 plaintext PII 비포함 invariant.
+    # 마스킹된 ID kwargs(``admin_id`` / ``target_user_id`` — ``u_<hex8>`` 포맷)는
+    # height(``180``) 등 짧은 plaintext와 우연 충돌 가능(예: ``u_180fab12``)이라
+    # 의미있는 PII 누수 검출을 위해 사전 제외 후 잔여 필드만 검사.
+    _MASKED_ID_KEYS = {"admin_id", "target_user_id"}
     for call in info_mock.call_args_list:
         args, kwargs = call.args, call.kwargs
-        joined = " ".join(str(v) for v in (*args, *kwargs.values()))
+        pii_relevant_values = [v for k, v in kwargs.items() if k not in _MASKED_ID_KEYS]
+        joined = " ".join(str(v) for v in (*args, *pii_relevant_values))
         assert target_email not in joined, f"plaintext email leaked: {joined}"
         assert "88.8" not in joined, f"plaintext weight leaked: {joined}"
-        assert "180" not in joined or "u_" in joined, f"plaintext height leaked (180): {joined}"
+        assert "180" not in joined, f"plaintext height leaked (180): {joined}"
         assert "우유" not in joined, f"plaintext allergy leaked: {joined}"
         assert "땅콩" not in joined, f"plaintext allergy leaked: {joined}"
 
