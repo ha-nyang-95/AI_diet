@@ -55,6 +55,7 @@ from app.core.exceptions import (
     RefreshTokenInvalidError,
     RefreshTokenReplayError,
 )
+from app.core.masking import mask_email
 from app.core.proxy import get_real_client_ip
 from app.core.security import (
     AdminTokenClaims,
@@ -568,20 +569,6 @@ async def admin_exchange(
 # --- /admin/whoami ------------------------------------------------------
 
 
-def _mask_email(email: str) -> str:
-    """Story 7.1 NFR-S5 — ``j***@example.com`` 패턴 마스킹.
-
-    local part 첫 1자 + ``***`` + ``@domain``. local part 길이 1자 시 ``***@domain``
-    (개인 식별성 0). ``@`` 부재/빈 string은 ``***``로 안전 fallback.
-    """
-    if "@" not in email:
-        return "***"
-    local, _, domain = email.partition("@")
-    if len(local) <= 1:
-        return f"***@{domain}"
-    return f"{local[0]}***@{domain}"
-
-
 @router.get("/admin/whoami")
 async def admin_whoami(
     user: Annotated[User, Depends(current_admin)],
@@ -598,7 +585,7 @@ async def admin_whoami(
     """
     return AdminWhoamiResponse(
         user_id=user.id,
-        email_masked=_mask_email(user.email),
+        email_masked=mask_email(user.email),
         role="admin",
         token_expires_at=claims.expires_at,
     )

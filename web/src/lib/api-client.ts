@@ -891,6 +891,164 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/admin/users": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Search Users
+         * @description 사용자 검색 — email ILIKE prefix(``q%``) OR user_id UUID prefix.
+         *
+         *     결과는 *기본 마스킹*(NFR-S5 — 이메일 ``j***@example.com``). soft-deleted 사용자
+         *     포함(admin 거버넌스 — ``deleted_at`` 필드로 명시). cursor pagination
+         *     (``created_at_desc`` keyset).
+         *
+         *     Story 7.3 forward: ``Depends(audit_admin_action)`` 추가 wire 시
+         *     ``action="user_search"`` + ``target_resource="users"`` + ``path="/v1/admin/users"``
+         *     자동 기록.
+         *
+         *     Story 7.4 forward: ``?include_pii=true`` 쿼리 + 명시 *원문 보기* 액션 시 plaintext
+         *     이메일 응답 + audit log ``action="user_pii_view"`` 추가 분기.
+         */
+        get: operations["search_users_v1_admin_users_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/users/{user_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get User Detail
+         * @description 사용자 상세 — 프로필 + 메타(가입/탈퇴/온보딩/프로필 갱신) + 마스킹 PII.
+         *
+         *     soft-deleted 사용자도 200 응답(admin 거버넌스 — ``deleted_at`` 필드 포함). 미존재
+         *     user_id → 404 ``code=admin.user.not_found``.
+         *
+         *     Story 7.3 forward: ``action="user_profile_view"``.
+         *     Story 7.4 forward: 원문 보기 토글 endpoint 별도 신설.
+         */
+        get: operations["get_user_detail_v1_admin_users__user_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Patch User Profile
+         * @description 타 사용자 프로필 수정 — ``users.py:patch_health_profile``(Story 5.1) 흐름 정합.
+         *
+         *     핵심 차이:
+         *     1. 대상 user_id가 admin 자기 자신이 아닌 *타 사용자*.
+         *     2. ``require_basic_consents`` gate *미적용* — admin은 거버넌스 행위(PIPA 18조 처리
+         *        위탁과 별개의 서비스 운영 정합).
+         *     3. ``profile_updated_at = func.now()`` set + ``profile_completed_at`` 미터치 +
+         *        ``onboarded_at`` 미터치(Story 5.1 invariant 동일).
+         *
+         *     soft-deleted 사용자 수정 거부: ``deleted_at IS NOT NULL`` 사용자는 404 — 30일 grace
+         *     후 cascade 삭제될 데이터에 손대는 거버넌스 위험 차단(Story 5.2 정합).
+         *
+         *     Story 7.3 forward: ``action="user_profile_edit"`` + ``target_user_id={user_id}``.
+         *     LLM cache 무효화: ``_build_profile_hash``(Story 3.6/4.4 SOT)가 sha256 input에 포함된
+         *     6 필드 자동 invalidate.
+         */
+        patch: operations["patch_user_profile_v1_admin_users__user_id__patch"];
+        trace?: never;
+    };
+    "/v1/admin/users/{user_id}/meals": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List User Meals
+         * @description 타 사용자 식단 이력 조회 — soft-deleted 포함 + 분석 요약 join + raw_text length-only.
+         *
+         *     이력 보존(NFR-S5 정합 — admin도 식단 raw_text plaintext는 마스킹 대상). 일반
+         *     사용자 ``GET /v1/meals``와 *별 책임* — 사용자 자신의 raw_text는 평문, admin이 보는
+         *     타인 식단 raw_text는 length-only.
+         *
+         *     Story 7.3 forward: ``action="user_meal_history_view"``.
+         *     Story 7.4 forward: 원문 보기 시 raw_text plaintext 분기.
+         */
+        get: operations["list_user_meals_v1_admin_users__user_id__meals_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/users/{user_id}/meal-analyses": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List User Meal Analyses
+         * @description 타 사용자 분석/피드백 로그 조회 — feedback_summary + fit_score + used_llm.
+         *
+         *     AC3 식단 이력과 *별 endpoint*: meal_analyses는 *분석 결과 단독* 조회(meal 메타와
+         *     분리). feedback_summary는 *사용자 식별 정보 부재*라 평문 노출. feedback_text(full
+         *     body)는 본 list endpoint에서 *생략* — 별 detail endpoint는 본 스토리 OUT(7.4 원문
+         *     보기 시점에 흡수).
+         *
+         *     Story 7.3 forward: ``action="user_feedback_history_view"``.
+         */
+        get: operations["list_user_meal_analyses_v1_admin_users__user_id__meal_analyses_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/users/{user_id}/meals/{meal_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete User Meal
+         * @description 타 사용자 식단 soft delete — B2B 운영 케이스(예: 잘못된 식단 입력 사용자 요청).
+         *
+         *     Story 2.1 ``meals.py:delete_meal`` SOT 정합 — 단일 SQL update + ``deleted_at IS
+         *     NULL`` 필터 + ``RETURNING id``로 race-free + 소유권(``user_id`` 매칭) 검증 통합.
+         *
+         *     이미 soft-deleted된 meal → 404 ``code=meals.not_found``(Story 2.1과 동일 enumeration
+         *     차단). meal_id가 다른 사용자 소유 시도 → 404(같은 응답 — enumeration 차단).
+         *
+         *     Story 7.3 forward: ``action="admin_meal_delete"`` + ``target_user_id={user_id}`` +
+         *     ``target_resource="meals"`` + ``target_resource_id={meal_id}``.
+         */
+        delete: operations["delete_user_meal_v1_admin_users__user_id__meals__meal_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/healthz": {
         parameters: {
             query?: never;
@@ -965,6 +1123,205 @@ export interface components {
             admin_access_token: string | null;
             /** Expires In Seconds */
             expires_in_seconds: number;
+        };
+        /** AdminMealAnalysisInline */
+        AdminMealAnalysisInline: {
+            /** Fit Score */
+            fit_score: number;
+            /**
+             * Fit Score Label
+             * @enum {string}
+             */
+            fit_score_label: "allergen_violation" | "low" | "moderate" | "good" | "excellent";
+            /** Feedback Summary */
+            feedback_summary: string;
+            /**
+             * Used Llm
+             * @enum {string}
+             */
+            used_llm: "gpt-4o-mini" | "claude" | "stub";
+        };
+        /** AdminMealAnalysisItem */
+        AdminMealAnalysisItem: {
+            /**
+             * Meal Analysis Id
+             * Format: uuid
+             */
+            meal_analysis_id: string;
+            /**
+             * Meal Id
+             * Format: uuid
+             */
+            meal_id: string;
+            /** Fit Score */
+            fit_score: number;
+            /**
+             * Fit Score Label
+             * @enum {string}
+             */
+            fit_score_label: "allergen_violation" | "low" | "moderate" | "good" | "excellent";
+            /**
+             * Fit Reason
+             * @enum {string}
+             */
+            fit_reason: "ok" | "allergen_violation" | "incomplete_data";
+            /** Feedback Summary */
+            feedback_summary: string;
+            /**
+             * Used Llm
+             * @enum {string}
+             */
+            used_llm: "gpt-4o-mini" | "claude" | "stub";
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /** AdminMealAnalysisListResponse */
+        AdminMealAnalysisListResponse: {
+            /** Analyses */
+            analyses: components["schemas"]["AdminMealAnalysisItem"][];
+            /** Next Cursor */
+            next_cursor: string | null;
+        };
+        /** AdminMealItem */
+        AdminMealItem: {
+            /**
+             * Meal Id
+             * Format: uuid
+             */
+            meal_id: string;
+            /** Raw Text Length */
+            raw_text_length: number;
+            /**
+             * Ate At
+             * Format: date-time
+             */
+            ate_at: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Deleted At */
+            deleted_at: string | null;
+            /** Image Url */
+            image_url: string | null;
+            /** Parsed Items Count */
+            parsed_items_count: number | null;
+            analysis_summary: components["schemas"]["AdminMealAnalysisInline"] | null;
+        };
+        /** AdminMealListResponse */
+        AdminMealListResponse: {
+            /** Meals */
+            meals: components["schemas"]["AdminMealItem"][];
+            /** Next Cursor */
+            next_cursor: string | null;
+        };
+        /** AdminUserDetailResponse */
+        AdminUserDetailResponse: {
+            /**
+             * User Id
+             * Format: uuid
+             */
+            user_id: string;
+            /** Email Masked */
+            email_masked: string;
+            /** Display Name */
+            display_name: string | null;
+            /** Picture Url */
+            picture_url: string | null;
+            /**
+             * Role
+             * @enum {string}
+             */
+            role: "user" | "admin";
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Last Login At */
+            last_login_at: string | null;
+            /** Deleted At */
+            deleted_at: string | null;
+            /** Deletion Reason */
+            deletion_reason: string | null;
+            /** Onboarded At */
+            onboarded_at: string | null;
+            /** Profile Completed At */
+            profile_completed_at: string | null;
+            /** Profile Updated At */
+            profile_updated_at: string | null;
+            /** Age */
+            age: number | null;
+            /** Weight Kg Masked */
+            weight_kg_masked: string | null;
+            /** Height Cm Masked */
+            height_cm_masked: string | null;
+            /** Activity Level */
+            activity_level: ("sedentary" | "light" | "moderate" | "active" | "very_active") | null;
+            /** Health Goal */
+            health_goal: ("weight_loss" | "muscle_gain" | "maintenance" | "diabetes_management") | null;
+            /** Allergies Count Masked */
+            allergies_count_masked: string | null;
+            /** Macro Goal */
+            macro_goal: {
+                [key: string]: number;
+            } | null;
+            /** Notifications Enabled */
+            notifications_enabled: boolean;
+            /**
+             * Notification Time
+             * Format: time
+             */
+            notification_time: string;
+            /** Notification Timezone */
+            notification_timezone: string;
+        };
+        /** AdminUserListItem */
+        AdminUserListItem: {
+            /**
+             * User Id
+             * Format: uuid
+             */
+            user_id: string;
+            /** Email Masked */
+            email_masked: string;
+            /**
+             * Role
+             * @enum {string}
+             */
+            role: "user" | "admin";
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Deleted At */
+            deleted_at: string | null;
+            /** Profile Completed At */
+            profile_completed_at: string | null;
+            /** Onboarded At */
+            onboarded_at: string | null;
+        };
+        /** AdminUserSearchResponse */
+        AdminUserSearchResponse: {
+            /** Users */
+            users: components["schemas"]["AdminUserListItem"][];
+            /** Next Cursor */
+            next_cursor: string | null;
         };
         /**
          * AdminWhoamiResponse
@@ -3531,6 +3888,227 @@ export interface operations {
             };
             /** @description 기본 동의 미부여 (`consent.basic.missing`) */
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    search_users_v1_admin_users_get: {
+        parameters: {
+            query: {
+                q: string;
+                limit?: number;
+                cursor?: string | null;
+            };
+            header?: {
+                Authorization?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                bn_admin_access?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminUserSearchResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_user_detail_v1_admin_users__user_id__get: {
+        parameters: {
+            query?: never;
+            header?: {
+                Authorization?: string | null;
+            };
+            path: {
+                user_id: string;
+            };
+            cookie?: {
+                bn_admin_access?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminUserDetailResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    patch_user_profile_v1_admin_users__user_id__patch: {
+        parameters: {
+            query?: never;
+            header?: {
+                Authorization?: string | null;
+            };
+            path: {
+                user_id: string;
+            };
+            cookie?: {
+                bn_admin_access?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HealthProfilePatchRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminUserDetailResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_user_meals_v1_admin_users__user_id__meals_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                cursor?: string | null;
+            };
+            header?: {
+                Authorization?: string | null;
+            };
+            path: {
+                user_id: string;
+            };
+            cookie?: {
+                bn_admin_access?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminMealListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_user_meal_analyses_v1_admin_users__user_id__meal_analyses_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                cursor?: string | null;
+            };
+            header?: {
+                Authorization?: string | null;
+            };
+            path: {
+                user_id: string;
+            };
+            cookie?: {
+                bn_admin_access?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminMealAnalysisListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_user_meal_v1_admin_users__user_id__meals__meal_id__delete: {
+        parameters: {
+            query?: never;
+            header?: {
+                Authorization?: string | null;
+            };
+            path: {
+                user_id: string;
+                meal_id: string;
+            };
+            cookie?: {
+                bn_admin_access?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
                 headers: {
                     [name: string]: unknown;
                 };

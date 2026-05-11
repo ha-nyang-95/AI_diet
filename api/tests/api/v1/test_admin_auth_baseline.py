@@ -53,8 +53,12 @@ def test_admin_token_expires_at_8_hours() -> None:
 
     fixed_now 기준으로 토큰 발급 → ``verify_admin_token``의 ``expires_at`` claim이
     fixed_now + 8h와 *정확히* 일치(±leeway 무관 — exp claim 자체 검증).
+
+    ``datetime.now(UTC)``를 baseline으로 사용 — ``verify_admin_token``은 ``jose``의 exp
+    검증을 거치므로 fixed_now가 ≥8h 과거이면 ``AccessTokenExpiredError``로 실패(이전에는
+    하드코드 날짜 2026-05-10로 인해 8h 경과 후 회귀 — 시간 비종속 회귀로 정정).
     """
-    fixed_now = datetime(2026, 5, 10, 12, 0, 0, tzinfo=UTC)
+    fixed_now = datetime.now(UTC).replace(microsecond=0)
     token = create_admin_token(uuid.uuid4(), now=fixed_now)
     claims = verify_admin_token(token)
     assert claims.expires_at == fixed_now + timedelta(seconds=ADMIN_ACCESS_TOKEN_TTL_SECONDS)

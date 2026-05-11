@@ -82,6 +82,7 @@ Desktop.ini
 # --- Claude Code / BMad personal overrides --------------
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
+.claude/projects/
 _bmad/config.user.toml
 _bmad/custom/*.user.toml
 
