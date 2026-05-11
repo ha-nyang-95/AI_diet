@@ -4265,7 +4265,7 @@ export interface operations {
                 action?: ("user_search" | "user_profile_view" | "user_meal_history_view" | "user_feedback_history_view" | "user_profile_edit" | "admin_meal_delete" | "user_pii_view") | null;
                 /** @description 대상 user UUID 필터 */
                 target_user_id?: string | null;
-                /** @description ISO 8601 UTC — 이 시점 이후 audit row (inclusive) */
+                /** @description ISO 8601 + tz offset (inclusive) — naive datetime은 400 reject. 예: '2026-05-10T00:00:00Z' 또는 '2026-05-10T09:00:00+09:00'. */
                 since?: string | null;
                 limit?: number;
                 cursor?: string | null;

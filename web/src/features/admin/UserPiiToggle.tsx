@@ -103,10 +103,13 @@ export function UserPiiToggle({ userId }: { userId: string }) {
           return;
         }
         const plaintext = (await response.json()) as AdminUserPiiRevealResponse;
+        // 초기 만료는 서버가 제공한 ``expires_at``를 우선 — client-server clock skew
+        // 대응(Gemini CR PR #43 권장). 이후 활동 연장은 client-side(``Date.now() +
+        // PII_REVEAL_TTL_MS``)로 유지 — 매 활동마다 서버 왕복은 NFR-P9 정합 깨짐.
         setReveal({
           status: "revealed",
           plaintext,
-          expiresAt: Date.now() + PII_REVEAL_TTL_MS,
+          expiresAt: new Date(plaintext.expires_at).getTime(),
         });
       } catch {
         setError("원문 보기 실패. 잠시 후 다시 시도하세요.");
