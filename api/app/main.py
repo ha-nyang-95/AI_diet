@@ -26,6 +26,7 @@ from slowapi import Limiter
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.api.v1 import admin as admin_router
 from app.api.v1 import analysis as analysis_router
 from app.api.v1 import auth as auth_router
 from app.api.v1 import consents as consents_router
@@ -378,6 +379,7 @@ app.include_router(analysis_router.router, prefix="/v1/analysis", tags=["analysi
 app.include_router(notifications_router.router, prefix="/v1/notifications", tags=["notifications"])
 app.include_router(payments_router.router, prefix="/v1/payments", tags=["payments"])
 app.include_router(reports_router.router, prefix="/v1/reports", tags=["reports"])
+app.include_router(admin_router.router, prefix="/v1/admin", tags=["admin"])
 
 
 @app.get("/healthz")

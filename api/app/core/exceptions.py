@@ -137,6 +137,36 @@ class AdminIpBlockedError(AuthError):
     title: ClassVar[str] = "Admin IP not allowed"
 
 
+# --- Admin business action 계층 (Story 7.2 — admin.py 라우터 6 endpoint) ---
+
+
+class AdminUserNotFoundError(BalanceNoteError):
+    """Story 7.2 — admin이 검색/조회/수정/삭제 대상 user_id가 미존재 또는 (일부 흐름에서)
+    soft-deleted. ``MealNotFoundError`` 패턴 정합 — enumeration 차단(소유권/존재/soft 모두
+    동일 응답).
+
+    PATCH(AC5) 흐름은 *deleted_at IS NOT NULL 사용자 수정 거부* 정합으로 본 예외 raise —
+    탈퇴 grace 중 데이터에 손대는 거버넌스 위험 차단(Story 5.2 ``soft_delete_purge`` 정합).
+    """
+
+    status: ClassVar[int] = 404
+    code: ClassVar[str] = "admin.user.not_found"
+    title: ClassVar[str] = "Admin user not found"
+
+
+class AdminCursorInvalidError(BalanceNoteError):
+    """Story 7.2 — admin 검색·식단 이력·피드백 로그 endpoint cursor 디코딩 실패.
+
+    ``base64.urlsafe_b64decode`` 실패 / ``|`` 분리 실패 / ``datetime.fromisoformat`` /
+    ``uuid.UUID`` ValueError 모두 단일 코드. 클라이언트가 cursor를 *opaque*로 취급하므로
+    실제 발생 가능성은 낮음 — *adversarial / schema drift* 방어.
+    """
+
+    status: ClassVar[int] = 400
+    code: ClassVar[str] = "admin.cursor.invalid"
+    title: ClassVar[str] = "Admin cursor invalid"
+
+
 class AccountDeletedError(AuthError):
     status: ClassVar[int] = 403
     code: ClassVar[str] = "auth.account.deleted"

@@ -119,6 +119,10 @@ markers = [
 # Story 1.2부터 security.py / exceptions.py가 채워지므로 omit 비움.
 # 신규 모듈(adapters, api/deps, api/v1/auth, api/v1/users, db/models/*) 모두 측정 대상.
 omit = []
+# Story 7.2 — Python 3.13 + asyncio 조합에서 ctracer가 async function body line tracking을
+# 일부 누락하는 알려진 quirk. PEP 669 sys.monitoring 백엔드(sysmon)로 전환 — Python
+# 3.12+ 필수(이전 버전은 coverage.py가 자동으로 ctracer fallback). admin.py 64% → 99% 회복.
+core = "sysmon"
 
 [build-system]
 requires = ["hatchling"]

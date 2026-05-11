@@ -34,7 +34,7 @@ import uuid
 from datetime import datetime, time
 from decimal import Decimal
 
-from sqlalchemy import ARRAY, CheckConstraint, Index, Integer, Numeric, String, Text, text
+from sqlalchemy import ARRAY, CheckConstraint, Index, Integer, Numeric, String, Text, func, text
 from sqlalchemy.dialects.postgresql import ENUM as PG_ENUM
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -207,5 +207,13 @@ class User(Base):
             "idx_users_deleted_at_pending_purge",
             "deleted_at",
             postgresql_where=text("deleted_at IS NOT NULL"),
+        ),
+        # Story 7.2 — admin 사용자 검색 ``GET /v1/admin/users?q=...`` email ILIKE prefix
+        # SOT. ``func.lower(email) LIKE 'lower_q%'`` 매칭 시 본 expression index hit
+        # (NFR-P9 1만 건 ≤ 1초). soft-deleted 포함 색인(거버넌스 가시화). alembic 0021
+        # SOT 동기 — Story 1.5 R8 SOP 정합.
+        Index(
+            "idx_users_email_lower",
+            func.lower(text("email")),
         ),
     )
