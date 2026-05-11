@@ -14,6 +14,7 @@ import pytest
 import pytest_asyncio
 import structlog
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from starlette.requests import Request
 from starlette.types import Scope
@@ -284,15 +285,16 @@ async def test_record_admin_action_fail_open_on_db_error(
     """db.execute raise → logger.error + 본 함수는 no-raise(silent return).
 
     fail-open 정책 (admin business action 가용성 우선 — B3 KPI SLA).
+    ``SQLAlchemyError`` 하위 ``OperationalError`` simulate — Gemini G1 정합으로
+    좁힌 except 분기 회귀 가드.
     """
     admin = await _make_admin(session_maker)
     request = _make_request()
+    db_error = OperationalError("simulated db down", params=None, orig=None)
 
     async with session_maker() as session:
-        # db.execute가 raise하도록 monkeypatch
-        with patch.object(
-            session, "execute", new=AsyncMock(side_effect=RuntimeError("simulated db down"))
-        ):
+        # db.execute가 SQLAlchemyError 하위(=OperationalError)로 raise하도록 monkeypatch.
+        with patch.object(session, "execute", new=AsyncMock(side_effect=db_error)):
             # no-raise invariant — 본 함수 자체가 raise 시 admin business action 차단됨
             await record_admin_action(session, request=request, admin=admin, action="user_search")
 
@@ -301,6 +303,28 @@ async def test_record_admin_action_fail_open_on_db_error(
         result = await session.execute(select(AuditLog).where(AuditLog.actor_id == admin.id))
         rows = list(result.scalars().all())
     assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_record_admin_action_does_not_swallow_programming_bugs(
+    session_maker: async_sessionmaker,
+) -> None:
+    """``TypeError``/``AttributeError`` 등 코딩 버그는 fail-open 분기 *밖*으로 노출.
+
+    Gemini G1 정합 — ``except SQLAlchemyError``로 좁힌 결과 DB 무관 예외는 잡지
+    않음. 본 가드는 broad ``except Exception`` 회귀(silent bug 흡수) 차단.
+    """
+    admin = await _make_admin(session_maker)
+    request = _make_request()
+
+    async with session_maker() as session:
+        with patch.object(
+            session, "execute", new=AsyncMock(side_effect=TypeError("simulated bug"))
+        ):
+            with pytest.raises(TypeError, match="simulated bug"):
+                await record_admin_action(
+                    session, request=request, admin=admin, action="user_search"
+                )
 
 
 # ============================================================================

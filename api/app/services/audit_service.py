@@ -9,7 +9,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import ipaddress
 import uuid
 from typing import TYPE_CHECKING
@@ -17,6 +16,7 @@ from typing import TYPE_CHECKING
 import structlog
 from fastapi import Request
 from sqlalchemy import insert
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.masking import mask_email
@@ -148,14 +148,27 @@ async def record_admin_action(
             )
         )
         await db.commit()
-    except Exception as exc:  # noqa: BLE001
+    except SQLAlchemyError as exc:
         # fail-open: rollback + log + return.
         #   - business action 가용성 보존(거버넌스 SLA 우선)
         #   - Sentry 자동 capture(SDK before_send → NFR-S5 마스킹 정합)
         #   - audit DB 분리 시점(Story 8)까지 단일 DB 가용성 risk 흡수
-        # rollback 실패도 silent — 핸들러 자체 실행은 진행.
-        with contextlib.suppress(Exception):
+        # ``SQLAlchemyError`` 한정 — DB/세션 장애만 흡수하고 ``TypeError``/
+        # ``AttributeError`` 같은 코딩 버그는 즉시 노출(CR Gemini G1 권고 정합).
+        # P0001 append-only trigger 위반은 ``IntegrityError`` (SQLAlchemyError 하위)
+        # 라 fail-open 적용 — INSERT-only 경로에서 트리거는 미발동이므로 hypothetical.
+        try:
             await db.rollback()
+        except SQLAlchemyError as rollback_exc:
+            # rollback 자체 실패는 session 심각 문제 신호 — 별도 ERROR 로깅으로
+            # 운영 가시 보존(CR Gemini G2 권고 정합). 핸들러 본문 실행은 fail-open
+            # 정책상 계속 진행.
+            logger.error(
+                "audit.record_admin_action.rollback_failed",
+                action=action,
+                error=str(rollback_exc),
+                exc_info=True,
+            )
         logger.error(
             "audit.record_admin_action.failed",
             action=action,

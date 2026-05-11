@@ -17,6 +17,7 @@ import pytest
 import pytest_asyncio
 from httpx import AsyncClient
 from sqlalchemy import func, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.core.config import ADMIN_ACCESS_TOKEN_TTL_SECONDS
@@ -314,9 +315,13 @@ async def test_admin_endpoint_succeeds_when_audit_insert_db_error(
     real_record = audit_service.record_admin_action
 
     async def _record_with_db_error(db, **kwargs):  # type: ignore[no-untyped-def]
-        # db.execute가 raise하도록 wrap → fail-open 분기 진입
+        # db.execute가 SQLAlchemyError 하위로 raise → fail-open 분기 진입(Gemini G1 정합)
         with patch.object(
-            db, "execute", new=AsyncMock(side_effect=RuntimeError("simulated audit DB down"))
+            db,
+            "execute",
+            new=AsyncMock(
+                side_effect=OperationalError("simulated audit DB down", params=None, orig=None)
+            ),
         ):
             await real_record(db, **kwargs)
 
@@ -360,7 +365,11 @@ async def test_admin_endpoint_fail_open_does_not_leak_exception_in_response(
 
     async def _record_with_db_error(db, **kwargs):  # type: ignore[no-untyped-def]
         with patch.object(
-            db, "execute", new=AsyncMock(side_effect=RuntimeError("audit infra failure"))
+            db,
+            "execute",
+            new=AsyncMock(
+                side_effect=OperationalError("audit infra failure", params=None, orig=None)
+            ),
         ):
             await real_record(db, **kwargs)
 
