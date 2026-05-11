@@ -129,9 +129,13 @@ async def _truncate_user_tables() -> AsyncIterator[None]:
             # Story 6.1 — payment_logs / subscriptions 테이블 추가. users.id ON DELETE
             # CASCADE라 users TRUNCATE CASCADE로 자동 cascade되지만, 명시 prepend로
             # 가독성 + per-test 격리 강화 (subscriptions partial UNIQUE 잔존 row leak 차단).
+            # Story 7.3 — audit_logs 테이블 추가. users.id ON DELETE RESTRICT (actor_id)라
+            # 명시 truncate 필수 — RESTRICT가 TRUNCATE CASCADE 흐름에서도 의도된 invariant
+            # (운영자가 별도 archival SOP 거치도록). 명시 prepend로 per-test 격리 + append-only
+            # trigger는 row-level이라 TRUNCATE는 미발동(statement-level만 발동).
             await conn.execute(
                 text(
-                    "TRUNCATE payment_logs, subscriptions, notifications, "
+                    "TRUNCATE audit_logs, payment_logs, subscriptions, notifications, "
                     "meal_analyses, meals, consents, "
                     "refresh_tokens, users, knowledge_chunks RESTART IDENTITY CASCADE"
                 )

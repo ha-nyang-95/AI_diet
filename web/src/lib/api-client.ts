@@ -906,10 +906,6 @@ export interface paths {
          *     포함(admin 거버넌스 — ``deleted_at`` 필드로 명시). cursor pagination
          *     (``created_at_desc`` keyset).
          *
-         *     Story 7.3 forward: ``Depends(audit_admin_action)`` 추가 wire 시
-         *     ``action="user_search"`` + ``target_resource="users"`` + ``path="/v1/admin/users"``
-         *     자동 기록.
-         *
          *     Story 7.4 forward: ``?include_pii=true`` 쿼리 + 명시 *원문 보기* 액션 시 plaintext
          *     이메일 응답 + audit log ``action="user_pii_view"`` 추가 분기.
          */
@@ -936,7 +932,6 @@ export interface paths {
          *     soft-deleted 사용자도 200 응답(admin 거버넌스 — ``deleted_at`` 필드 포함). 미존재
          *     user_id → 404 ``code=admin.user.not_found``.
          *
-         *     Story 7.3 forward: ``action="user_profile_view"``.
          *     Story 7.4 forward: 원문 보기 토글 endpoint 별도 신설.
          */
         get: operations["get_user_detail_v1_admin_users__user_id__get"];
@@ -959,7 +954,6 @@ export interface paths {
          *     soft-deleted 사용자 수정 거부: ``deleted_at IS NOT NULL`` 사용자는 404 — 30일 grace
          *     후 cascade 삭제될 데이터에 손대는 거버넌스 위험 차단(Story 5.2 정합).
          *
-         *     Story 7.3 forward: ``action="user_profile_edit"`` + ``target_user_id={user_id}``.
          *     LLM cache 무효화: ``_build_profile_hash``(Story 3.6/4.4 SOT)가 sha256 input에 포함된
          *     6 필드 자동 invalidate.
          */
@@ -981,7 +975,6 @@ export interface paths {
          *     사용자 ``GET /v1/meals``와 *별 책임* — 사용자 자신의 raw_text는 평문, admin이 보는
          *     타인 식단 raw_text는 length-only.
          *
-         *     Story 7.3 forward: ``action="user_meal_history_view"``.
          *     Story 7.4 forward: 원문 보기 시 raw_text plaintext 분기.
          */
         get: operations["list_user_meals_v1_admin_users__user_id__meals_get"];
@@ -1008,8 +1001,6 @@ export interface paths {
          *     분리). feedback_summary는 *사용자 식별 정보 부재*라 평문 노출. feedback_text(full
          *     body)는 본 list endpoint에서 *생략* — 별 detail endpoint는 본 스토리 OUT(7.4 원문
          *     보기 시점에 흡수).
-         *
-         *     Story 7.3 forward: ``action="user_feedback_history_view"``.
          */
         get: operations["list_user_meal_analyses_v1_admin_users__user_id__meal_analyses_get"];
         put?: never;
@@ -1039,9 +1030,6 @@ export interface paths {
          *
          *     이미 soft-deleted된 meal → 404 ``code=meals.not_found``(Story 2.1과 동일 enumeration
          *     차단). meal_id가 다른 사용자 소유 시도 → 404(같은 응답 — enumeration 차단).
-         *
-         *     Story 7.3 forward: ``action="admin_meal_delete"`` + ``target_user_id={user_id}`` +
-         *     ``target_resource="meals"`` + ``target_resource_id={meal_id}``.
          */
         delete: operations["delete_user_meal_v1_admin_users__user_id__meals__meal_id__delete"];
         options?: never;
