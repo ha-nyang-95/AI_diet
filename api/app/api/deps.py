@@ -6,11 +6,15 @@
 
 `current_user`는 user JWT를, `current_admin`은 admin JWT를 검증한다.
 혼용 차단(critical): 잘못된 issuer 토큰은 IssuerMismatchError로 차단된다.
+
+Story 7.3 추가 — ``audit_admin_action(action, target_resource=None)`` factory
+Dependency. admin endpoint 데코레이터 ``dependencies=[Depends(audit_admin_action(...))]``
+wire 시 transitive ``Depends(current_admin)`` 자동 연쇄 + audit row INSERT.
 """
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Annotated
 
 from fastapi import Cookie, Depends, Header, Request, Response
@@ -30,6 +34,7 @@ from app.core.security import (
     verify_admin_token,
     verify_user_token,
 )
+from app.db.models.audit_log import AuditLogAction
 from app.db.models.consent import Consent
 from app.db.models.user import User
 from app.domain.legal_documents import (
@@ -278,3 +283,53 @@ async def require_automated_decision_consent(
     if not has_automated_decision_consent(row):
         raise AutomatedDecisionConsentMissingError("automated decision consent required")
     return user
+
+
+def audit_admin_action(
+    *,
+    action: AuditLogAction,
+    target_resource: str | None = None,
+) -> Callable[..., Awaitable[None]]:
+    """관리자 액션 audit log 자동 기록 factory Dependency (Story 7.3, FR37).
+
+    반환된 dep은 ``Depends(current_admin)``을 transitive 포함 — admin 토큰 없거나
+    IP 가드 차단되거나 role!=admin이면 ``current_admin`` 단계에서 raise되어 audit
+    INSERT는 *미발동*(epics.md:914 *"admin_user_jwt_required ↔ audit_admin_action
+    자동 연쇄"* 정합).
+
+    FastAPI dep cache 정합: 핸들러 시그니처에 ``Depends(current_admin)``가 이미
+    있어도 같은 request scope에서 한 번만 실행됨(dep cache 표준 동작) — DB 재조회
+    비용 0.
+
+    path param 자동 추출:
+    - ``user_id`` 경로 변수 → ``target_user_id``(UUID parsing 실패 시 None).
+    - ``meal_id`` 경로 변수 → ``target_resource_id``(UUID parsing 실패 시 None).
+    - 그 외 path param은 향후 endpoint별 add-on 시 본 dep 확장(YAGNI: 현 6 endpoint는
+      ``user_id``/``meal_id``로 충분).
+
+    실패 격리(critical): audit INSERT 자체 실패(DB error/connection drop)는 *fail-open
+    + log.error*. 사유 — admin business action을 audit infra 일시 장애로 차단하면
+    거버넌스 가용성(B3 KPI) 위반 + audit DB 분리 시점(Story 8) 이전 단계에서 단일
+    DB 가용성 risk 흡수. Sentry로 운영 알림 + structlog ERROR + 본 함수는 silent
+    return(요청 진행). 단, *DB integrity error*(예: ENUM 값 mismatch — 본 모듈
+    enum과 alembic ENUM SOT 정합 자동 보장)는 deployment 직전 회귀 가드(AC6)로 사전
+    차단(런타임 분기 도달 0).
+    """
+
+    async def _dep(
+        request: Request,
+        admin: Annotated[User, Depends(current_admin)],
+        db: DbSession,
+    ) -> None:
+        # lazy import — 순환 의존(deps ↔ services) 회피
+        from app.services.audit_service import record_admin_action  # noqa: PLC0415
+
+        await record_admin_action(
+            db,
+            request=request,
+            admin=admin,
+            action=action,
+            target_resource=target_resource,
+        )
+
+    return _dep

@@ -20,9 +20,9 @@ endpoint).
 - ``users.py:HealthProfilePatchRequest``(Story 5.1) + ``meals.py:delete_meal``(Story 2.1)
   패턴 재사용 — admin이 *대상 user_id*만 다르고 흐름 동일.
 
-Story 7.3 forward stub: ``Depends(audit_admin_action)`` dep + ``audit_logs`` 테이블 +
-admin endpoint audit 기록 모두 7.3 본격 신설. 본 스토리는 audit *지점만* 코드 코멘트
-명시(각 endpoint docstring).
+Story 7.3 SOT: 본 모듈 모든 endpoint는 ``Depends(audit_admin_action(...))`` 데코레이터
+``dependencies=[...]`` wire 완료. ``audit_admin_action`` factory가 transitive
+``Depends(current_admin)`` 포함 → admin 토큰/role/IP 가드 실패 시 audit 미발동.
 
 Story 7.4 forward stub: 원문 보기 토글(FR39 plaintext 응답) + 5분 비활동 자동 복원 —
 본 스토리는 *기본 마스킹*만, 7.4가 토글 endpoint 추가.
@@ -44,7 +44,7 @@ from sqlalchemy import String, desc, func, or_, select, update
 from sqlalchemy.orm import selectinload
 
 from app.adapters.r2 import resolve_public_url
-from app.api.deps import DbSession, current_admin
+from app.api.deps import DbSession, audit_admin_action, current_admin
 from app.api.v1.users import HealthProfilePatchRequest  # Story 5.1 SOT 재사용
 from app.core.exceptions import (
     AdminCursorInvalidError,
@@ -255,7 +255,12 @@ def _mask_user_id_for_log(user_id: uuid.UUID) -> str:
 # --- AC1: GET /v1/admin/users (사용자 검색) ---------------------------
 
 
-@router.get("/users")
+@router.get(
+    "/users",
+    dependencies=[
+        Depends(audit_admin_action(action="user_search", target_resource="users")),
+    ],
+)
 async def search_users(
     db: DbSession,
     admin: Annotated[User, Depends(current_admin)],
@@ -268,10 +273,6 @@ async def search_users(
     결과는 *기본 마스킹*(NFR-S5 — 이메일 ``j***@example.com``). soft-deleted 사용자
     포함(admin 거버넌스 — ``deleted_at`` 필드로 명시). cursor pagination
     (``created_at_desc`` keyset).
-
-    Story 7.3 forward: ``Depends(audit_admin_action)`` 추가 wire 시
-    ``action="user_search"`` + ``target_resource="users"`` + ``path="/v1/admin/users"``
-    자동 기록.
 
     Story 7.4 forward: ``?include_pii=true`` 쿼리 + 명시 *원문 보기* 액션 시 plaintext
     이메일 응답 + audit log ``action="user_pii_view"`` 추가 분기.
@@ -346,7 +347,12 @@ async def search_users(
 # --- AC2: GET /v1/admin/users/{user_id} (사용자 상세) -----------------
 
 
-@router.get("/users/{user_id}")
+@router.get(
+    "/users/{user_id}",
+    dependencies=[
+        Depends(audit_admin_action(action="user_profile_view", target_resource="users")),
+    ],
+)
 async def get_user_detail(
     user_id: uuid.UUID,
     db: DbSession,
@@ -357,7 +363,6 @@ async def get_user_detail(
     soft-deleted 사용자도 200 응답(admin 거버넌스 — ``deleted_at`` 필드 포함). 미존재
     user_id → 404 ``code=admin.user.not_found``.
 
-    Story 7.3 forward: ``action="user_profile_view"``.
     Story 7.4 forward: 원문 보기 토글 endpoint 별도 신설.
     """
     result = await db.execute(select(User).where(User.id == user_id))
@@ -378,7 +383,12 @@ async def get_user_detail(
 # --- AC3: GET /v1/admin/users/{user_id}/meals (식단 이력) -------------
 
 
-@router.get("/users/{user_id}/meals")
+@router.get(
+    "/users/{user_id}/meals",
+    dependencies=[
+        Depends(audit_admin_action(action="user_meal_history_view", target_resource="meals")),
+    ],
+)
 async def list_user_meals(
     user_id: uuid.UUID,
     db: DbSession,
@@ -392,7 +402,6 @@ async def list_user_meals(
     사용자 ``GET /v1/meals``와 *별 책임* — 사용자 자신의 raw_text는 평문, admin이 보는
     타인 식단 raw_text는 length-only.
 
-    Story 7.3 forward: ``action="user_meal_history_view"``.
     Story 7.4 forward: 원문 보기 시 raw_text plaintext 분기.
     """
     user_exists = await db.execute(select(User.id).where(User.id == user_id))
@@ -463,7 +472,14 @@ async def list_user_meals(
 # --- AC4: GET /v1/admin/users/{user_id}/meal-analyses (피드백 로그) ----
 
 
-@router.get("/users/{user_id}/meal-analyses")
+@router.get(
+    "/users/{user_id}/meal-analyses",
+    dependencies=[
+        Depends(
+            audit_admin_action(action="user_feedback_history_view", target_resource="meal_analyses")
+        ),
+    ],
+)
 async def list_user_meal_analyses(
     user_id: uuid.UUID,
     db: DbSession,
@@ -477,8 +493,6 @@ async def list_user_meal_analyses(
     분리). feedback_summary는 *사용자 식별 정보 부재*라 평문 노출. feedback_text(full
     body)는 본 list endpoint에서 *생략* — 별 detail endpoint는 본 스토리 OUT(7.4 원문
     보기 시점에 흡수).
-
-    Story 7.3 forward: ``action="user_feedback_history_view"``.
     """
     user_exists = await db.execute(select(User.id).where(User.id == user_id))
     if user_exists.scalar_one_or_none() is None:
@@ -530,7 +544,12 @@ async def list_user_meal_analyses(
 # --- AC5: PATCH /v1/admin/users/{user_id} (관리자 프로필 수정) ---------
 
 
-@router.patch("/users/{user_id}")
+@router.patch(
+    "/users/{user_id}",
+    dependencies=[
+        Depends(audit_admin_action(action="user_profile_edit", target_resource="users")),
+    ],
+)
 async def patch_user_profile(
     user_id: uuid.UUID,
     body: HealthProfilePatchRequest,
@@ -549,7 +568,6 @@ async def patch_user_profile(
     soft-deleted 사용자 수정 거부: ``deleted_at IS NOT NULL`` 사용자는 404 — 30일 grace
     후 cascade 삭제될 데이터에 손대는 거버넌스 위험 차단(Story 5.2 정합).
 
-    Story 7.3 forward: ``action="user_profile_edit"`` + ``target_user_id={user_id}``.
     LLM cache 무효화: ``_build_profile_hash``(Story 3.6/4.4 SOT)가 sha256 input에 포함된
     6 필드 자동 invalidate.
     """
@@ -588,6 +606,9 @@ async def patch_user_profile(
 @router.delete(
     "/users/{user_id}/meals/{meal_id}",
     status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[
+        Depends(audit_admin_action(action="admin_meal_delete", target_resource="meals")),
+    ],
 )
 async def delete_user_meal(
     user_id: uuid.UUID,
@@ -602,9 +623,6 @@ async def delete_user_meal(
 
     이미 soft-deleted된 meal → 404 ``code=meals.not_found``(Story 2.1과 동일 enumeration
     차단). meal_id가 다른 사용자 소유 시도 → 404(같은 응답 — enumeration 차단).
-
-    Story 7.3 forward: ``action="admin_meal_delete"`` + ``target_user_id={user_id}`` +
-    ``target_resource="meals"`` + ``target_resource_id={meal_id}``.
     """
     result = await db.execute(
         update(Meal)

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from app.db.models.audit_log import AuditLog
 from app.db.models.consent import Consent
 from app.db.models.food_alias import FoodAlias
 from app.db.models.food_nutrition import FoodNutrition
@@ -18,6 +19,7 @@ from app.db.models.subscription import Subscription
 from app.db.models.user import User
 
 __all__ = [
+    "AuditLog",
     "Consent",
     "FoodAlias",
     "FoodNutrition",
