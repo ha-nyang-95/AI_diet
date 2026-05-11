@@ -12,6 +12,7 @@ import { useState } from "react";
 import { AdminProfileEditForm } from "@/features/admin/AdminProfileEditForm";
 import { UserMealAnalysesTable } from "@/features/admin/UserMealAnalysesTable";
 import { UserMealsTable } from "@/features/admin/UserMealsTable";
+import { UserPiiToggle } from "@/features/admin/UserPiiToggle";
 import type { AdminUserDetailResponse } from "@/features/admin/types";
 
 type Tab = "profile" | "meals" | "analyses";
@@ -108,7 +109,10 @@ export function UserDetailClient({ userId, initialDetail }: Props) {
       </nav>
 
       {tab === "profile" && (
-        <AdminProfileEditForm userId={userId} initialDetail={initialDetail} />
+        <div className="space-y-6">
+          <UserPiiToggle userId={userId} />
+          <AdminProfileEditForm userId={userId} initialDetail={initialDetail} />
+        </div>
       )}
       {tab === "meals" && <UserMealsTable userId={userId} />}
       {tab === "analyses" && <UserMealAnalysesTable userId={userId} />}

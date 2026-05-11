@@ -1,8 +1,7 @@
-"""``/v1/admin/*`` — 관리자 사용자 검색/이력/수정/삭제 (Story 7.2 FR36).
+"""``/v1/admin/*`` — 관리자 사용자 검색/이력/수정/삭제 + self-audit + PII reveal.
 
 Story 7.1 ``auth.py:GET /v1/auth/admin/whoami``와 *책임 분리* — 7.1은 인증 정보
-*echo*(읽기 전용 smoke), 본 모듈은 *business action* (사용자 검색/조회/수정/삭제 6
-endpoint).
+*echo*(읽기 전용 smoke), 본 모듈은 *business action* (8 endpoint).
 
 엔드포인트:
 - ``GET /v1/admin/users?q=...&limit=&cursor=``       — 사용자 검색 (마스킹 + cursor 페이지)
@@ -11,6 +10,8 @@ endpoint).
 - ``GET /v1/admin/users/{user_id}/meal-analyses``    — 피드백 로그 (fit_score + summary)
 - ``PATCH /v1/admin/users/{user_id}``                — 프로필 수정 (Story 5.1 SOT 재사용)
 - ``DELETE /v1/admin/users/{user_id}/meals/{meal_id}`` — 식단 soft delete
+- ``GET /v1/admin/audit-logs?actor_id=me``           — self-audit (FR38, Story 7.4)
+- ``POST /v1/admin/users/{user_id}/pii-reveal``      — PII 원문 보기 (FR39, Story 7.4)
 
 설계 SOT:
 - ``Depends(current_admin)`` 1줄 wire — Story 7.1 CR W4 transitive 체인(IP 가드 + JWT +
@@ -24,8 +25,11 @@ Story 7.3 SOT: 본 모듈 모든 endpoint는 ``Depends(audit_admin_action(...))`
 ``dependencies=[...]`` wire 완료. ``audit_admin_action`` factory가 transitive
 ``Depends(current_admin)`` 포함 → admin 토큰/role/IP 가드 실패 시 audit 미발동.
 
-Story 7.4 forward stub: 원문 보기 토글(FR39 plaintext 응답) + 5분 비활동 자동 복원 —
-본 스토리는 *기본 마스킹*만, 7.4가 토글 endpoint 추가.
+Story 7.4 — ``list_self_audit_logs`` + ``reveal_user_pii`` endpoint 신설:
+- ``list_self_audit_logs``는 ``Depends(audit_admin_action)`` 미적용 (meta-audit 폭증
+  회피, ``admin_whoami`` exclusion 패턴 정합).
+- ``reveal_user_pii``는 ``user_pii_view`` audit row 자동 기록 + plaintext PII 4 필드
+  응답 + 5분 timer hint(client-side enforcement).
 """
 
 from __future__ import annotations
@@ -34,7 +38,8 @@ import base64
 import binascii
 import contextlib
 import uuid
-from datetime import datetime, time
+from datetime import UTC, datetime, time, timedelta
+from decimal import Decimal
 from typing import Annotated, Literal
 
 import structlog
@@ -56,11 +61,20 @@ from app.core.masking import (
     mask_email,
     mask_height,
     mask_weight,
+    reveal_allergies,
+    reveal_email,
+    reveal_height,
+    reveal_weight,
 )
+from app.db.models.audit_log import AuditLog, AuditLogAction
 from app.db.models.meal import Meal
 from app.db.models.meal_analysis import MealAnalysis
 from app.db.models.user import User
 from app.domain.health_profile import ActivityLevel, HealthGoal
+
+# Story 7.4 — *원문 보기 자동 복원* 5분 hint. server는 *기간 hint*만 응답
+# (stateless — server-side enforcement는 X, client-side 활동 추적이 SOT).
+PII_REVEAL_TTL_MINUTES = 5
 
 logger = structlog.get_logger(__name__)
 
@@ -250,6 +264,92 @@ def _build_user_detail_response(user: User) -> AdminUserDetailResponse:
 def _mask_user_id_for_log(user_id: uuid.UUID) -> str:
     """``u_{8char}`` — Story 3.x/4.x/5.x 패턴 정합(NFR-S5)."""
     return f"u_{user_id.hex[:8]}"
+
+
+# Story 7.4 — audit-logs cursor helper. ``_encode_cursor`` /``_decode_cursor`` (user
+# 검색 SOT) 패턴 1:1 정합 — 이름만 분리해 grep으로 audit 흐름 추적 가능.
+_encode_audit_cursor = _encode_cursor
+_decode_audit_cursor = _decode_cursor
+
+
+# --- Story 7.4 AC1/AC2 Pydantic 응답 모델 ------------------------------
+
+
+class AdminAuditLogItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    audit_id: uuid.UUID
+    occurred_at: datetime
+    actor_id: uuid.UUID
+    actor_email_masked: str
+    action: AuditLogAction
+    target_user_id: uuid.UUID | None
+    target_resource: str | None
+    target_resource_id: uuid.UUID | None
+    path: str
+    method: str
+    ip: str | None
+    request_id: str
+    user_agent: str | None
+
+
+class AdminAuditLogListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[AdminAuditLogItem]
+    next_cursor: str | None
+
+
+class AdminUserPiiRevealResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: uuid.UUID
+    email: str
+    age: int | None
+    weight_kg: Decimal | None
+    height_cm: int | None
+    allergies: list[str] | None
+    revealed_at: datetime
+    expires_at: datetime
+
+
+def _build_audit_log_item(row: AuditLog) -> AdminAuditLogItem:
+    """AuditLog ORM → AdminAuditLogItem — INET str 직렬화 통일."""
+    ip_str: str | None = None if row.ip is None else str(row.ip)
+    return AdminAuditLogItem(
+        audit_id=row.id,
+        occurred_at=row.occurred_at,
+        actor_id=row.actor_id,
+        actor_email_masked=row.actor_email_masked,
+        action=row.action,
+        target_user_id=row.target_user_id,
+        target_resource=row.target_resource,
+        target_resource_id=row.target_resource_id,
+        path=row.path,
+        method=row.method,
+        ip=ip_str,
+        request_id=row.request_id,
+        user_agent=row.user_agent,
+    )
+
+
+def _build_pii_reveal_response(user: User) -> AdminUserPiiRevealResponse:
+    """User ORM → AdminUserPiiRevealResponse — plaintext 단일 지점.
+
+    ``_build_user_detail_response`` 마스킹 helper 패턴 정합 — *unmask* 경로 분리로
+    호출처가 의도된 plaintext 흐름임을 type-system 차원에서 명시.
+    """
+    now = datetime.now(UTC)
+    return AdminUserPiiRevealResponse(
+        user_id=user.id,
+        email=reveal_email(user.email),
+        age=user.age,
+        weight_kg=reveal_weight(user.weight_kg),
+        height_cm=reveal_height(user.height_cm),
+        allergies=reveal_allergies(user.allergies),
+        revealed_at=now,
+        expires_at=now + timedelta(minutes=PII_REVEAL_TTL_MINUTES),
+    )
 
 
 # --- AC1: GET /v1/admin/users (사용자 검색) ---------------------------
@@ -646,3 +746,132 @@ async def delete_user_meal(
         meal_id=str(meal_id),
     )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# --- Story 7.4 AC1: GET /v1/admin/audit-logs (self-audit) --------------
+
+
+@router.get("/audit-logs")
+async def list_self_audit_logs(
+    db: DbSession,
+    admin: Annotated[User, Depends(current_admin)],
+    actor_id: Annotated[
+        Literal["me"], Query(description="self-audit only; MVP는 'me' 고정")
+    ] = "me",
+    action: Annotated[AuditLogAction | None, Query(description="action ENUM 필터")] = None,
+    target_user_id: Annotated[uuid.UUID | None, Query(description="대상 user UUID 필터")] = None,
+    since: Annotated[
+        datetime | None,
+        Query(description="ISO 8601 UTC — 이 시점 이후 audit row (inclusive)"),
+    ] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    cursor: Annotated[str | None, Query(max_length=200)] = None,
+) -> AdminAuditLogListResponse:
+    """self-audit 로그 조회 — *현재 admin의* 모든 audit row 시간순.
+
+    epics.md:929 *"`actor_id` 권한 분리 — 1인 개발자 owner 외 admin은 자기 활동만"*
+    정합. MVP는 ``actor_id="me"`` 고정 (``Literal["me"]`` type — FastAPI가 422로 자동 차단) —
+    외주 클라이언트별 *cross-admin 조회 권한*은 Story 8 운영 polish forward(2인 이상
+    admin 운영 시점).
+
+    cursor pagination(``occurred_at DESC, id DESC`` keyset). Story 7.3
+    ``idx_audit_logs_actor_id_occurred_at`` composite index hit 보장.
+
+    **본 endpoint는 ``Depends(audit_admin_action)`` 미적용** — self-audit 조회 자체를
+    audit하면 *meta-audit 폭증*(``admin_whoami`` exclusion 패턴 정합, Story 7.3
+    docstring 867행 *"`admin_session_introspect` 추가 vs 노이즈 trade-off"* 정합).
+    """
+    _ = actor_id  # Literal["me"] 고정 — Query 검증만 사용 (값 자체는 미사용)
+
+    stmt = select(AuditLog).where(AuditLog.actor_id == admin.id)
+    if action is not None:
+        stmt = stmt.where(AuditLog.action == action)
+    if target_user_id is not None:
+        stmt = stmt.where(AuditLog.target_user_id == target_user_id)
+    if since is not None:
+        stmt = stmt.where(AuditLog.occurred_at >= since)
+
+    if cursor is not None:
+        cursor_dt, cursor_id = _decode_audit_cursor(cursor)
+        stmt = stmt.where(
+            or_(
+                AuditLog.occurred_at < cursor_dt,
+                (AuditLog.occurred_at == cursor_dt) & (AuditLog.id < cursor_id),
+            )
+        )
+
+    stmt = stmt.order_by(desc(AuditLog.occurred_at), desc(AuditLog.id)).limit(limit + 1)
+
+    result = await db.execute(stmt)
+    rows = list(result.scalars().all())
+
+    has_more = len(rows) > limit
+    if has_more:
+        rows = rows[:limit]
+
+    items = [_build_audit_log_item(row) for row in rows]
+
+    next_cursor: str | None = None
+    if has_more and rows:
+        last = rows[-1]
+        next_cursor = _encode_audit_cursor(last.occurred_at, last.id)
+
+    with contextlib.suppress(Exception):
+        logger.info(
+            "admin.audit_logs.listed",
+            admin_id=_mask_user_id_for_log(admin.id),
+            limit=limit,
+            result_count=len(items),
+            filter_action=action,
+            filter_target=_mask_user_id_for_log(target_user_id) if target_user_id else None,
+        )
+
+    return AdminAuditLogListResponse(items=items, next_cursor=next_cursor)
+
+
+# --- Story 7.4 AC2: POST /v1/admin/users/{user_id}/pii-reveal ----------
+
+
+@router.post(
+    "/users/{user_id}/pii-reveal",
+    dependencies=[
+        Depends(audit_admin_action(action="user_pii_view", target_resource="users")),
+    ],
+)
+async def reveal_user_pii(
+    user_id: uuid.UUID,
+    db: DbSession,
+    admin: Annotated[User, Depends(current_admin)],
+) -> AdminUserPiiRevealResponse:
+    """사용자 PII 원문 보기 — 명시 액션 + audit ``user_pii_view`` 자동 기록 (FR39).
+
+    epics.md:931 *"관리자 *원문 보기* 토글 액션 + 사용자 명시 확인 시 마스킹 해제 +
+    해당 액션 자체가 audit log에 ``action=user_pii_view`` 기록"* 정합. POST 메서드 채택 —
+    *action* semantics(GET ``?include_pii=true`` 대안 거부: prefetch/캐시/링크 공유로
+    의도치 않은 plaintext 노출 + audit row 폭증 risk).
+
+    응답 본문은 plaintext PII 4 필드(email/weight_kg/height_cm/allergies list) +
+    age는 마스킹 대상 X(Story 7.2 SOT — 이미 plaintext).
+
+    미존재 user_id → 404 ``code=admin.user.not_found``. soft-deleted 사용자
+    (``deleted_at IS NOT NULL``)도 200 응답 (admin 거버넌스 — Story 7.2 SOT 정합).
+
+    **structlog 이중 안전판**(epics.md:933 정합): 본 핸들러는 응답 본문 외에서
+    plaintext PII를 로깅 X — ``logger.info``는 마스킹 식별자만(``admin_id``/
+    ``target_user_id``) 송신. Sentry SDK ``before_send`` hook은 DF141 Story 8.4 forward.
+    """
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if user is None:
+        raise AdminUserNotFoundError("user not found")
+
+    response = _build_pii_reveal_response(user)
+
+    with contextlib.suppress(Exception):
+        logger.info(
+            "admin.user.pii_revealed",
+            admin_id=_mask_user_id_for_log(admin.id),
+            target_user_id=_mask_user_id_for_log(user.id),
+        )
+
+    return response

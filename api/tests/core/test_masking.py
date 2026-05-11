@@ -3,6 +3,9 @@
 Story 7.1 ad-hoc ``test_email_mask.py``를 본 파일로 흡수 + 신규 helper
 (``mask_weight`` / ``mask_height`` / ``mask_allergies_count``) 케이스 추가. masking.py
 는 admin endpoint + Sentry beforeSend hook + structlog processor의 단일 SOT.
+
+Story 7.4 AC3 — plaintext 분기 ``reveal_*`` 4 helper 추가 (FR39 원문 보기 토글).
+기존 16 케이스 PASS 보존 invariant.
 """
 
 from __future__ import annotations
@@ -14,6 +17,10 @@ from app.core.masking import (
     mask_email,
     mask_height,
     mask_weight,
+    reveal_allergies,
+    reveal_email,
+    reveal_height,
+    reveal_weight,
 )
 
 # --- mask_email (Story 7.1 SOT 흡수) -----------------------------------
@@ -112,3 +119,47 @@ def test_mask_allergies_count_does_not_leak_item_names() -> None:
     assert "우유" not in result
     assert "달걀" not in result
     assert result == "*** 2건 등록"
+
+
+# --- Story 7.4 AC3 reveal_* (FR39 원문 보기) ---------------------------
+
+
+def test_reveal_email_passes_through_plaintext() -> None:
+    """plaintext 이메일 그대로 반환 — 명시 *원문 보기* 흐름 SOT."""
+    assert reveal_email("alice@example.com") == "alice@example.com"
+
+
+def test_reveal_email_passes_through_empty_string() -> None:
+    """빈 string 입력도 그대로 — caller responsibility (마스킹은 ``***``였음)."""
+    assert reveal_email("") == ""
+
+
+def test_reveal_weight_passes_through_decimal() -> None:
+    """Decimal 입력 — 그대로 반환."""
+    assert reveal_weight(Decimal("65.4")) == Decimal("65.4")
+
+
+def test_reveal_weight_passes_through_none() -> None:
+    """None pass-through — 미입력 사용자."""
+    assert reveal_weight(None) is None
+
+
+def test_reveal_height_passes_through_int() -> None:
+    """int 입력 — 그대로 반환."""
+    assert reveal_height(175) == 175
+
+
+def test_reveal_height_passes_through_none() -> None:
+    """None pass-through."""
+    assert reveal_height(None) is None
+
+
+def test_reveal_allergies_passes_through_list() -> None:
+    """list 입력 — 그대로 반환 (item 명 포함)."""
+    assert reveal_allergies(["우유", "달걀"]) == ["우유", "달걀"]
+
+
+def test_reveal_allergies_passes_through_empty_list_distinct_from_none() -> None:
+    """빈 list — ``[]`` 그대로 (NULL과 명확 구분)."""
+    assert reveal_allergies([]) == []
+    assert reveal_allergies(None) is None

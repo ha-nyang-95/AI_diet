@@ -71,3 +71,48 @@ export interface AdminMealAnalysisListResponse {
   analyses: AdminMealAnalysisItem[];
   next_cursor: string | null;
 }
+
+// --- Story 7.4 AC#4 — self-audit 화면 (FR38) ---
+
+export type AdminAuditLogAction =
+  | "user_search"
+  | "user_profile_view"
+  | "user_meal_history_view"
+  | "user_feedback_history_view"
+  | "user_profile_edit"
+  | "admin_meal_delete"
+  | "user_pii_view";
+
+export interface AdminAuditLogItem {
+  audit_id: string;
+  occurred_at: string;
+  actor_id: string;
+  actor_email_masked: string;
+  action: AdminAuditLogAction;
+  target_user_id: string | null;
+  target_resource: string | null;
+  target_resource_id: string | null;
+  path: string;
+  method: string;
+  ip: string | null;
+  request_id: string;
+  user_agent: string | null;
+}
+
+export interface AdminAuditLogListResponse {
+  items: AdminAuditLogItem[];
+  next_cursor: string | null;
+}
+
+// --- Story 7.4 AC#5 — PII 원문 보기 (FR39) ---
+
+export interface AdminUserPiiRevealResponse {
+  user_id: string;
+  email: string;
+  age: number | null;
+  weight_kg: number | null;
+  height_cm: number | null;
+  allergies: string[] | null;
+  revealed_at: string;
+  expires_at: string;
+}
