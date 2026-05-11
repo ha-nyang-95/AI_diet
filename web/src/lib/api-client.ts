@@ -1037,6 +1037,73 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/admin/audit-logs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Self Audit Logs
+         * @description self-audit 로그 조회 — *현재 admin의* 모든 audit row 시간순.
+         *
+         *     epics.md:929 *"`actor_id` 권한 분리 — 1인 개발자 owner 외 admin은 자기 활동만"*
+         *     정합. MVP는 ``actor_id="me"`` 고정 (``Literal["me"]`` type — FastAPI가 422로 자동 차단) —
+         *     외주 클라이언트별 *cross-admin 조회 권한*은 Story 8 운영 polish forward(2인 이상
+         *     admin 운영 시점).
+         *
+         *     cursor pagination(``occurred_at DESC, id DESC`` keyset). Story 7.3
+         *     ``idx_audit_logs_actor_id_occurred_at`` composite index hit 보장.
+         *
+         *     **본 endpoint는 ``Depends(audit_admin_action)`` 미적용** — self-audit 조회 자체를
+         *     audit하면 *meta-audit 폭증*(``admin_whoami`` exclusion 패턴 정합, Story 7.3
+         *     docstring 867행 *"`admin_session_introspect` 추가 vs 노이즈 trade-off"* 정합).
+         */
+        get: operations["list_self_audit_logs_v1_admin_audit_logs_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/users/{user_id}/pii-reveal": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reveal User Pii
+         * @description 사용자 PII 원문 보기 — 명시 액션 + audit ``user_pii_view`` 자동 기록 (FR39).
+         *
+         *     epics.md:931 *"관리자 *원문 보기* 토글 액션 + 사용자 명시 확인 시 마스킹 해제 +
+         *     해당 액션 자체가 audit log에 ``action=user_pii_view`` 기록"* 정합. POST 메서드 채택 —
+         *     *action* semantics(GET ``?include_pii=true`` 대안 거부: prefetch/캐시/링크 공유로
+         *     의도치 않은 plaintext 노출 + audit row 폭증 risk).
+         *
+         *     응답 본문은 plaintext PII 4 필드(email/weight_kg/height_cm/allergies list) +
+         *     age는 마스킹 대상 X(Story 7.2 SOT — 이미 plaintext).
+         *
+         *     미존재 user_id → 404 ``code=admin.user.not_found``. soft-deleted 사용자
+         *     (``deleted_at IS NOT NULL``)도 200 응답 (admin 거버넌스 — Story 7.2 SOT 정합).
+         *
+         *     **structlog 이중 안전판**(epics.md:933 정합): 본 핸들러는 응답 본문 외에서
+         *     plaintext PII를 로깅 X — ``logger.info``는 마스킹 식별자만(``admin_id``/
+         *     ``target_user_id``) 송신. Sentry SDK ``before_send`` hook은 DF141 Story 8.4 forward.
+         */
+        post: operations["reveal_user_pii_v1_admin_users__user_id__pii_reveal_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/healthz": {
         parameters: {
             query?: never;
@@ -1098,6 +1165,54 @@ export interface components {
         AccountDeleteRequest: {
             /** Reason */
             reason?: string | null;
+        };
+        /** AdminAuditLogItem */
+        AdminAuditLogItem: {
+            /**
+             * Audit Id
+             * Format: uuid
+             */
+            audit_id: string;
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            /**
+             * Actor Id
+             * Format: uuid
+             */
+            actor_id: string;
+            /** Actor Email Masked */
+            actor_email_masked: string;
+            /**
+             * Action
+             * @enum {string}
+             */
+            action: "user_search" | "user_profile_view" | "user_meal_history_view" | "user_feedback_history_view" | "user_profile_edit" | "admin_meal_delete" | "user_pii_view";
+            /** Target User Id */
+            target_user_id: string | null;
+            /** Target Resource */
+            target_resource: string | null;
+            /** Target Resource Id */
+            target_resource_id: string | null;
+            /** Path */
+            path: string;
+            /** Method */
+            method: string;
+            /** Ip */
+            ip: string | null;
+            /** Request Id */
+            request_id: string;
+            /** User Agent */
+            user_agent: string | null;
+        };
+        /** AdminAuditLogListResponse */
+        AdminAuditLogListResponse: {
+            /** Items */
+            items: components["schemas"]["AdminAuditLogItem"][];
+            /** Next Cursor */
+            next_cursor: string | null;
         };
         /**
          * AdminExchangeResponse
@@ -1303,6 +1418,34 @@ export interface components {
             profile_completed_at: string | null;
             /** Onboarded At */
             onboarded_at: string | null;
+        };
+        /** AdminUserPiiRevealResponse */
+        AdminUserPiiRevealResponse: {
+            /**
+             * User Id
+             * Format: uuid
+             */
+            user_id: string;
+            /** Email */
+            email: string;
+            /** Age */
+            age: number | null;
+            /** Weight Kg */
+            weight_kg: number | null;
+            /** Height Cm */
+            height_cm: number | null;
+            /** Allergies */
+            allergies: string[] | null;
+            /**
+             * Revealed At
+             * Format: date-time
+             */
+            revealed_at: string;
+            /**
+             * Expires At
+             * Format: date-time
+             */
+            expires_at: string;
         };
         /** AdminUserSearchResponse */
         AdminUserSearchResponse: {
@@ -4101,6 +4244,85 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_self_audit_logs_v1_admin_audit_logs_get: {
+        parameters: {
+            query?: {
+                /** @description self-audit only; MVP는 'me' 고정 */
+                actor_id?: "me";
+                /** @description action ENUM 필터 */
+                action?: ("user_search" | "user_profile_view" | "user_meal_history_view" | "user_feedback_history_view" | "user_profile_edit" | "admin_meal_delete" | "user_pii_view") | null;
+                /** @description 대상 user UUID 필터 */
+                target_user_id?: string | null;
+                /** @description ISO 8601 + tz offset (inclusive) — naive datetime은 400 reject. 예: '2026-05-10T00:00:00Z' 또는 '2026-05-10T09:00:00+09:00'. */
+                since?: string | null;
+                limit?: number;
+                cursor?: string | null;
+            };
+            header?: {
+                Authorization?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                bn_admin_access?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminAuditLogListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    reveal_user_pii_v1_admin_users__user_id__pii_reveal_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                Authorization?: string | null;
+            };
+            path: {
+                user_id: string;
+            };
+            cookie?: {
+                bn_admin_access?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminUserPiiRevealResponse"];
+                };
             };
             /** @description Validation Error */
             422: {

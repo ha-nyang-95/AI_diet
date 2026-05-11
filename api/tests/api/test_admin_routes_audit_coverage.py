@@ -4,8 +4,9 @@
 차단. FR37 *"관리자의 모든 조회·수정 액션 audit log 자동 기록"* drift 방지.
 
 scope 외 endpoint(``admin_whoami``/``admin_exchange`` — 인증 lifecycle 또는 admin
-meta-info 조회)는 명시 allowlist SOT(``_AUDIT_SCOPE_EXCLUDED_ROUTE_PATHS``)에 등재.
-SOT를 변경할 때는 명시적 의사결정 + spec 갱신 의무.
+meta-info 조회, ``audit-logs`` — Story 7.4 self-audit meta-audit 폭증 회피)는 명시
+allowlist SOT(``_AUDIT_SCOPE_EXCLUDED_ROUTE_PATHS``)에 등재. SOT를 변경할 때는
+명시적 의사결정 + spec 갱신 의무.
 """
 
 from __future__ import annotations
@@ -19,10 +20,13 @@ from app.main import app
 
 # Story 7.3 scope 외 — audit 미적용 명시 SOT (spec 837-839 + Story 7.1 docstring 580
 # 정합). 인증 lifecycle / admin meta-info introspection은 business action 범주 외.
+# Story 7.4 — ``audit-logs`` self-audit 조회는 meta-audit 폭증 회피로 의도된 미적용
+# (epics.md:929 + Story 7.3 docstring 867 ``admin_whoami exclusion 패턴`` 정합).
 _AUDIT_SCOPE_EXCLUDED_ROUTE_PATHS: Final[frozenset[str]] = frozenset(
     {
         "/v1/auth/admin/whoami",
         "/v1/auth/admin/exchange",
+        "/v1/admin/audit-logs",
     }
 )
 
@@ -77,6 +81,8 @@ def test_all_v1_admin_business_routes_have_audit_admin_action_wire() -> None:
         if not isinstance(route, APIRoute):
             continue
         if not route.path.startswith("/v1/admin"):
+            continue
+        if route.path in _AUDIT_SCOPE_EXCLUDED_ROUTE_PATHS:
             continue
         if not _route_has_audit_admin_action_wire(route):
             audit_missing.append(f"{sorted(route.methods)} {route.path} ({route.name})")
