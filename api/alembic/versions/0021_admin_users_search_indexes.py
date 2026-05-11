@@ -24,9 +24,19 @@
 ``users.email`` UNIQUE는 0001/0002 SOT 그대로 유지 — 본 인덱스는 *case-insensitive prefix
 검색 가속*만 담당.
 
-prod-scale lock 주의(Story 6.3 0020 P10 패턴 정합): 본 ``op.create_index``는 *비-CONCURRENTLY*
-실행 → 대규모 ``users`` 테이블에서 ACCESS EXCLUSIVE/SHARE 락. baseline은 sandbox라 영향 0.
-prod 트래픽 증가 후 재실행 시 ``CREATE INDEX CONCURRENTLY`` 변환 + 트랜잭션 분리 SOP 권장.
+prod-scale lock 주의 (Story 6.3 0020 P10 패턴 정합): 본 ``op.create_index``는
+*비-CONCURRENTLY* 실행 → 대규모 ``users`` 테이블에서 ACCESS EXCLUSIVE/SHARE 락.
+baseline은 sandbox라 영향 0. prod 트래픽 증가 후 재실행 시 ``CREATE INDEX CONCURRENTLY``
+변환 + ``disable_ddl_transaction = True`` 트랜잭션 분리 SOP 권장.
+
+Gemini CR G1 검토 결과: CONCURRENTLY 권장 의견 valid하나 *현재 alembic+asyncpg 테스트
+인프라*가 ``env.py:do_run_migrations``의 ``context.begin_transaction()`` 흐름과
+``disable_ddl_transaction = True``를 동시에 honor하지 않아 round-trip 회귀 가드
+3건(``test_alembic_001x_round_trip``)이 ``DROP INDEX CONCURRENTLY cannot run inside a
+transaction block``으로 실패. 0020 P10이 동일 caveat을 docstring SOP 권장으로 두고 plain
+``CREATE INDEX``를 baseline 유지한 패턴 정합 — 본 revision도 동일. 인프라 정정은 Story 8.4
+운영 polish forward (alembic env.py 비-tx 모드 + asyncpg autocommit 분기 도입 시 본 SQL을
+CONCURRENTLY로 교체).
 """
 
 from __future__ import annotations

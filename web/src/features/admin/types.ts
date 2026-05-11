@@ -68,6 +68,6 @@ export interface AdminMealAnalysisItem {
 }
 
 export interface AdminMealAnalysisListResponse {
-  items: AdminMealAnalysisItem[];
+  analyses: AdminMealAnalysisItem[];
   next_cursor: string | null;
 }

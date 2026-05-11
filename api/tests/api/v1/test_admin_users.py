@@ -568,8 +568,8 @@ async def test_list_user_meal_analyses_returns_summary_with_fit_score(
     )
     assert response.status_code == 200, response.text
     body = response.json()
-    assert len(body["items"]) == 1
-    item = body["items"][0]
+    assert len(body["analyses"]) == 1
+    item = body["analyses"][0]
     assert item["meal_analysis_id"] == str(analysis.id)
     assert item["meal_id"] == str(meal.id)
     assert item["fit_score"] == 88
@@ -590,7 +590,7 @@ async def test_list_user_meal_analyses_excludes_feedback_text_full_body(
         headers=_admin_headers(admin_user),
     )
     assert response.status_code == 200
-    item = response.json()["items"][0]
+    item = response.json()["analyses"][0]
     assert "feedback_text" not in item
     # full body가 응답에 leak되지 않음.
     assert secret_full not in response.text
@@ -617,7 +617,7 @@ async def test_list_user_meal_analyses_empty_list_for_user_with_no_analyses(
     )
     assert response.status_code == 200
     body = response.json()
-    assert body["items"] == []
+    assert body["analyses"] == []
     assert body["next_cursor"] is None
 
 
@@ -636,7 +636,7 @@ async def test_list_user_meal_analyses_pagination_cursor_round_trip(
     )
     assert response1.status_code == 200
     page1 = response1.json()
-    assert len(page1["items"]) == 2
+    assert len(page1["analyses"]) == 2
     assert page1["next_cursor"] is not None
 
     response2 = await client.get(
@@ -646,8 +646,8 @@ async def test_list_user_meal_analyses_pagination_cursor_round_trip(
     )
     assert response2.status_code == 200
     page2 = response2.json()
-    p1 = {i["meal_analysis_id"] for i in page1["items"]}
-    p2 = {i["meal_analysis_id"] for i in page2["items"]}
+    p1 = {i["meal_analysis_id"] for i in page1["analyses"]}
+    p2 = {i["meal_analysis_id"] for i in page2["analyses"]}
     assert p1.isdisjoint(p2)
 
 

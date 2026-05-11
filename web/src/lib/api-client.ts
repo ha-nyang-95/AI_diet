@@ -1185,8 +1185,8 @@ export interface components {
         };
         /** AdminMealAnalysisListResponse */
         AdminMealAnalysisListResponse: {
-            /** Items */
-            items: components["schemas"]["AdminMealAnalysisItem"][];
+            /** Analyses */
+            analyses: components["schemas"]["AdminMealAnalysisItem"][];
             /** Next Cursor */
             next_cursor: string | null;
         };

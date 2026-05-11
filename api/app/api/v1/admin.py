@@ -168,7 +168,9 @@ class AdminMealAnalysisItem(BaseModel):
 class AdminMealAnalysisListResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    items: list[AdminMealAnalysisItem]
+    # 명명 일관성 — ``AdminUserSearchResponse.users`` / ``AdminMealListResponse.meals`` 패턴
+    # 정합 (Gemini CR G2). ``items`` generic 명명 회피.
+    analyses: list[AdminMealAnalysisItem]
     next_cursor: str | None
 
 
@@ -522,7 +524,7 @@ async def list_user_meal_analyses(
         last = rows[-1]
         next_cursor = _encode_cursor(last.created_at, last.id)
 
-    return AdminMealAnalysisListResponse(items=items, next_cursor=next_cursor)
+    return AdminMealAnalysisListResponse(analyses=items, next_cursor=next_cursor)
 
 
 # --- AC5: PATCH /v1/admin/users/{user_id} (관리자 프로필 수정) ---------

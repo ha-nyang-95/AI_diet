@@ -56,13 +56,13 @@ export function UserMealAnalysesTable({ userId }: Props) {
 
   if (isLoading) return <p className="text-sm text-zinc-500">피드백 로그 로딩 중…</p>;
   if (error) return <p className="text-sm text-red-600">피드백 로그 조회 실패.</p>;
-  if (!data || data.items.length === 0)
+  if (!data || data.analyses.length === 0)
     return <p className="text-sm text-zinc-500">피드백 로그가 없습니다.</p>;
 
   return (
     <>
       <ul className="space-y-2 sm:hidden" aria-label="모바일 피드백 카드">
-        {data.items.map((a) => (
+        {data.analyses.map((a) => (
           <AnalysisCard key={a.meal_analysis_id} item={a} />
         ))}
       </ul>
@@ -78,7 +78,7 @@ export function UserMealAnalysesTable({ userId }: Props) {
             </tr>
           </thead>
           <tbody>
-            {data.items.map((a) => (
+            {data.analyses.map((a) => (
               <AnalysisRow key={a.meal_analysis_id} item={a} />
             ))}
           </tbody>

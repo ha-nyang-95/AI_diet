@@ -5,7 +5,8 @@
  * Client Component prefill. cross-origin server-side fetch는 cookie 미첨부 → Authorization
  * 헤더 forward 패턴(Story 4.3 baseline 정합).
  *
- * 미존재 user_id → Next.js 404. 401(admin token 부재/만료) → /admin/login redirect.
+ * 미존재 user_id → Next.js 404. admin 토큰 부재/401/403 → /admin/login redirect (Gemini CR G3
+ * 정합 — 토큰 부재만 404로 분기되던 inconsistency 정정).
  */
 import type { Metadata } from "next";
 import { cookies } from "next/headers";
@@ -19,7 +20,7 @@ export const metadata: Metadata = { title: "사용자 상세 — 관리자" };
 async function fetchUserDetail(userId: string): Promise<AdminUserDetailResponse | null> {
   const cookieStore = await cookies();
   const adminToken = cookieStore.get("bn_admin_access")?.value;
-  if (!adminToken) return null;
+  if (!adminToken) redirect("/admin/login?error=expired");
   const apiBase = process.env.API_BASE_URL ?? "http://localhost:8000";
   const response = await fetch(`${apiBase}/v1/admin/users/${userId}`, {
     headers: { Authorization: `Bearer ${adminToken}` },
