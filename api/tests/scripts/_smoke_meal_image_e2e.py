@@ -28,7 +28,6 @@ import httpx
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.core.config import settings
 from app.core.security import create_user_token
 
 API_BASE = "http://localhost:8000"
@@ -98,8 +97,10 @@ async def ensure_basic_consents(user_id: uuid.UUID) -> None:
                 await conn.execute(
                     text(
                         "UPDATE consents SET "
-                        "terms_consent_at = COALESCE(terms_consent_at, now()), terms_version = '1.0.0', "
-                        "privacy_consent_at = COALESCE(privacy_consent_at, now()), privacy_version = '1.0.0' "
+                        "terms_consent_at = COALESCE(terms_consent_at, now()), "
+                        "terms_version = '1.0.0', "
+                        "privacy_consent_at = COALESCE(privacy_consent_at, now()), "
+                        "privacy_version = '1.0.0' "
                         "WHERE user_id = :uid"
                     ),
                     {"uid": user_id},
@@ -182,11 +183,11 @@ async def main() -> int:
         )
         print(f"  status: {resp.status_code}")
         if resp.status_code == 503:
-            print(f"  ⚠️  503 응답 — Vision OCR unavailable 가능 (R2 public URL 미설정 또는 OpenAI 제한)")
+            print("  ⚠️  503 응답 — Vision OCR unavailable (image too small or OpenAI 제한)")
             print(f"  body: {resp.text}")
             # Vision 503은 *Supabase Storage swap*과는 독립 — Storage 흐름은 정상.
             print("\n  ℹ️  Storage swap 자체는 정상 (presign + PUT + head OK).")
-            print("  ℹ️  Vision OCR 단계는 image_url 발급(resolve_public_url) 또는 OpenAI key/quota 영향.")
+            print("  ℹ️  Vision OCR 단계는 image_url 발급 또는 OpenAI 영향.")
             return 0
         if resp.status_code != 200:
             print(f"  ❌ body: {resp.text}")

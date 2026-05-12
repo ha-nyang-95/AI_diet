@@ -1242,7 +1242,7 @@ export interface components {
              * Used Llm
              * @enum {string}
              */
-            used_llm: "gpt-4o-mini" | "claude" | "stub";
+            used_llm: "gpt-4o-mini" | "gpt-4o" | "stub";
         };
         /** AdminMealAnalysisItem */
         AdminMealAnalysisItem: {
@@ -1274,7 +1274,7 @@ export interface components {
              * Used Llm
              * @enum {string}
              */
-            used_llm: "gpt-4o-mini" | "claude" | "stub";
+            used_llm: "gpt-4o-mini" | "gpt-4o" | "stub";
             /**
              * Created At
              * Format: date-time
