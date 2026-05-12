@@ -48,6 +48,14 @@ dependencies = [
     "sse-starlette>=2.2",
     "google-auth>=2.36",
     "boto3>=1.36",
+    # Story 8.5 — Supabase Storage 직접 SDK(`storage3`). R2 adapter Supabase 분기 swap.
+    # 시그니처 유지(`create_presigned_upload`/`head_object_exists`/`resolve_public_url`)하고
+    # 내부 구현만 분기 — 호출처(`meals_images.py` 등) 변경 0. dev는 `STORAGE_PROVIDER=r2`
+    # 디폴트(외주 인수 옵션 보존), prod(Render)는 `STORAGE_PROVIDER=supabase`로 분기.
+    # 상한 `<2.26`: 2.26부터 `pyiceberg`(>200MB) transitive dep 추가 → Render Free
+    # 이미지 size 폭증 회피. supabase 메타패키지(`supabase>=2.x`) 대신 `storage3` 직접
+    # 사용 — auth/realtime/postgrest/functions 등 미사용 서브패키지 제외.
+    "storage3>=2.20,<2.26",
     # --- LLM Vision (Story 2.3 — OpenAI Vision OCR / structured outputs) ---
     "openai>=1.55",
     # Story 3.6 — 듀얼 LLM router 보조 SDK. `langchain-anthropic` transitive에서
@@ -103,7 +111,7 @@ plugins = ["pydantic.mypy"]
 mypy_path = "."
 
 [[tool.mypy.overrides]]
-module = ["jose.*", "passlib.*", "pgvector.*", "slowapi.*", "apscheduler.*", "google.*", "boto3.*", "botocore.*", "pypdf.*", "bs4.*", "langchain_text_splitters.*", "yaml.*", "psycopg.*", "psycopg_pool.*", "exponent_server_sdk.*", "requests.*"]
+module = ["jose.*", "passlib.*", "pgvector.*", "slowapi.*", "apscheduler.*", "google.*", "boto3.*", "botocore.*", "pypdf.*", "bs4.*", "langchain_text_splitters.*", "yaml.*", "psycopg.*", "psycopg_pool.*", "exponent_server_sdk.*", "requests.*", "storage3.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

@@ -1,0 +1,75 @@
+# Docker build context 최소화 (Story 8.5 AC1).
+# api/Dockerfile은 repo root를 context로 사용하므로 web/mobile/문서/BMad 산출물 등은 제외.
+
+# --- Node / Frontend (Dockerfile.api와 무관) -----------
+node_modules/
+.next/
+.turbo/
+.expo/
+.expo-shared/
+.vercel/
+out/
+
+# --- Other repo folders Dockerfile.api가 안 쓰는 영역 --
+mobile/
+web/
+docs/
+_bmad/
+_bmad-output/
+
+# --- Tests / dev-only ----------------------------------
+api/tests/
+api/htmlcov/
+api/.coverage
+api/.coverage.*
+api/coverage.xml
+
+# --- Python build artifacts ----------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+ENV/
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Secrets / env -------------------------------------
+.env
+.env.*
+!.env.example
+!.env.production.example
+
+# --- Git / IDE -----------------------------------------
+.git/
+.gitignore
+.idea/
+.vscode/
+*.swp
+*.swo
+.history/
+
+# --- OS ------------------------------------------------
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# --- Logs / temp ---------------------------------------
+*.log
+logs/
+*.tmp
+*.bak
+.tmp/
+
+# --- Docker artifacts ----------------------------------
+*.tar
+*.tar.gz

@@ -12,7 +12,7 @@
  * delete (재진입 시 새 키 — 새 결제 시도). localStorage 미보유 시(직접 URL 접근 등)
  * 헤더 없이 호출 — 첫 신청 흐름.
  */
-import { useEffect, useRef, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 
 import { apiFetch } from "@/lib/api-fetch";
@@ -46,7 +46,32 @@ type State =
   | { phase: "success"; data: SubscribeResponse }
   | { phase: "error"; message: string };
 
+// Story 8.5 AC9 — `useSearchParams()`는 클라이언트 navigation 이전 SSR 단계에서 값이
+// 결정되지 않아 Next.js 16이 ``<Suspense>`` 경계 강제. 본 페이지가 Toss success callback
+// (`?paymentKey&orderId&amount`)이라 static prerender가 불가 — Suspense 래퍼 + 별 컴포넌트
+// 분리 패턴(공식 권장).
 export default function SubscribeSuccessPage() {
+  return (
+    <Suspense fallback={<SubscribeLoadingFallback />}>
+      <SubscribeSuccessInner />
+    </Suspense>
+  );
+}
+
+function SubscribeLoadingFallback() {
+  return (
+    <main className="mx-auto max-w-xl px-4 py-8">
+      <header className="mb-6">
+        <h1 className="text-2xl font-semibold tracking-tight text-slate-900">결제 결과</h1>
+      </header>
+      <div className="rounded-md border border-zinc-200 bg-zinc-50 p-6 text-sm text-zinc-700">
+        결제 결과를 처리하는 중입니다…
+      </div>
+    </main>
+  );
+}
+
+function SubscribeSuccessInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [state, setState] = useState<State>({ phase: "loading" });

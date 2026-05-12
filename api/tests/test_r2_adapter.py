@@ -38,7 +38,11 @@ def _reset_r2_client_singleton() -> None:
 
 @pytest.fixture
 def _r2_configured(monkeypatch: pytest.MonkeyPatch) -> None:
-    """test settings에 R2 환경변수 5종 주입 — monkeypatch가 fixture 종료 시 자동 복원."""
+    """test settings에 R2 환경변수 5종 주입 — monkeypatch가 fixture 종료 시 자동 복원.
+
+    Story 8.5 — `STORAGE_PROVIDER=r2` 명시(default이지만 다른 테스트의 monkeypatch 누수 방어).
+    """
+    monkeypatch.setattr(_settings, "storage_provider", "r2")
     monkeypatch.setattr(_settings, "r2_account_id", "test-account-id")
     monkeypatch.setattr(_settings, "r2_access_key_id", "test-access-key")
     monkeypatch.setattr(_settings, "r2_secret_access_key", "test-secret-key")
@@ -101,6 +105,7 @@ def test_create_presigned_upload_oversize_raises(_r2_configured: None) -> None:
 def test_create_presigned_upload_unconfigured_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     """settings env 미설정 시 — `R2NotConfiguredError` raise (503 fail-fast)."""
     # _r2_configured fixture 미적용 — defaults는 빈 문자열.
+    monkeypatch.setattr(_settings, "storage_provider", "r2")
     monkeypatch.setattr(_settings, "r2_account_id", "")
     monkeypatch.setattr(_settings, "r2_access_key_id", "")
     monkeypatch.setattr(_settings, "r2_secret_access_key", "")
@@ -122,6 +127,7 @@ def test_resolve_public_url_returns_none_when_unconfigured(
 ) -> None:
     """P3 — settings 모두 미설정 시 ``resolve_public_url``은 None 반환 (broken
     `https:///<key>` URL 차단)."""
+    monkeypatch.setattr(_settings, "storage_provider", "r2")
     monkeypatch.setattr(_settings, "r2_public_base_url", "")
     monkeypatch.setattr(_settings, "r2_account_id", "")
     monkeypatch.setattr(_settings, "r2_bucket", "")
@@ -131,6 +137,7 @@ def test_resolve_public_url_returns_none_when_unconfigured(
 
 def test_resolve_public_url_uses_r2_dev_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     """P3 — base_url 미설정 + account/bucket 있을 때 `*.r2.dev` fallback."""
+    monkeypatch.setattr(_settings, "storage_provider", "r2")
     monkeypatch.setattr(_settings, "r2_public_base_url", "")
     monkeypatch.setattr(_settings, "r2_account_id", "acc-x")
     monkeypatch.setattr(_settings, "r2_bucket", "buc-y")
@@ -156,7 +163,7 @@ class _StubClient:
 def test_head_object_exists_returns_true_on_2xx(monkeypatch: pytest.MonkeyPatch) -> None:
     """P21 — head_object가 2xx 반환 시 True (객체 존재)."""
     stub = _StubClient(head_response={"ContentLength": 1234})
-    monkeypatch.setattr(r2_adapter, "_get_client", lambda: stub)
+    monkeypatch.setattr(r2_adapter, "_get_r2_client", lambda: stub)
     monkeypatch.setattr(_settings, "r2_bucket", "test-bucket")
 
     assert r2_adapter.head_object_exists("meals/foo/bar.jpg") is True
@@ -169,7 +176,7 @@ def test_head_object_exists_returns_false_on_404(monkeypatch: pytest.MonkeyPatch
         operation_name="HeadObject",
     )
     stub = _StubClient(head_error=error)
-    monkeypatch.setattr(r2_adapter, "_get_client", lambda: stub)
+    monkeypatch.setattr(r2_adapter, "_get_r2_client", lambda: stub)
     monkeypatch.setattr(_settings, "r2_bucket", "test-bucket")
 
     assert r2_adapter.head_object_exists("meals/foo/bar.jpg") is False
@@ -182,7 +189,7 @@ def test_head_object_exists_propagates_unknown_error(monkeypatch: pytest.MonkeyP
         operation_name="HeadObject",
     )
     stub = _StubClient(head_error=error)
-    monkeypatch.setattr(r2_adapter, "_get_client", lambda: stub)
+    monkeypatch.setattr(r2_adapter, "_get_r2_client", lambda: stub)
     monkeypatch.setattr(_settings, "r2_bucket", "test-bucket")
 
     with pytest.raises(ClientError):

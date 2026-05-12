@@ -158,6 +158,16 @@ class Settings(BaseSettings):
     google_oauth_android_client_id: str = ""
     google_oauth_ios_client_id: str = ""
 
+    # --- Storage provider (Story 8.5) ---
+    # `r2` (default, 외주 인수 옵션 보존) | `supabase` (Render+Supabase prod 패턴).
+    # `r2_*` 5종은 R2 분기에서만 사용, `supabase_*` 3종은 Supabase 분기에서만 사용.
+    # 어느 분기든 함수 시그니처(`create_presigned_upload`/`head_object_exists`/
+    # `resolve_public_url`)는 동일 — 호출처 변경 0.
+    storage_provider: str = Field(
+        default="r2",
+        description="r2 | supabase",
+    )
+
     # --- Cloudflare R2 ---
     r2_account_id: str = ""
     r2_access_key_id: str = ""
@@ -168,6 +178,14 @@ class Settings(BaseSettings):
     # bucket(R2). 미설정 시 dump skip + 운영 SOP 1줄(Cloudflare 콘솔 lifecycle policy로
     # 30일 후 자동 객체 삭제 — NFR-R5/C6 정합). dev/CI는 env 미설정 → graceful skip.
     r2_purge_dump_bucket: str = ""
+
+    # --- Supabase Storage (Story 8.5) ---
+    # `storage_provider=supabase` 분기에서 사용. dev/CI/test는 빈 값 허용 — fail-fast는
+    # `_get_supabase_client()`이 runtime에 raise. Render prod env vars 주입은 Story 8.5
+    # AC10 `.env.production.example` SOT 참조.
+    supabase_url: str = ""
+    supabase_service_key: str = ""
+    supabase_storage_bucket: str = "meals"
 
     # --- Expo ---
     expo_access_token: str = ""
@@ -185,7 +203,14 @@ class Settings(BaseSettings):
     toss_webhook_secret_key: str = ""
 
     # --- 환경 ---
-    environment: str = Field(default="dev", description="dev | staging | prod | ci | test")
+    # ``dev``(default) | ``staging`` | ``prod`` | ``production`` | ``ci`` | ``test``.
+    # Story 8.5: Render dashboard에서 ``ENVIRONMENT=production`` 표기 사용 — JWT 검증/
+    # Sentry environment tag 모두 ``prod``와 동일 효력(``_validate_jwt_secrets_in_prod``
+    # 분기 합집합). Sentry 측은 ``settings.environment`` 그대로 tag로 forward (sentry.py).
+    environment: str = Field(
+        default="dev",
+        description="dev | staging | prod | production | ci | test",
+    )
 
     # --- CORS (Story 1.2) ---
     # comma-separated. dev 디폴트는 Web 로컬(http://localhost:3000) + Expo Go(http://localhost:8081).
@@ -235,9 +260,11 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_jwt_secrets_in_prod(self) -> Settings:
-        # prod + staging 환경은 dev secret 차단 — staging은 prod-mirror 데이터 노출 가능성이라
-        # 동일 강도 검증 적용. dev/ci/test는 디폴트 dev secret 허용 — 부팅 fail 회피.
-        if self.environment not in {"prod", "staging"}:
+        # prod + production + staging 환경은 dev secret 차단 — staging은 prod-mirror 데이터
+        # 노출 가능성이라 동일 강도 검증 적용. ``production`` 별칭은 Story 8.5(Render dashboard
+        # 표기 정합 — `.env.production.example`이 `ENVIRONMENT=production` 사용) 흡수.
+        # dev/ci/test는 디폴트 dev secret 허용 — 부팅 fail 회피.
+        if self.environment not in {"prod", "production", "staging"}:
             return self
         if not self.jwt_user_secret or self.jwt_user_secret.startswith("dev-"):
             raise ValueError("jwt_user_secret must be set to a non-dev value in prod/staging")
