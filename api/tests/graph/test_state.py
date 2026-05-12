@@ -213,7 +213,11 @@ def test_feedback_output_default_used_llm() -> None:
 
 def test_feedback_output_used_llm_literal() -> None:
     FeedbackOutput(text="...", citations=[], used_llm="gpt-4o-mini")
-    FeedbackOutput(text="...", citations=[], used_llm="claude")
+    # Story 8.5 — Anthropic 제거 후 'gpt-4o'(env override 승격)도 valid label.
+    FeedbackOutput(text="...", citations=[], used_llm="gpt-4o")
+    with pytest.raises(ValidationError):
+        # 'claude'는 더 이상 valid label 아님 (Story 8.5에서 Literal 정리).
+        FeedbackOutput(text="...", citations=[], used_llm="claude")  # type: ignore[arg-type]
     with pytest.raises(ValidationError):
         FeedbackOutput(text="...", citations=[], used_llm="other")  # type: ignore[arg-type]
 

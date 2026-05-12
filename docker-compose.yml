@@ -1,6 +1,11 @@
 # BalanceNote — Docker Compose
 # 1-cmd 부팅: docker compose up
 # 인프라 URL은 environment에 하드코딩 (시크릿만 .env에서 로딩 — .env가 비어도 인프라는 가동).
+#
+# Local dev only. Render는 본 파일 미참조 — `docker/Dockerfile.api` 단독 사용
+# (Story 8.5 AC2: Render 배포는 docker-compose.yml과 무관).
+# pgvector extension은 dev에서 `pgvector/pgvector:pg17` 이미지가 자동 활성,
+# Supabase에서는 dashboard → Database → Extensions에서 수동 enable 필요.
 
 services:
   postgres:

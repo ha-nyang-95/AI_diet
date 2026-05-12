@@ -77,7 +77,6 @@ class Settings(BaseSettings):
 
     # --- LLM ---
     openai_api_key: str = ""
-    anthropic_api_key: str = ""
 
     # --- LangSmith ---
     langsmith_api_key: str = ""
@@ -100,20 +99,18 @@ class Settings(BaseSettings):
     # 변수 ``CLARIFICATION_MAX_OPTIONS`` override 가능.
     clarification_max_options: int = 4
 
-    # --- Dual-LLM router (Story 3.6) ---
+    # --- LLM router (Story 3.6 — Story 8.5에서 OpenAI 단독으로 단순화) ---
     # 메인 LLM — OpenAI ``gpt-4o-mini`` (cost 1/15 vs ``gpt-4o``, 한국어 coaching 톤
     # 충분). Story 3.8 LangSmith eval 결과 기반 ``gpt-4o`` 또는 ``gpt-4.1`` 승격 검토
-    # 가능 — env override만으로 전환.
+    # 가능 — env override만으로 전환. Story 8.5: Anthropic fallback 제거(포트폴리오 scope
+    # 단일 provider 운영) — ``llm_fallback_model`` 필드 폐기.
     llm_main_model: str = "gpt-4o-mini"
-    # 보조 LLM — Anthropic ``claude-haiku-4-5-20251001`` (2026-05 시점 최신 Haiku, cost/
-    # latency 균형 우선). Story 3.8 eval 결과로 Sonnet 4.6 승격 검토 가능.
-    llm_fallback_model: str = "claude-haiku-4-5-20251001"
     # Redis LLM 캐시 TTL — FR43 baseline 24h(86400s). cost 폭발 차단(동일 식단+프로필
     # 재호출 시 LLM 0회).
     llm_cache_ttl_seconds: int = 86400
-    # Router 전체 wall-time 예산 (CR MJ-22) — 초기 호출 + 최대 3회 regen +
-    # OpenAI 3-attempt + Anthropic 3-attempt × 30s SDK timeout 누적이 worst-case
-    # ~189s에 달함. ``asyncio.wait_for`` outer deadline로 차단(p95 mobile 4s 정합).
+    # Router 전체 wall-time 예산 — 초기 호출 + 최대 3회 regen + OpenAI 3-attempt × 30s SDK
+    # timeout 누적이 worst-case ~99s에 달함. ``asyncio.wait_for`` outer deadline로 차단
+    # (p95 mobile 4s 정합).
     llm_router_total_budget_seconds: int = 25
 
     # --- Vision 비용·캐시·결정성 (Story 3.9 AC6, AC7) ---
@@ -158,6 +155,16 @@ class Settings(BaseSettings):
     google_oauth_android_client_id: str = ""
     google_oauth_ios_client_id: str = ""
 
+    # --- Storage provider (Story 8.5) ---
+    # `r2` (default, 외주 인수 옵션 보존) | `supabase` (Render+Supabase prod 패턴).
+    # `r2_*` 5종은 R2 분기에서만 사용, `supabase_*` 3종은 Supabase 분기에서만 사용.
+    # 어느 분기든 함수 시그니처(`create_presigned_upload`/`head_object_exists`/
+    # `resolve_public_url`)는 동일 — 호출처 변경 0.
+    storage_provider: str = Field(
+        default="r2",
+        description="r2 | supabase",
+    )
+
     # --- Cloudflare R2 ---
     r2_account_id: str = ""
     r2_access_key_id: str = ""
@@ -168,6 +175,14 @@ class Settings(BaseSettings):
     # bucket(R2). 미설정 시 dump skip + 운영 SOP 1줄(Cloudflare 콘솔 lifecycle policy로
     # 30일 후 자동 객체 삭제 — NFR-R5/C6 정합). dev/CI는 env 미설정 → graceful skip.
     r2_purge_dump_bucket: str = ""
+
+    # --- Supabase Storage (Story 8.5) ---
+    # `storage_provider=supabase` 분기에서 사용. dev/CI/test는 빈 값 허용 — fail-fast는
+    # `_get_supabase_client()`이 runtime에 raise. Render prod env vars 주입은 Story 8.5
+    # AC10 `.env.production.example` SOT 참조.
+    supabase_url: str = ""
+    supabase_service_key: str = ""
+    supabase_storage_bucket: str = "meals"
 
     # --- Expo ---
     expo_access_token: str = ""
@@ -185,7 +200,14 @@ class Settings(BaseSettings):
     toss_webhook_secret_key: str = ""
 
     # --- 환경 ---
-    environment: str = Field(default="dev", description="dev | staging | prod | ci | test")
+    # ``dev``(default) | ``staging`` | ``prod`` | ``production`` | ``ci`` | ``test``.
+    # Story 8.5: Render dashboard에서 ``ENVIRONMENT=production`` 표기 사용 — JWT 검증/
+    # Sentry environment tag 모두 ``prod``와 동일 효력(``_validate_jwt_secrets_in_prod``
+    # 분기 합집합). Sentry 측은 ``settings.environment`` 그대로 tag로 forward (sentry.py).
+    environment: str = Field(
+        default="dev",
+        description="dev | staging | prod | production | ci | test",
+    )
 
     # --- CORS (Story 1.2) ---
     # comma-separated. dev 디폴트는 Web 로컬(http://localhost:3000) + Expo Go(http://localhost:8081).
@@ -235,9 +257,11 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_jwt_secrets_in_prod(self) -> Settings:
-        # prod + staging 환경은 dev secret 차단 — staging은 prod-mirror 데이터 노출 가능성이라
-        # 동일 강도 검증 적용. dev/ci/test는 디폴트 dev secret 허용 — 부팅 fail 회피.
-        if self.environment not in {"prod", "staging"}:
+        # prod + production + staging 환경은 dev secret 차단 — staging은 prod-mirror 데이터
+        # 노출 가능성이라 동일 강도 검증 적용. ``production`` 별칭은 Story 8.5(Render dashboard
+        # 표기 정합 — `.env.production.example`이 `ENVIRONMENT=production` 사용) 흡수.
+        # dev/ci/test는 디폴트 dev secret 허용 — 부팅 fail 회피.
+        if self.environment not in {"prod", "production", "staging"}:
             return self
         if not self.jwt_user_secret or self.jwt_user_secret.startswith("dev-"):
             raise ValueError("jwt_user_secret must be set to a non-dev value in prod/staging")

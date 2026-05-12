@@ -9,7 +9,7 @@
 | 카테고리 | secret 이름 | 발급처 | 회전 주기 | 본 문서 단락 |
 |---------|------------|-------|----------|------------|
 | LLM | `OPENAI_API_KEY` | OpenAI Platform | 분기 1회 | §1 |
-| LLM | `ANTHROPIC_API_KEY` | Anthropic Console | 분기 1회 | §2 |
+| ~~LLM~~ | ~~`ANTHROPIC_API_KEY`~~ | ~~Anthropic Console~~ | **Story 8.5 폐기** | ~~§2~~ |
 | 옵저버빌리티 | `LANGSMITH_API_KEY` | LangSmith UI | 분기 1회 | §3 (Story 3.8) |
 | Push | `EXPO_ACCESS_TOKEN` | EAS Console | 6개월 | §4 (Story 4.2) |
 | OAuth | `GOOGLE_OAUTH_CLIENT_SECRET` | Google Console | 6개월 | §5 (Story 8.5) |
@@ -22,15 +22,66 @@
 
 ---
 
-## 1. OpenAI API key 회전
+## 1. OpenAI API key 회전 (Story 8.5)
 
-(Story 8.5 polish 단계에서 채움 — 본 단락은 placeholder.)
+OpenAI Platform에서 발급된 API key. `OPENAI_API_KEY` env가 LLM router(`call_openai_feedback`)
++ Vision OCR(`parse_meal_image`) + GitHub Actions `daily-cost-alert.yml` 3곳에서 사용. 분기
+1회 회전.
+
+### 1.1. 신규 key 발급
+
+1. [OpenAI Platform](https://platform.openai.com) 운영자 계정으로 로그인.
+2. `Dashboard` → `API keys` → `+ Create new secret key`.
+3. key 이름: `balancenote-prod-2026-Q3` 등 *환경+분기* 명명.
+4. permissions: *All* (LLM + Vision + Usage API 모두 호출). usage 전용 read-only key는 별도
+   발급(GitHub Actions secret용 — `daily-cost-alert.yml` 정합).
+5. 발급된 `sk-...` key를 *임시 보안 노트*에 복사(페이지 이탈 시 재조회 불가).
+
+### 1.2. Render env vars 갱신 + 24h overlap
+
+1. Render dashboard → `bn-api` service → `Environment` → `OPENAI_API_KEY` → 신규 key 붙여넣기 → `Save Changes`.
+2. **자동 재배포 1~2분 대기** — `https://bn-api.onrender.com/healthz` 200 OK 확인.
+3. **24h overlap** — OpenAI는 새 key 발급 시 기존 key 즉시 무효화하지 *않음*. 기존 key는 *수동 revoke*
+   시점까지 유효 → in-flight request가 기존 key로 처리되어도 안전. 24h grace 동안 두 key 모두 valid.
+
+### 1.3. 도착 검증
+
+1. 분석 1회 호출 (Render bn-web에서 식단 분석 또는 cURL `POST /v1/analysis/stream`).
+2. Sentry `balancenote-api` → breadcrumb에 `llm_router.openai.completion` 정상 로그 확인.
+3. LangSmith dashboard → 신규 trace 도착 + `openai-` model 호출 정상.
+4. GitHub Actions → `daily-cost-alert.yml` 수동 trigger → OpenAI Usage API 호출 성공 확인.
+
+### 1.4. 기존 key revoke
+
+1. §1.3 검증 통과 + 24h overlap 후 OpenAI Platform → `API keys` → 기존 key → ⋯ → `Revoke`.
+2. revoke 직후 첫 호출에 `openai.AuthenticationError` 발생하지 않음을 5분간 Sentry 모니터링.
+
+### 1.5. rollback (장애 시)
+
+신규 key 적용 후 `401 Unauthorized` 또는 `openai.AuthenticationError` 다발 시:
+
+1. 기존 key가 *revoke 전*이라면 Render env vars에서 기존 key로 즉시 복구 → 자동 재배포.
+2. 기존 key revoke 완료된 상태라면 OpenAI Platform에서 *재 발급* → §1.2-§1.3 재실행.
+3. 회복 불가 시 `OPENAI_API_KEY=`(빈 값)으로 강등 — `LLMRouterUnavailableError(503)` 응답 +
+   Anthropic 단일 LLM으로 graceful fallback 동작(NFR-I3 정합).
+
+### 1.6. 변경 트리거
+
+- 운영자 퇴사 / 권한 변경.
+- key leak 의심 (Sentry capture에 raw key 노출 / GitHub commit / Discord leak 등).
+- 3개월 정기 회전 (캘린더).
+- OpenAI 측 정책 변경(GPT-5 권한 분리 등).
 
 ---
 
-## 2. Anthropic API key 회전
+## 2. ~~Anthropic API key 회전~~ — **Story 8.5에서 폐기**
 
-(Story 8.5 polish 단계에서 채움 — 본 단락은 placeholder.)
+**deprecated** — Story 8.5에서 dual-LLM router를 OpenAI 단독으로 단순화하며 Anthropic 의존성
+제거. `ANTHROPIC_API_KEY`와 `ANTHROPIC_ADMIN_API_KEY` 모두 더 이상 사용 X. Render env vars +
+GitHub Actions Secrets에서 *제거 권장*(보존해도 무해하나 운영 가시성 ↓).
+
+복원 시점에는 §1 OpenAI 회전 SOP를 mirroring하여 본 단락을 재작성 — `app/adapters/anthropic_adapter.py`
+복원 + `pyproject.toml`에 `anthropic` dep 재추가 + `llm_router.py`에 fallback 분기 재도입.
 
 ---
 
@@ -146,9 +197,51 @@ EAS Console에서 발급되는 access token으로 `app/adapters/expo_push.py`이
 
 ---
 
-## 5. Google OAuth client secret 회전 (Story 8.5 polish 단계 채움)
+## 5. Google OAuth client secret 회전 (Story 8.5)
 
-(placeholder)
+Google Cloud Console의 OAuth 2.0 Web client secret. `GOOGLE_OAUTH_CLIENT_SECRET` env가 `bn-api` +
+`bn-web` Render service 양쪽에서 사용. 6개월 1회 회전(또는 leak 의심 시 즉시).
+
+### 5.1. 신규 secret 발급
+
+1. [Google Cloud Console](https://console.cloud.google.com) → APIs & Services → 사용자 인증 정보.
+2. Web 클라이언트 — `balancenote-web`(client_id `559604985813-fi8mfivn1fhjgq9a9ehdh5l8qp5iivpk.apps.googleusercontent.com`)
+   클릭.
+3. **+ 새 시크릿 만들기** → 신규 secret 생성. 기존 secret은 *7일 grace 동안 동시 유효*
+   (Google 정책 — 회전 중 OAuth 끊김 0초 보장).
+4. 발급된 secret을 *임시 보안 노트*에 복사. 페이지 이탈 후 재조회 가능(*old + new* 둘 다 dashboard에 표시).
+
+### 5.2. Render env vars 갱신 (2 service 동시)
+
+1. Render dashboard → `bn-api` service → `Environment` → `GOOGLE_OAUTH_CLIENT_SECRET` → 신규 secret 붙여넣기 → `Save Changes`.
+2. Render dashboard → `bn-web` service → 동일 — `GOOGLE_OAUTH_CLIENT_SECRET` 신규 secret 주입.
+3. **양 service 자동 재배포 동시 진행** — 5분 대기 후 두 service 모두 정상 부팅 확인.
+
+### 5.3. 로그인 흐름 검증
+
+1. `https://bn-web.onrender.com/login` → Google 로그인 버튼 클릭 → 신규 secret으로 OAuth flow 완료.
+2. Sentry → `auth.google.id_token_invalid` 0건 확인 (5분 모니터링).
+3. `redirect_uri`는 secret 회전과 *무관* — 회전 후 추가 작업 없음.
+
+### 5.4. 기존 secret revoke
+
+1. §5.3 검증 통과 + 7일 grace 후 (또는 leak 의심 시 즉시) Google Console → 클라이언트 → 기존 secret → ⋯ → `삭제`.
+2. revoke 직후 첫 로그인 흐름 1회 추가 검증.
+
+### 5.5. rollback (장애 시)
+
+신규 secret 적용 후 OAuth invalid_client 다발 시:
+
+1. 기존 secret이 *grace 기간 내*면 Render env vars 양 service에서 기존 secret으로 복구 → 자동 재배포.
+2. grace 만료 시 Google Console에서 새 secret 재 발급 → §5.2-§5.3 재실행.
+3. 회복 불가 시(드물지만 OAuth Console 자체 장애) `secret-rotation.md` §incident-response.md
+   §1 외부 API 장애 SOP 진입.
+
+### 5.6. 변경 트리거
+
+- 운영자 퇴사 / 권한 변경.
+- secret leak 의심 (GitHub commit / Discord / Slack leak 등).
+- 6개월 정기 회전.
 
 ---
 
@@ -259,13 +352,84 @@ retry(1분 backoff)가 자연 회복.
 
 ---
 
-## 8. 기타 secret 회전 (Story 8.5 polish 단계 채움)
+## 8. Sentry DSN + Supabase Service Key 회전 (Story 8.5)
 
-본 단락은 placeholder — Story 8.5 운영 polish 단계에서 Sentry / Cloudflare R2 회전
-절차를 동일 패턴으로 채운다.
+### 8.1. Sentry DSN 회전
 
-## 회전 캘린더 (Story 8.5에서 박힘)
+Sentry는 `SENTRY_DSN` (backend `balancenote-api` project) + `NEXT_PUBLIC_SENTRY_DSN`
+(frontend `balancenote-web` project — Story 8.4 wiring forward) 2개. 12개월 1회 또는
+leak 의심 시 회전. DSN은 *고객 사용자가 보지 못하는 서버 식별자*라 secret-equivalent.
 
-분기 1회 자동 알림 cron — `docs/sop/`에 회전 SOP 캘린더가 박힌 후 본 단락에서
-링크. 본 시점(Story 3.8)에서는 운영자 수동 캘린더 alert(`docs/observability/langsmith-dashboard.md`
-§4 cross-link).
+1. [Sentry Dashboard](https://sentry.io) → 해당 project (`balancenote-api` 또는 `balancenote-web`)
+   → `Settings` → `Client Keys (DSN)` → `+ Generate New Key`.
+2. 신규 DSN 복사 후 Render dashboard → 해당 service → `Environment` → 변수 → 신규 값 → `Save Changes`.
+3. 자동 재배포 1~2분 대기. 의도적 에러 1건 발생시켜 신규 DSN으로 event 도착 확인.
+4. 기존 key는 grace 기간(Sentry는 즉시 비활성 안 함) — 24h 후 `Settings` → `Client Keys` → 기존 → `Revoke`.
+
+#### rollback
+
+기존 key 미 revoke 상태라면 Render env vars에서 즉시 기존 DSN 복원. revoke 완료 시 §8.1.1
+재실행. 회복 불가 시 `SENTRY_DSN=`(빈 값) 강등 — `sentry.init()`이 graceful skip (sentry.py:128).
+
+### 8.2. Supabase Service Key 회전
+
+`SUPABASE_SERVICE_KEY` env는 Storage Adapter(`r2.py` Supabase 분기) + 향후 Supabase 직접
+호출에서 사용. service_role 권한이라 *leak 시 DB·Storage 전체 RW 가능* — 최고 보안 등급.
+6개월 1회 또는 leak 의심 시 즉시 회전.
+
+1. Supabase Dashboard → 본 프로젝트 → `Settings` → `API` → `service_role` 키 → `Reset`.
+2. **주의**: Supabase는 service key를 *즉시 무효화*하고 신규 발급 → grace 0초. 회전 직전에
+   Render env vars에 신규 key를 *미리 입력 + Save Changes* 후 자동 재배포 완료를 *확인한 뒤*
+   Supabase에서 reset.
+3. 또는 Render env vars의 기존 key를 빈 값으로 두지 *않고*, Reset 직후 신규 key로 즉시 갱신
+   (downtime ~1분 — 신규 배포 + 첫 호출까지).
+4. 검증: `POST /v1/meals/images/presign` 호출 1회 → Sentry `storage.supabase.signed_upload_created`
+   info log 정상 도착.
+
+#### rollback
+
+Supabase Service Key는 *과거 값으로 복구 불가능* — reset 후 옛 키는 영구 무효. 신규 key로
+재배포만이 회복 경로. 만약 reset 직후 prod에서 storage 호출이 일제히 실패하면 즉시 Render env에
+신규 key가 정확히 입력됐는지 확인(타이핑 실수, 줄바꿈 포함 여부 검증).
+
+### 8.3. 변경 트리거
+
+- 운영자 퇴사 / 권한 변경.
+- key/DSN leak 의심.
+- Sentry: 12개월 정기 회전.
+- Supabase: 6개월 정기 회전 (서버 권한 key — 더 자주).
+
+---
+
+## 9. 회전 캘린더 (Story 8.5)
+
+분기별 회전 SOP 모음 — 운영자 수동 캘린더 alert 또는 GitHub Actions cron(별도 workflow,
+Story 8.5 OUT) 트리거.
+
+| 회전 주기 | secret | 다음 회전 (예) | 단락 |
+|----------|-------|--------------|------|
+| **분기 (3개월)** | `OPENAI_API_KEY` | 2026-08-12, 2026-11-12, 2027-02-12... | §1 |
+| ~~**분기 (3개월)**~~ | ~~`ANTHROPIC_API_KEY`~~ | **Story 8.5 폐기** | ~~§2~~ |
+| **분기 (3개월)** | `LANGSMITH_API_KEY` | 2026-08-12, 2026-11-12... | §3 |
+| **6개월** | `EXPO_ACCESS_TOKEN` | 2026-11-12 | §4 |
+| **6개월** | `GOOGLE_OAUTH_CLIENT_SECRET` | 2026-11-12 | §5 |
+| **12개월** | `TOSS_SECRET_KEY` (prod live) | 2027-05-12 (sandbox 무회전) | §6 |
+| **12개월** | `TOSS_WEBHOOK_SECRET_KEY` (prod live) | 2027-05-12 (sandbox 무회전) | §7 |
+| **12개월** | `SENTRY_DSN` (backend + web) | 2027-05-12 | §8.1 |
+| **6개월** | `SUPABASE_SERVICE_KEY` | 2026-11-12 | §8.2 |
+| **분기 (3개월)** | `JWT_SECRET_KEY` (prod) | 2026-08-12 — 사용자 전체 강제 logout 동반 | (별도 SOP) |
+| **분기 (3개월)** | `DISCORD_COST_WEBHOOK_URL` | 2026-08-12 — leak 시 즉시 | (별도 SOP) |
+
+### 9.1. 회전 발생 시 공통 checklist
+
+- [ ] 신규 secret 발급 (해당 § 1.1 / 2.1 / 5.1 / 8.x.1).
+- [ ] Render env vars 갱신 + 자동 재배포 검증 (`/healthz` 200).
+- [ ] 도착 검증 (Sentry breadcrumb / LangSmith trace / Toss webhook log 등).
+- [ ] 기존 secret revoke (해당 § 1.4 / 2.4 / 5.4 / 8.x.1).
+- [ ] 본 캘린더의 "다음 회전" 컬럼 갱신.
+- [ ] 변경 이력을 `_bmad-output/implementation-artifacts/secret-rotation-log.md` (옵션)에 추가.
+
+### 9.2. 알림 자동화 (Story 8.5 OUT — Story 8.4 polish forward)
+
+분기 1회 자동 알림 cron(별도 GitHub Actions workflow + Discord webhook)은 Story 8.4 polish 단계
+forward. 본 시점은 운영자 수동 캘린더 alert + 본 §9 회전 표를 1순위 SOT로 운영.

@@ -132,7 +132,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # 자원 init은 각각 독립 try/except — 한 자원 실패가 다른 자원·앱 부팅 자체를 막지 않음.
     try:
-        engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+        # Story 8.5 — Supabase Transaction mode pooler(`?pgbouncer=true`) 호환을 위한
+        # `statement_cache_size=0` connect_arg. `_asyncpg_connect_args`가 URL을 inspect해
+        # direct connection / pooler를 자동 분기 — dev/test는 영향 0.
+        from app.db.session import _asyncpg_connect_args  # noqa: PLC0415
+
+        engine = create_async_engine(
+            settings.database_url,
+            pool_pre_ping=True,
+            **_asyncpg_connect_args(settings.database_url),
+        )
         app.state.engine = engine
         app.state.session_maker = async_sessionmaker(engine, expire_on_commit=False)
     except Exception as exc:  # noqa: BLE001

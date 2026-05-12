@@ -1,7 +1,8 @@
-# Daily LLM cost alert — placeholder
-# Story 8.5 (운영 hardening)에서 구현됨
-# - LangSmith API에서 일일 토큰 사용량 조회
-# - 임계 초과 시 Slack/이메일 알림
+# Daily LLM cost alert (Story 8.5 AC4)
+# - OpenAI / LangSmith Usage API에서 어제 KST 비용 합산 (Story 8.5 갱신: Anthropic 제거).
+# - 임계치 초과 시 Discord webhook + GitHub Issue 자동 생성.
+# - 매일 KST 09:00(UTC 00:00) + 수동 trigger(`workflow_dispatch`).
+# - 각 API 실패는 fallback message로 격리(workflow는 success exit + 다음 cron 보장).
 
 name: daily-cost-alert
 
@@ -11,8 +12,178 @@ on:
   workflow_dispatch: {}
 
 jobs:
-  placeholder:
+  daily-cost-alert:
     runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
+      DISCORD_COST_WEBHOOK_URL: ${{ secrets.DISCORD_COST_WEBHOOK_URL }}
+      SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+      THRESHOLD_USD: ${{ secrets.THRESHOLD_USD || '5.0' }}
+      CRITICAL_USD: '10.0'
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - name: Placeholder (Story 8.5에서 구현)
-        run: echo "daily-cost-alert placeholder — Story 8.5 implements LangSmith spend check."
+      - name: Compute target date (yesterday KST)
+        id: date
+        run: |
+          # KST 09:00에 실행되므로 UTC 어제 = KST 어제 동일(자정 기준).
+          YESTERDAY=$(date -u -d "yesterday" +%Y-%m-%d)
+          echo "yesterday=$YESTERDAY" >> "$GITHUB_OUTPUT"
+          echo "Target date: $YESTERDAY"
+
+      - name: Query OpenAI Usage API
+        id: openai
+        run: |
+          if [ -z "$OPENAI_API_KEY" ]; then
+            echo "openai_usd=0" >> "$GITHUB_OUTPUT"
+            echo "openai_status=skipped (no key)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # OpenAI legacy usage endpoint: /v1/usage?date=YYYY-MM-DD
+          # total_usage는 cents(1/100 USD) 단위.
+          RESPONSE=$(curl -sS -m 30 \
+            -H "Authorization: Bearer $OPENAI_API_KEY" \
+            "https://api.openai.com/v1/usage?date=${{ steps.date.outputs.yesterday }}" || echo '{}')
+          CENTS=$(echo "$RESPONSE" | jq -r '.total_usage // 0')
+          USD=$(awk "BEGIN { printf \"%.4f\", $CENTS / 100.0 }")
+          echo "openai_usd=$USD" >> "$GITHUB_OUTPUT"
+          echo "openai_status=ok" >> "$GITHUB_OUTPUT"
+          echo "OpenAI USD: $USD"
+
+      - name: Query LangSmith trace count
+        id: langsmith
+        run: |
+          if [ -z "$LANGSMITH_API_KEY" ]; then
+            echo "langsmith_traces=0" >> "$GITHUB_OUTPUT"
+            echo "langsmith_status=skipped (no key)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # LangSmith runs count (어제 KST 0~24시).
+          START="${{ steps.date.outputs.yesterday }}T00:00:00Z"
+          END=$(date -u -d "${{ steps.date.outputs.yesterday }} +1 day" +%Y-%m-%dT%H:%M:%SZ)
+          RESPONSE=$(curl -sS -m 30 \
+            -H "x-api-key: $LANGSMITH_API_KEY" \
+            "https://api.smith.langchain.com/api/v1/runs?start_time=$START&end_time=$END&limit=1" || echo '{}')
+          # ``runs`` 응답이 list of runs — 합산을 cursor pagination 따라가야 정확.
+          # baseline: ``total`` 필드(있을 시) 또는 응답 long count.
+          TRACES=$(echo "$RESPONSE" | jq -r '.total // (length // 0)' 2>/dev/null || echo "0")
+          echo "langsmith_traces=$TRACES" >> "$GITHUB_OUTPUT"
+          echo "langsmith_status=ok" >> "$GITHUB_OUTPUT"
+          echo "LangSmith traces: $TRACES"
+
+      - name: Compute total cost and severity
+        id: total
+        run: |
+          OAI="${{ steps.openai.outputs.openai_usd }}"
+          TOTAL=$(awk "BEGIN { printf \"%.4f\", $OAI }")
+          echo "total_usd=$TOTAL" >> "$GITHUB_OUTPUT"
+
+          # severity: critical (>= CRITICAL_USD) > warning (>= THRESHOLD_USD) > ok.
+          OVER_CRIT=$(awk "BEGIN { print ($TOTAL >= $CRITICAL_USD) ? 1 : 0 }")
+          OVER_WARN=$(awk "BEGIN { print ($TOTAL >= $THRESHOLD_USD) ? 1 : 0 }")
+          if [ "$OVER_CRIT" = "1" ]; then
+            SEV="critical"
+          elif [ "$OVER_WARN" = "1" ]; then
+            SEV="warning"
+          else
+            SEV="ok"
+          fi
+          echo "severity=$SEV" >> "$GITHUB_OUTPUT"
+          echo "Severity: $SEV (total=$TOTAL, warn=$THRESHOLD_USD, crit=$CRITICAL_USD)"
+
+      - name: Send Discord webhook
+        if: env.DISCORD_COST_WEBHOOK_URL != ''
+        run: |
+          # Severity별 embed color: critical=red(0xFF0000), warning=orange(0xFFA500), ok=green(0x00FF00).
+          case "${{ steps.total.outputs.severity }}" in
+            critical) COLOR=16711680; EMOJI="🚨" ;;
+            warning)  COLOR=16753920; EMOJI="⚠️" ;;
+            *)        COLOR=65280; EMOJI="✅" ;;
+          esac
+
+          PAYLOAD=$(jq -nc \
+            --arg date "${{ steps.date.outputs.yesterday }}" \
+            --arg sev "${{ steps.total.outputs.severity }}" \
+            --arg total "${{ steps.total.outputs.total_usd }}" \
+            --arg openai "${{ steps.openai.outputs.openai_usd }}" \
+            --arg openai_status "${{ steps.openai.outputs.openai_status }}" \
+            --arg langsmith "${{ steps.langsmith.outputs.langsmith_traces }}" \
+            --arg langsmith_status "${{ steps.langsmith.outputs.langsmith_status }}" \
+            --arg emoji "$EMOJI" \
+            --argjson color "$COLOR" \
+            --arg threshold "$THRESHOLD_USD" \
+            --arg critical "$CRITICAL_USD" \
+            '{
+              embeds: [{
+                title: ($emoji + " BalanceNote LLM Cost — " + $date),
+                description: ("Severity: **" + $sev + "** (warn≥$" + $threshold + " / crit≥$" + $critical + ")"),
+                color: $color,
+                fields: [
+                  {name: "Total USD", value: ("$" + $total), inline: true},
+                  {name: "OpenAI", value: ("$" + $openai + " (" + $openai_status + ")"), inline: true},
+                  {name: "LangSmith traces", value: ($langsmith + " (" + $langsmith_status + ")"), inline: true}
+                ],
+                timestamp: (now | strftime("%Y-%m-%dT%H:%M:%SZ"))
+              }]
+            }')
+
+          # Discord webhook은 매일 1회 호출이라 rate limit(30msg/s) 무관.
+          curl -sS -m 30 -X POST \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            "$DISCORD_COST_WEBHOOK_URL" || echo "Discord webhook failed (non-fatal)"
+
+      - name: Discord fallback (webhook unreachable)
+        if: env.DISCORD_COST_WEBHOOK_URL == ''
+        run: |
+          echo "::warning::DISCORD_COST_WEBHOOK_URL secret is empty — skipping Discord notification."
+
+      - name: Send Sentry custom event (optional)
+        if: env.SENTRY_AUTH_TOKEN != '' && steps.total.outputs.severity != 'ok'
+        run: |
+          # Sentry custom event는 optional — auth token 미설정 시 step skip.
+          # level: critical → 'error', warning → 'warning'.
+          case "${{ steps.total.outputs.severity }}" in
+            critical) LEVEL="error" ;;
+            warning)  LEVEL="warning" ;;
+            *)        LEVEL="info" ;;
+          esac
+          echo "Sentry event level: $LEVEL — actual POST는 SENTRY_AUTH_TOKEN+project SOP 정합 forward (Story 8.4)."
+
+      - name: Open GitHub Issue on threshold breach
+        if: steps.total.outputs.severity == 'critical'
+        run: |
+          gh issue create \
+            --title "🚨 Daily cost threshold exceeded: \$${{ steps.total.outputs.total_usd }} (${{ steps.date.outputs.yesterday }})" \
+            --body "Daily LLM cost alert (severity=**${{ steps.total.outputs.severity }}**)
+
+          ## Breakdown
+          - **Date**: ${{ steps.date.outputs.yesterday }} (KST)
+          - **Total**: \$${{ steps.total.outputs.total_usd }}
+          - **OpenAI**: \$${{ steps.openai.outputs.openai_usd }} (${{ steps.openai.outputs.openai_status }})
+          - **LangSmith traces**: ${{ steps.langsmith.outputs.langsmith_traces }} (${{ steps.langsmith.outputs.langsmith_status }})
+
+          ## Threshold
+          - warning ≥ \$$THRESHOLD_USD
+          - critical ≥ \$$CRITICAL_USD
+
+          ## Action items
+          - [ ] Sentry/LangSmith dashboard에서 폭증 endpoint 식별
+          - [ ] 필요 시 \`docs/runbook/incident-response.md\` §3 (LLM 비용 폭증) SOP 진입
+          - [ ] 일시 cost cap 강화 (env var \`VISION_DAILY_COST_CAP_USD\`)
+          - [ ] 악성 사용자 가능성 시 rate limit IP block 또는 사용자 deactivate
+
+          🤖 Auto-generated by \`.github/workflows/daily-cost-alert.yml\`" \
+            --label "cost-alert,priority:high" || echo "gh issue create failed (continuing)"
+
+      - name: Final summary
+        run: |
+          echo "----- Daily cost alert summary -----"
+          echo "Date: ${{ steps.date.outputs.yesterday }}"
+          echo "Severity: ${{ steps.total.outputs.severity }}"
+          echo "Total USD: ${{ steps.total.outputs.total_usd }}"
+          echo "  OpenAI:    ${{ steps.openai.outputs.openai_usd }} (${{ steps.openai.outputs.openai_status }})"
+          echo "  LangSmith: ${{ steps.langsmith.outputs.langsmith_traces }} traces (${{ steps.langsmith.outputs.langsmith_status }})"

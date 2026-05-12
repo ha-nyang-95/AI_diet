@@ -339,7 +339,22 @@ class R2UploadValidationError(MealImageError):
     title: ClassVar[str] = "Image upload validation failed"
 
 
-class R2NotConfiguredError(MealImageError):
+class StorageNotConfiguredError(MealImageError):
+    """Story 8.5 — Storage provider 환경변수 미설정 시 503 fail-fast 부모 클래스.
+
+    `STORAGE_PROVIDER` env에 따라 R2/Supabase 둘 중 하나가 settings 미설정으로 raise한다.
+    호출처(`meals_images.py`)는 본 부모 class로 catch — 503 + ``meals.image.storage_unconfigured``
+    응답. 카탈로그 backward-compat: 기존 ``R2NotConfiguredError``는 본 클래스의 child로
+    유지되어 R2 분기에서 raise되어도 동일하게 catch + child 코드(``meals.image.r2_unconfigured``)가
+    그대로 응답에 노출(클라이언트 typed handler 회귀 0).
+    """
+
+    status: ClassVar[int] = 503
+    code: ClassVar[str] = "meals.image.storage_unconfigured"
+    title: ClassVar[str] = "Image upload service unavailable"
+
+
+class R2NotConfiguredError(StorageNotConfiguredError):
     """R2 환경변수 4종(`r2_account_id`, `r2_access_key_id`, `r2_secret_access_key`,
     `r2_bucket`) 미설정 시 503 fail-fast — dev/CI 부팅 통과 + 첫 호출 시 차단.
 
@@ -347,10 +362,26 @@ class R2NotConfiguredError(MealImageError):
     `<account_id>.r2.dev/<bucket>` fallback 사용(adapter._resolve_public_url). 즉
     R2 *클라이언트 생성*에 필수는 4종이며, 5번째는 *표시 URL prefix override*만 담당.
     prod에서는 부팅 시 settings 검증으로 조기 차단해야 하나 현재 baseline은 runtime
-    fail-fast(Story 8 hardening 시 부팅 검증 추가)."""
+    fail-fast(Story 8 hardening 시 부팅 검증 추가).
+
+    Story 8.5 — ``StorageNotConfiguredError`` child로 승격(부모 catch도 정합)되었으나
+    ``code``는 ``meals.image.r2_unconfigured`` 유지(기존 클라이언트 typed handler 회귀 0)."""
 
     status: ClassVar[int] = 503
     code: ClassVar[str] = "meals.image.r2_unconfigured"
+    title: ClassVar[str] = "Image upload service unavailable"
+
+
+class SupabaseStorageNotConfiguredError(StorageNotConfiguredError):
+    """Story 8.5 — Supabase Storage 환경변수 3종(`supabase_url`, `supabase_service_key`,
+    `supabase_storage_bucket`) 미설정 시 503 fail-fast.
+
+    ``STORAGE_PROVIDER=supabase`` 분기에서만 raise. dev/CI/test 분기는 R2 디폴트라 본 예외
+    경로 미사용 — Render prod에서 처음 호출 시 차단. ``R2NotConfiguredError`` 패턴 1:1 정합.
+    """
+
+    status: ClassVar[int] = 503
+    code: ClassVar[str] = "meals.image.supabase_unconfigured"
     title: ClassVar[str] = "Image upload service unavailable"
 
 

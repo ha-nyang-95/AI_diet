@@ -1,4 +1,12 @@
-last_updated: 2026-05-11
+last_updated: 2026-05-12
+
+# Story 8.5 review (Anthropic 제거 추가) — Amelia DS 추가 commit (2026-05-12). 사용자 요청으로 dual-LLM router를 OpenAI 단독으로 단순화. 영향: anthropic_adapter.py + test 삭제, llm_router.py 단순화, FeedbackOutput.used_llm Literal에서 'claude'/'claude-haiku-4-5' 제거, alembic 0023(meal_analyses.used_llm CHECK 갱신 + legacy 'claude' row→'gpt-4o-mini' cleanup), pyproject anthropic/langchain-anthropic dep 제거, daily-cost-alert.yml Anthropic step 제거, .env templates + 3종 runbook 정리. pytest 1376 passed / 11 skipped / 0 failed (-3 = anthropic adapter 테스트 삭제).
+
+# Story 8.5 review — Amelia DS 완료 (2026-05-12). in-progress → review. pytest 1379 passed / 11 skipped / 0 failed. ruff/format/mypy 0 errors + web tsc/build 0 errors. 신규 4 파일(`.dockerignore` / `.env.production.example` / `incident-response.md` / `test_supabase_storage.py`) + UPDATE 17개. Storage adapter Supabase 분기 swap(시그니처 보존 4건 + 13 test case), Dockerfile.api multi-stage 빌드(이미지 1.18GB — pyiceberg 회피로 supabase 메타 미사용), Next.js standalone + Suspense 회귀 fix 2건(success/fail page), deployment.md §4.4 + secret-rotation.md §1/§2/§5/§8/§9 + incident-response.md 신규 3종 runbook 완성, daily-cost-alert.yml 실 구현(OpenAI/Anthropic Admin/LangSmith + Discord embed + gh issue + severity 분기), asyncpg pgbouncer transaction mode 호환(`_asyncpg_connect_args`), Sentry prod env 분리(`_validate_jwt_secrets_in_prod`에 `production` 추가). Task 10 사용자 hands-on smoke 검증은 CR 단계로 분리(Render dashboard + Supabase dashboard 권한 필요). web Sentry SDK wiring은 Story 8.4 polish forward. Branch story/8.5-cloud-deploy-render-supabase 머지 후 epic-8 in-progress(첫 진입) 갱신은 CR 종료 직전 1회.
+
+# Story 8.5 in-progress — Amelia DS (2026-05-12). ready-for-dev → in-progress.
+
+# Story 8.5 ready-for-dev — Amelia CS (2026-05-12). epic-8 backlog → in-progress.
 
 # Story 7.4 done — Amelia CR (2026-05-11). epic-7 in-progress → done.
 
@@ -183,11 +191,12 @@ development_status:
   epic-7-retrospective: optional
 
   # Epic 8: 운영·인수인계 패키지 + 영업 자료
-  epic-8: backlog
+  # last_updated: 2026-05-12 (Story 8.5 ready-for-dev — Amelia CS. **Epic 8 첫 진입 스토리(8.1-8.4보다 8.5 우선 시작 — 사용자 결정). 2026-05-12 사용자 결정으로 epics.md AC body 원본 Vercel+Railway+Cloudflare → Render + Supabase 2-서비스 미니멀 패턴 swap**(Railway 무료 tier 2023-08 폐지 + 포트폴리오 데모 비용 $0 우선 + 실 사용자 X). **Render Free**(bn-api.onrender.com FastAPI Docker + bn-web.onrender.com Next.js Node, cold start 30~60초 수용) + **Supabase Free**(Postgres 500MB + pgvector 네이티브 + Storage 1GB, region Seoul/Tokyo). **Redis 생략** — graceful fallback 4경로 활용(slowapi in-memory rate limit / Vision LLM router 캐시 미적용 / subscription_expire.py in-memory lock / Idempotency-Key DB UNIQUE SOT 유지). **Cloudflare 완전 생략** — WAF/R2/도메인 모두 OUT(`.onrender.com` subdomain 그대로). **Storage 추상화 결정 D1**: `api/app/adapters/r2.py` 모듈 SOT 보존하되 내부 분기 — boto3 R2 경로(`STORAGE_PROVIDER=r2`)는 외주 인수 시 옵션 보존, `STORAGE_PROVIDER=supabase` 신규 분기에서 supabase-py SDK 호출. 함수 시그니처 4종(`create_presigned_upload`/`head_object_exists`/`resolve_public_url`/`PresignedUpload` dataclass) + import 경로 모두 변경 0 → 호출처(meals_images.py 등) 변경 0건 invariant. **Story 8.4 사전 의존 분리 D2**: 본 스토리는 *prod 동작 자체*만 책임, 8.4 polish(rate limit Redis backend / LLM 캐시 정교화 / 표준 빈/로딩/에러 화면 / OpenAPI 정리 / 모바일 jest 인프라)는 별도 후속. 8.5에 포함하는 *최소 8.4 hunk*는 Sentry environment 분리 1건만. **Discord vs Slack D3**: Discord webhook 채택(개인 server 생성·webhook 발급 5분 + 무료 영구 메시지 보관 + Sentry/GitHub native 지원). **OAuth 재사용**: 기존 Web client(`559604985813-fi8m...`) 그대로 + 신규 redirect URI `https://bn-web.onrender.com/api/auth/google/callback` 추가 등록 완료(2026-05-12 사용자). iOS/Android client는 변경 0건. **시크릿 재사용**: dev 키 그대로 prod 재사용(포트폴리오 scope) — 인수 시점 분리 발급 SOP를 secret-rotation.md §5/§8에 명시. **신규 의존성 1건**(supabase>=2.0) + **신규 settings 4건**(storage_provider/supabase_url/service_key/bucket) + **신규 env**(Render API 5건 / Render Web 0건 / GitHub Actions Secrets 5건) + **신규 alembic 0건** + **신규 mobile 파일 0건**. **deprecated env**(빈 값으로 두면 graceful): R2_* 5종. **신규 백엔드 변경**: Dockerfile multi-stage build(이미지 size ~40%↓) + r2.py Supabase 분기 + config.py 4 settings + Sentry environment 분리 + asyncpg `prepared_statement_cache_size=0`(Supabase pgbouncer transaction mode 정합). **신규 web 변경**: next.config.ts standalone output. **신규 runbook**: deployment.md §4.4 Render+Supabase 섹션 신설 + secret-rotation.md §1/§2/§5/§8 placeholder 채우기 + incident-response.md 신규(3종 runbook 마지막). **신규 GitHub Actions**: daily-cost-alert.yml 실 구현(OpenAI/Anthropic Usage API + Discord webhook + Sentry custom event + 임계치 초과 시 자동 GitHub Issue + workflow_dispatch 수동 trigger). **신규 `.env.production.example`** 루트 작성(4 섹션). **scope 외 (OUT)**: DF102/DF103 식약처 데이터 보강 / W4 약관 버전 bump SOP / Story 8.4 polish 전체 / 도메인 구매 / Cloudflare 통합 / Toss prod live mode / 모바일 EAS prod build / Multi-replica / Cron 자동 ping. **회귀 invariant**: 기존 meals/analysis/auth/admin/payment/notification 모두 흐름 보존 + alembic 0001~0023 정상 적용(pgvector extension 사전 활성화 필수 — Supabase dashboard) + docker-compose dev 흐름 보존. **사용자 hands-on 완료(2026-05-12)**: Render·Supabase 회원가입 + Google OAuth redirect URI 등록 + Sentry 가입(예정). Branch story/8.5-cloud-deploy-render-supabase(master 분기 완료). Status: backlog → ready-for-dev. epic-8: backlog → in-progress.)
+  epic-8: in-progress
   8-1-sop-4종-작성: backlog
   8-2-faq-5종-영업-답변: backlog
   8-3-readme-agents-인수인계: backlog
   8-4-운영-polish-sentry-swagger-rate-limit: backlog
-  8-5-클라우드-배포-hardening-runbook: backlog
+  8-5-클라우드-배포-hardening-runbook: review
   8-6-데모-영상-포트폴리오-영업-패키지: backlog
   epic-8-retrospective: optional

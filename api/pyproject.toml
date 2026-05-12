@@ -10,7 +10,6 @@ dependencies = [
     "langgraph>=1.1.9",
     "langchain>=0.3",
     "langchain-openai>=0.3",
-    "langchain-anthropic>=0.3",
     # Story 3.3 — AsyncPostgresSaver API는 3.x에서 안정 (lock 3.0.5 정합). 외주 인수
     # readiness — 2.x는 deprecated 신호.
     "langgraph-checkpoint-postgres>=3.0",
@@ -48,12 +47,19 @@ dependencies = [
     "sse-starlette>=2.2",
     "google-auth>=2.36",
     "boto3>=1.36",
+    # Story 8.5 — Supabase Storage 직접 SDK(`storage3`). R2 adapter Supabase 분기 swap.
+    # 시그니처 유지(`create_presigned_upload`/`head_object_exists`/`resolve_public_url`)하고
+    # 내부 구현만 분기 — 호출처(`meals_images.py` 등) 변경 0. dev는 `STORAGE_PROVIDER=r2`
+    # 디폴트(외주 인수 옵션 보존), prod(Render)는 `STORAGE_PROVIDER=supabase`로 분기.
+    # 상한 `<2.26`: 2.26부터 `pyiceberg`(>200MB) transitive dep 추가 → Render Free
+    # 이미지 size 폭증 회피. supabase 메타패키지(`supabase>=2.x`) 대신 `storage3` 직접
+    # 사용 — auth/realtime/postgrest/functions 등 미사용 서브패키지 제외.
+    "storage3>=2.20,<2.26",
     # --- LLM Vision (Story 2.3 — OpenAI Vision OCR / structured outputs) ---
     "openai>=1.55",
-    # Story 3.6 — 듀얼 LLM router 보조 SDK. `langchain-anthropic` transitive에서
-    # *명시 직접 의존성*으로 승격 — Story 3.3 `psycopg[binary,pool]` 패턴 정합.
-    # SDK 통제권(structured outputs prompt 패턴) + 외주 인수 dependency tree 명확.
-    "anthropic>=0.40",
+    # Story 8.5 — Anthropic SDK 제거. 이전 Story 3.6의 dual-LLM router는 포트폴리오 scope에서
+    # 단일 provider(OpenAI) + tenacity 3회 retry로 단순화 — `anthropic`/`langchain-anthropic`
+    # transitive dep 모두 폐지.
     # Story 4.2 — Expo Push API 서버 측 어댑터 SDK. expo-community maintained.
     # `PushClient(session=Session(), access_token=...)` + `publish_multiple([PushMessage])`
     # + `get_receipts([ticket_id])` 3 핵심 API. SDK 내부 100건 chunking 자동.
@@ -103,7 +109,7 @@ plugins = ["pydantic.mypy"]
 mypy_path = "."
 
 [[tool.mypy.overrides]]
-module = ["jose.*", "passlib.*", "pgvector.*", "slowapi.*", "apscheduler.*", "google.*", "boto3.*", "botocore.*", "pypdf.*", "bs4.*", "langchain_text_splitters.*", "yaml.*", "psycopg.*", "psycopg_pool.*", "exponent_server_sdk.*", "requests.*"]
+module = ["jose.*", "passlib.*", "pgvector.*", "slowapi.*", "apscheduler.*", "google.*", "boto3.*", "botocore.*", "pypdf.*", "bs4.*", "langchain_text_splitters.*", "yaml.*", "psycopg.*", "psycopg_pool.*", "exponent_server_sdk.*", "requests.*", "storage3.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

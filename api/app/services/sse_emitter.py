@@ -32,7 +32,7 @@ from app.core.exceptions import ProblemDetail
 from app.graph.state import Citation, ClarificationOption
 
 _FitScoreLabel = Literal["allergen_violation", "low", "moderate", "good", "excellent"]
-_UsedLLM = Literal["gpt-4o-mini", "claude", "stub"]
+_UsedLLM = Literal["gpt-4o-mini", "gpt-4o", "stub"]
 
 
 class AnalysisDonePayload(BaseModel):
@@ -46,7 +46,8 @@ class AnalysisDonePayload(BaseModel):
       MealMacros SOT 정의).
     - ``feedback_text``: full LLM 본문(UI 단일 표시 + 영속화 입력).
     - ``citations_count``: 별 ``event: citation`` emit 수 검증용 보조 필드.
-    - ``used_llm``: 라우터/dual-LLM 결정 추적(`gpt-4o-mini`/`claude`/`stub` 3-way).
+    - ``used_llm``: 라우터 결정 추적(`gpt-4o-mini`/`gpt-4o`/`stub` 3-way — Story 8.5에서
+      Anthropic fallback 제거 후 OpenAI 단독).
 
     ``frozen=True``로 응답 directly mutate 차단. ``extra="forbid"``로 미정 필드 leak 차단.
     """
