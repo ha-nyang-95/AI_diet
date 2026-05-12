@@ -33,10 +33,12 @@
 | 외부 의존성 | 상태 페이지 | 평균 회복 시간 |
 |----------|----------|-------------|
 | OpenAI | https://status.openai.com | 30분~2시간 |
-| Anthropic | https://status.anthropic.com | 30분~2시간 |
 | Google OAuth | https://www.google.com/appsstatus/dashboard/ | 30분~수시간 |
 | Supabase | https://status.supabase.com | 1~6시간 |
 | Render | https://status.render.com | 30분~3시간 |
+
+> Story 8.5 갱신: Anthropic 의존성 제거로 OpenAI 단독 운영. OpenAI 장애 시 fallback LLM 없음
+> → 분석 흐름 503(`LLMRouterExhaustedError`) + safe fallback 텍스트로 graceful 응답.
 
 ### 1.1. 1차 대응
 
@@ -47,12 +49,13 @@
 
 ### 1.2. 2차 안정화 (graceful fallback 활성)
 
-- **OpenAI 장애** — LLM router는 dual-LLM 패턴이라 Anthropic으로 *자동 fallback*. 우리 측 추가
-  조작 불필요. 단, OCR Vision은 *OpenAI 전용*이라 사진 분석 503. 사용자에게 "텍스트로 다시
-  입력해주세요" 안내(graceful UX 정합 — `MealOCRUnavailableError` 503 응답이 모바일에 알림).
-- **Anthropic 장애** — OpenAI primary 단독 가동. fallback 단락 — 사용자 영향 0(분석 흐름은 정상).
-- **양 LLM 동시 장애** — `LLMRouterExhaustedError` 503. 사용자 안내 "AI 서비스 일시 장애".
-  단순 식단 입력 + 매크로 합산은 정상 동작(LLM 없는 부분).
+- **OpenAI 장애** (Story 8.5 갱신 — Anthropic fallback 제거) — LLM router는 tenacity 3회
+  retry 후 `LLMRouterExhaustedError` 503 raise. `generate_feedback` 노드가 safe fallback
+  텍스트("AI 서비스 일시 장애가 발생해 식사 분석을 마치지 못했습니다") 반환 → 사용자에게는
+  graceful 응답. OCR Vision도 동일 OpenAI라 사진 분석 503 → 모바일에 "텍스트로 다시 입력해
+  주세요" 안내.
+  - 단순 식단 입력 + 매크로 합산 + 가이드라인 RAG 검색은 LLM 없이 정상 동작.
+  - 데모 시점이면 §1.5 사전 안내 SOP 진입.
 - **Google OAuth 장애** — 신규 가입/재로그인 차단. 기존 활성 세션(JWT)은 정상 → 활성 사용자
   영향 0. 사용자에게 안내 "로그인 일시 장애 — 잠시 후 재시도".
 - **Supabase 장애** — DB 측 503. §2 시나리오로 진입.
@@ -263,7 +266,6 @@ Render dashboard → `bn-api` → `Environment` → 다음 env var 추가/조정
 | 서비스 | support 채널 | 회복 자료 |
 |-------|------------|----------|
 | OpenAI | https://help.openai.com / support@openai.com | https://platform.openai.com/docs |
-| Anthropic | https://support.anthropic.com | https://docs.anthropic.com |
 | Google OAuth | https://cloud.google.com/support | https://developers.google.com/identity/protocols/oauth2 |
 | Supabase | https://supabase.com/support | https://supabase.com/docs |
 | Render | https://render.com/help | https://render.com/docs |

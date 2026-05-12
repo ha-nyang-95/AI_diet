@@ -9,7 +9,7 @@
 | 카테고리 | secret 이름 | 발급처 | 회전 주기 | 본 문서 단락 |
 |---------|------------|-------|----------|------------|
 | LLM | `OPENAI_API_KEY` | OpenAI Platform | 분기 1회 | §1 |
-| LLM | `ANTHROPIC_API_KEY` | Anthropic Console | 분기 1회 | §2 |
+| ~~LLM~~ | ~~`ANTHROPIC_API_KEY`~~ | ~~Anthropic Console~~ | **Story 8.5 폐기** | ~~§2~~ |
 | 옵저버빌리티 | `LANGSMITH_API_KEY` | LangSmith UI | 분기 1회 | §3 (Story 3.8) |
 | Push | `EXPO_ACCESS_TOKEN` | EAS Console | 6개월 | §4 (Story 4.2) |
 | OAuth | `GOOGLE_OAUTH_CLIENT_SECRET` | Google Console | 6개월 | §5 (Story 8.5) |
@@ -74,52 +74,14 @@ OpenAI Platform에서 발급된 API key. `OPENAI_API_KEY` env가 LLM router(`cal
 
 ---
 
-## 2. Anthropic API key 회전 (Story 8.5)
+## 2. ~~Anthropic API key 회전~~ — **Story 8.5에서 폐기**
 
-Anthropic Console에서 발급된 API key. `ANTHROPIC_API_KEY` env가 LLM router 보조 SDK
-(`call_claude_feedback`) 1곳에서 사용. GitHub Actions `daily-cost-alert.yml`은 별도
-`ANTHROPIC_ADMIN_API_KEY` 사용(usage 조회 admin scope). 분기 1회 회전.
+**deprecated** — Story 8.5에서 dual-LLM router를 OpenAI 단독으로 단순화하며 Anthropic 의존성
+제거. `ANTHROPIC_API_KEY`와 `ANTHROPIC_ADMIN_API_KEY` 모두 더 이상 사용 X. Render env vars +
+GitHub Actions Secrets에서 *제거 권장*(보존해도 무해하나 운영 가시성 ↓).
 
-### 2.1. 신규 key 발급
-
-1. [Anthropic Console](https://console.anthropic.com) 운영자 계정으로 로그인.
-2. `Settings` → `API Keys` → `+ Create Key`.
-3. key 이름: `balancenote-prod-2026-Q3` 등 *환경+분기* 명명. workspace: 본 가맹점.
-4. 발급된 `sk-ant-...` key를 *임시 보안 노트*에 복사.
-
-### 2.2. Render env vars 갱신 + 24h overlap
-
-1. Render dashboard → `bn-api` service → `Environment` → `ANTHROPIC_API_KEY` → 신규 key 붙여넣기 → `Save Changes`.
-2. **자동 재배포 1~2분 대기** — `/healthz` 200 OK 확인.
-3. **24h overlap** — Anthropic은 새 key 발급 시 기존 key 즉시 무효화하지 않음. revoke 시점까지 둘 다 valid.
-
-### 2.3. 도착 검증
-
-1. 분석 1회 호출 (Claude fallback 분기 발동 시나리오 — OpenAI quota 임시 차단 또는 Anthropic
-   model 명시 호출).
-2. Sentry breadcrumb에 `llm_router.anthropic.completion` 정상 로그 확인.
-3. LangSmith dashboard → `claude-` model trace 도착 확인.
-
-### 2.4. 기존 key revoke
-
-1. §2.3 검증 통과 + 24h overlap 후 Anthropic Console → `API Keys` → 기존 key → `Disable`.
-2. 5분간 Sentry 모니터링 — `anthropic.AuthenticationError` 0건 확인.
-
-### 2.5. rollback (장애 시)
-
-신규 key 적용 후 `401 Unauthorized` 다발 시:
-
-1. 기존 key가 disable 전이라면 Render env vars 복구 → 자동 재배포.
-2. disable 완료 시 Anthropic Console에서 재 발급 → §2.2-§2.3 재실행.
-3. 회복 불가 시 `ANTHROPIC_API_KEY=`(빈 값)으로 강등 — Anthropic fallback 단락 + OpenAI
-   primary 단독 가동(LLM router 양 손실은 `LLMRouterExhaustedError(503)`).
-
-### 2.6. 변경 트리거
-
-- 운영자 퇴사 / 권한 변경.
-- key leak 의심.
-- 3개월 정기 회전.
-- Anthropic 측 정책 변경(Claude 4.x prompt caching 권한 분리 등).
+복원 시점에는 §1 OpenAI 회전 SOP를 mirroring하여 본 단락을 재작성 — `app/adapters/anthropic_adapter.py`
+복원 + `pyproject.toml`에 `anthropic` dep 재추가 + `llm_router.py`에 fallback 분기 재도입.
 
 ---
 
@@ -447,7 +409,7 @@ Story 8.5 OUT) 트리거.
 | 회전 주기 | secret | 다음 회전 (예) | 단락 |
 |----------|-------|--------------|------|
 | **분기 (3개월)** | `OPENAI_API_KEY` | 2026-08-12, 2026-11-12, 2027-02-12... | §1 |
-| **분기 (3개월)** | `ANTHROPIC_API_KEY` | 2026-08-12, 2026-11-12... | §2 |
+| ~~**분기 (3개월)**~~ | ~~`ANTHROPIC_API_KEY`~~ | **Story 8.5 폐기** | ~~§2~~ |
 | **분기 (3개월)** | `LANGSMITH_API_KEY` | 2026-08-12, 2026-11-12... | §3 |
 | **6개월** | `EXPO_ACCESS_TOKEN` | 2026-11-12 | §4 |
 | **6개월** | `GOOGLE_OAUTH_CLIENT_SECRET` | 2026-11-12 | §5 |

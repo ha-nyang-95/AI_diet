@@ -10,7 +10,6 @@ dependencies = [
     "langgraph>=1.1.9",
     "langchain>=0.3",
     "langchain-openai>=0.3",
-    "langchain-anthropic>=0.3",
     # Story 3.3 — AsyncPostgresSaver API는 3.x에서 안정 (lock 3.0.5 정합). 외주 인수
     # readiness — 2.x는 deprecated 신호.
     "langgraph-checkpoint-postgres>=3.0",
@@ -58,10 +57,9 @@ dependencies = [
     "storage3>=2.20,<2.26",
     # --- LLM Vision (Story 2.3 — OpenAI Vision OCR / structured outputs) ---
     "openai>=1.55",
-    # Story 3.6 — 듀얼 LLM router 보조 SDK. `langchain-anthropic` transitive에서
-    # *명시 직접 의존성*으로 승격 — Story 3.3 `psycopg[binary,pool]` 패턴 정합.
-    # SDK 통제권(structured outputs prompt 패턴) + 외주 인수 dependency tree 명확.
-    "anthropic>=0.40",
+    # Story 8.5 — Anthropic SDK 제거. 이전 Story 3.6의 dual-LLM router는 포트폴리오 scope에서
+    # 단일 provider(OpenAI) + tenacity 3회 retry로 단순화 — `anthropic`/`langchain-anthropic`
+    # transitive dep 모두 폐지.
     # Story 4.2 — Expo Push API 서버 측 어댑터 SDK. expo-community maintained.
     # `PushClient(session=Session(), access_token=...)` + `publish_multiple([PushMessage])`
     # + `get_receipts([ticket_id])` 3 핵심 API. SDK 내부 100건 chunking 자동.

@@ -64,9 +64,9 @@ from app.rag.guidelines.search import search_guideline_chunks
 
 log = structlog.get_logger()
 
-# Story 3.9 AC13 — used_llm Literal 확장 정합. router._resolve_used_llm 매핑 결과를
-# 그대로 수용 — env override 시 ``"gpt-4o"`` / ``"claude-haiku-4-5"``도 valid label.
-_VALID_USED_LLM_LABELS = frozenset({"gpt-4o-mini", "gpt-4o", "claude-haiku-4-5", "claude", "stub"})
+# Story 8.5 — Anthropic 제거 후 used_llm Literal 정리. router._resolve_used_llm 매핑 결과
+# 와 정합. env override 시 ``"gpt-4o"``도 valid label.
+_VALID_USED_LLM_LABELS = frozenset({"gpt-4o-mini", "gpt-4o", "stub"})
 
 
 # ---------------------------------------------------------------------------

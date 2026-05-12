@@ -77,7 +77,6 @@ class Settings(BaseSettings):
 
     # --- LLM ---
     openai_api_key: str = ""
-    anthropic_api_key: str = ""
 
     # --- LangSmith ---
     langsmith_api_key: str = ""
@@ -100,20 +99,18 @@ class Settings(BaseSettings):
     # 변수 ``CLARIFICATION_MAX_OPTIONS`` override 가능.
     clarification_max_options: int = 4
 
-    # --- Dual-LLM router (Story 3.6) ---
+    # --- LLM router (Story 3.6 — Story 8.5에서 OpenAI 단독으로 단순화) ---
     # 메인 LLM — OpenAI ``gpt-4o-mini`` (cost 1/15 vs ``gpt-4o``, 한국어 coaching 톤
     # 충분). Story 3.8 LangSmith eval 결과 기반 ``gpt-4o`` 또는 ``gpt-4.1`` 승격 검토
-    # 가능 — env override만으로 전환.
+    # 가능 — env override만으로 전환. Story 8.5: Anthropic fallback 제거(포트폴리오 scope
+    # 단일 provider 운영) — ``llm_fallback_model`` 필드 폐기.
     llm_main_model: str = "gpt-4o-mini"
-    # 보조 LLM — Anthropic ``claude-haiku-4-5-20251001`` (2026-05 시점 최신 Haiku, cost/
-    # latency 균형 우선). Story 3.8 eval 결과로 Sonnet 4.6 승격 검토 가능.
-    llm_fallback_model: str = "claude-haiku-4-5-20251001"
     # Redis LLM 캐시 TTL — FR43 baseline 24h(86400s). cost 폭발 차단(동일 식단+프로필
     # 재호출 시 LLM 0회).
     llm_cache_ttl_seconds: int = 86400
-    # Router 전체 wall-time 예산 (CR MJ-22) — 초기 호출 + 최대 3회 regen +
-    # OpenAI 3-attempt + Anthropic 3-attempt × 30s SDK timeout 누적이 worst-case
-    # ~189s에 달함. ``asyncio.wait_for`` outer deadline로 차단(p95 mobile 4s 정합).
+    # Router 전체 wall-time 예산 — 초기 호출 + 최대 3회 regen + OpenAI 3-attempt × 30s SDK
+    # timeout 누적이 worst-case ~99s에 달함. ``asyncio.wait_for`` outer deadline로 차단
+    # (p95 mobile 4s 정합).
     llm_router_total_budget_seconds: int = 25
 
     # --- Vision 비용·캐시·결정성 (Story 3.9 AC6, AC7) ---

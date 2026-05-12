@@ -1,5 +1,5 @@
 # Daily LLM cost alert (Story 8.5 AC4)
-# - OpenAI / Anthropic / LangSmith Usage API에서 어제 KST 비용 합산.
+# - OpenAI / LangSmith Usage API에서 어제 KST 비용 합산 (Story 8.5 갱신: Anthropic 제거).
 # - 임계치 초과 시 Discord webhook + GitHub Issue 자동 생성.
 # - 매일 KST 09:00(UTC 00:00) + 수동 trigger(`workflow_dispatch`).
 # - 각 API 실패는 fallback message로 격리(workflow는 success exit + 다음 cron 보장).
@@ -19,7 +19,6 @@ jobs:
       contents: read
     env:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      ANTHROPIC_ADMIN_API_KEY: ${{ secrets.ANTHROPIC_ADMIN_API_KEY }}
       LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
       DISCORD_COST_WEBHOOK_URL: ${{ secrets.DISCORD_COST_WEBHOOK_URL }}
       SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
@@ -54,28 +53,6 @@ jobs:
           echo "openai_status=ok" >> "$GITHUB_OUTPUT"
           echo "OpenAI USD: $USD"
 
-      - name: Query Anthropic Usage Report (admin API)
-        id: anthropic
-        run: |
-          if [ -z "$ANTHROPIC_ADMIN_API_KEY" ]; then
-            echo "anthropic_usd=0" >> "$GITHUB_OUTPUT"
-            echo "anthropic_status=skipped (no key)" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # Anthropic Admin API — organization usage. Beta endpoint.
-          # 응답 schema가 public/beta 단계라 변동 가능 — graceful skip on 4xx/error.
-          RESPONSE=$(curl -sS -m 30 \
-            -H "x-api-key: $ANTHROPIC_ADMIN_API_KEY" \
-            -H "anthropic-version: 2023-06-01" \
-            "https://api.anthropic.com/v1/organizations/usage_report/messages?starting_at=${{ steps.date.outputs.yesterday }}T00:00:00Z" || echo '{}')
-          # Best-effort: data[].results[].uncached_input_tokens 등 합산은 비용 산정 복잡.
-          # baseline: cost_in_usd 필드 sum (없으면 0).
-          USD=$(echo "$RESPONSE" | jq -r '[.. | objects | .cost_in_usd? // 0 | tonumber? // 0] | add // 0' 2>/dev/null || echo "0")
-          USD=$(awk "BEGIN { printf \"%.4f\", $USD }")
-          echo "anthropic_usd=$USD" >> "$GITHUB_OUTPUT"
-          echo "anthropic_status=ok" >> "$GITHUB_OUTPUT"
-          echo "Anthropic USD: $USD"
-
       - name: Query LangSmith trace count
         id: langsmith
         run: |
@@ -101,8 +78,7 @@ jobs:
         id: total
         run: |
           OAI="${{ steps.openai.outputs.openai_usd }}"
-          ANT="${{ steps.anthropic.outputs.anthropic_usd }}"
-          TOTAL=$(awk "BEGIN { printf \"%.4f\", $OAI + $ANT }")
+          TOTAL=$(awk "BEGIN { printf \"%.4f\", $OAI }")
           echo "total_usd=$TOTAL" >> "$GITHUB_OUTPUT"
 
           # severity: critical (>= CRITICAL_USD) > warning (>= THRESHOLD_USD) > ok.
@@ -134,8 +110,6 @@ jobs:
             --arg total "${{ steps.total.outputs.total_usd }}" \
             --arg openai "${{ steps.openai.outputs.openai_usd }}" \
             --arg openai_status "${{ steps.openai.outputs.openai_status }}" \
-            --arg anthropic "${{ steps.anthropic.outputs.anthropic_usd }}" \
-            --arg anthropic_status "${{ steps.anthropic.outputs.anthropic_status }}" \
             --arg langsmith "${{ steps.langsmith.outputs.langsmith_traces }}" \
             --arg langsmith_status "${{ steps.langsmith.outputs.langsmith_status }}" \
             --arg emoji "$EMOJI" \
@@ -150,7 +124,6 @@ jobs:
                 fields: [
                   {name: "Total USD", value: ("$" + $total), inline: true},
                   {name: "OpenAI", value: ("$" + $openai + " (" + $openai_status + ")"), inline: true},
-                  {name: "Anthropic", value: ("$" + $anthropic + " (" + $anthropic_status + ")"), inline: true},
                   {name: "LangSmith traces", value: ($langsmith + " (" + $langsmith_status + ")"), inline: true}
                 ],
                 timestamp: (now | strftime("%Y-%m-%dT%H:%M:%SZ"))
@@ -191,7 +164,6 @@ jobs:
           - **Date**: ${{ steps.date.outputs.yesterday }} (KST)
           - **Total**: \$${{ steps.total.outputs.total_usd }}
           - **OpenAI**: \$${{ steps.openai.outputs.openai_usd }} (${{ steps.openai.outputs.openai_status }})
-          - **Anthropic**: \$${{ steps.anthropic.outputs.anthropic_usd }} (${{ steps.anthropic.outputs.anthropic_status }})
           - **LangSmith traces**: ${{ steps.langsmith.outputs.langsmith_traces }} (${{ steps.langsmith.outputs.langsmith_status }})
 
           ## Threshold
@@ -214,5 +186,4 @@ jobs:
           echo "Severity: ${{ steps.total.outputs.severity }}"
           echo "Total USD: ${{ steps.total.outputs.total_usd }}"
           echo "  OpenAI:    ${{ steps.openai.outputs.openai_usd }} (${{ steps.openai.outputs.openai_status }})"
-          echo "  Anthropic: ${{ steps.anthropic.outputs.anthropic_usd }} (${{ steps.anthropic.outputs.anthropic_status }})"
           echo "  LangSmith: ${{ steps.langsmith.outputs.langsmith_traces }} traces (${{ steps.langsmith.outputs.langsmith_status }})"

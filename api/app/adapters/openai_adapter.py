@@ -903,7 +903,8 @@ _FEEDBACK_TEMPERATURE: Final[float] = 0.3
 
 
 _FEEDBACK_MAX_TOKENS: Final[int] = 1024
-"""인용 + ## 평가 + ## 다음 행동 섹션 수용 — Anthropic 어댑터와 동일."""
+"""인용 + ## 평가 + ## 다음 행동 섹션 수용 — Story 8.5에서 Anthropic 어댑터 폐기 후 OpenAI
+단독 router의 유일한 token cap."""
 
 
 @retry(
@@ -978,14 +979,15 @@ async def call_openai_feedback(
         # CR MJ-12 — `_get_client()`의 cross-domain 예외를 router의 typed 예외로 변환.
         raise LLMRouterUnavailableError("openai.feedback.client_init_failed") from exc
     except (openai.AuthenticationError, openai.PermissionDeniedError) as exc:
-        # CR D1 — 영구 인증/권한 오류 → router가 Anthropic fallback 발동하도록 typed 변환.
+        # 영구 인증/권한 오류 → router가 LLMRouterExhaustedError로 변환 (Story 8.5: Anthropic
+        # fallback 제거 후 단일 provider라 retry 의미 없음).
         raise LLMRouterUnavailableError(f"openai.feedback.{type(exc).__name__}") from exc
     except (
         openai.BadRequestError,
         openai.NotFoundError,
         openai.UnprocessableEntityError,
     ) as exc:
-        # CR D1 — 요청 페이로드/모델 영구 오류 → fallback 발동.
+        # 요청 페이로드/모델 영구 오류 → router exhausted 신호.
         raise LLMRouterPayloadInvalidError(f"openai.feedback.{type(exc).__name__}") from exc
     except ValidationError as exc:
         # SDK 자동 Pydantic 역직렬화 시 schema 위반 — 영구 오류.

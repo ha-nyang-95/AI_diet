@@ -141,7 +141,7 @@ class AdminMealAnalysisInline(BaseModel):
     fit_score: int
     fit_score_label: Literal["allergen_violation", "low", "moderate", "good", "excellent"]
     feedback_summary: str
-    used_llm: Literal["gpt-4o-mini", "claude", "stub"]
+    used_llm: Literal["gpt-4o-mini", "gpt-4o", "stub"]
 
 
 class AdminMealItem(BaseModel):
@@ -173,7 +173,7 @@ class AdminMealAnalysisItem(BaseModel):
     fit_score_label: Literal["allergen_violation", "low", "moderate", "good", "excellent"]
     fit_reason: Literal["ok", "allergen_violation", "incomplete_data"]
     feedback_summary: str
-    used_llm: Literal["gpt-4o-mini", "claude", "stub"]
+    used_llm: Literal["gpt-4o-mini", "gpt-4o", "stub"]
     created_at: datetime
     updated_at: datetime
 

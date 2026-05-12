@@ -454,7 +454,8 @@ async def test_cache_hit_zero_llm_calls(
                 text="## 평가\n좋습니다. (출처: 식약처, X, 2020)\n## 다음 행동\n물",
                 cited_chunk_indices=[0],
             ),
-            "claude",
+            # Story 8.5 — Anthropic 제거 후 OpenAI 단독 router. cache hit 라벨도 valid OpenAI 모델.
+            "gpt-4o-mini",
             True,
         )
 
@@ -463,7 +464,7 @@ async def test_cache_hit_zero_llm_calls(
 
     out = await generate_feedback(base_state, deps=fake_deps)
     fb = out["feedback"]
-    assert fb["used_llm"] == "claude"
+    assert fb["used_llm"] == "gpt-4o-mini"
     assert call_count["n"] == 1  # router 1회 호출 — 내부에서 cache hit 처리
 
 

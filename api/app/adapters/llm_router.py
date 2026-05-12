@@ -1,16 +1,17 @@
-"""Story 3.6 — 듀얼 LLM router (OpenAI primary + Anthropic fallback + Redis cache, AC8/AC9/AC10).
+"""Story 3.6 (Story 8.5 갱신) — LLM router: OpenAI 단독 + Redis cache + tenacity retry.
 
-설계 (architecture line 199, 528 정합):
+설계:
 1. Redis 캐시 lookup (`cache_key`/`redis` 둘 다 non-None) → hit 시 LLM 호출 0회.
-2. OpenAI `gpt-4o-mini` primary 호출 (3회 backoff). 실패 시 Anthropic fallback 진입.
-3. Anthropic `claude-haiku-4-5-20251001` fallback (3회 backoff). 실패 시 양쪽 exhausted —
-   Sentry capture_message + ``LLMRouterExhaustedError`` raise.
-4. LLM 성공 시 Redis 캐시 write (graceful — 실패 시 log warning + 진행).
-5. 전체 호출은 ``asyncio.wait_for(settings.llm_router_total_budget_seconds=25)`` outer
-   deadline로 wrapping (CR MJ-7+MJ-22 — 30s × 3 × 2 = 189s worst-case 차단).
+2. OpenAI `gpt-4o-mini` primary 호출 (3회 backoff, ``call_openai_feedback`` 내부 tenacity).
+   영구 실패 시 ``LLMRouterExhaustedError`` raise (이전 Anthropic fallback 분기는 Story 8.5
+   에서 제거 — 포트폴리오 scope에서 단일 provider 운영).
+3. LLM 성공 시 Redis 캐시 write (graceful — 실패 시 log warning + 진행).
+4. 전체 호출은 ``asyncio.wait_for(settings.llm_router_total_budget_seconds=25)`` outer
+   deadline로 wrapping.
 
 반환 3-tuple ``(FeedbackLLMOutput, used_llm_label, cache_hit)``. ``used_llm_label`` ∈
-``{"gpt-4o-mini", "claude"}`` (cache hit 시 캐시 생성 시점의 라벨 보존).
+``{"gpt-4o-mini", "gpt-4o", "stub"}`` (cache hit 시 캐시 생성 시점의 라벨 보존 — legacy
+``"claude"``/``"claude-haiku-4-5"`` 캐시 row는 graceful miss로 떨어지고 새 OpenAI 호출).
 
 NFR-S5 — prompt / response 본문 raw 출력 X. used_llm + cache_hit + latency_ms만.
 """
@@ -25,12 +26,6 @@ from typing import TYPE_CHECKING, Final
 import sentry_sdk
 import structlog
 
-from app.adapters.anthropic_adapter import (
-    _TRANSIENT_RETRY_TYPES as _ANTHROPIC_TRANSIENT,
-)
-from app.adapters.anthropic_adapter import (
-    call_claude_feedback,
-)
 from app.adapters.openai_adapter import (
     _TRANSIENT_RETRY_TYPES as _OPENAI_TRANSIENT,
 )
@@ -51,39 +46,24 @@ if TYPE_CHECKING:
 log = structlog.get_logger(__name__)
 
 
-# CR MJ-1+MJ-12 — `RetryError`는 `reraise=True` adapter에서 raise되지 않음(dead code 제거).
-# `MealOCRUnavailableError` cross-domain 예외는 openai_adapter boundary에서
-# `LLMRouterUnavailableError`로 translate (CR D1 정합) → router는 typed router 예외와
-# transient subset만 catch.
+# OpenAI 호출에서 router가 catch할 예외 set — adapter boundary에서 typed로 변환된 것만.
 _OPENAI_HANDLED_TYPES: Final[tuple[type[BaseException], ...]] = (
     LLMRouterUnavailableError,
     LLMRouterPayloadInvalidError,
     *_OPENAI_TRANSIENT,
 )
-_ANTHROPIC_HANDLED_TYPES: Final[tuple[type[BaseException], ...]] = (
-    LLMRouterUnavailableError,
-    LLMRouterPayloadInvalidError,
-    *_ANTHROPIC_TRANSIENT,
-)
 
-# Story 3.9 AC13 — used_llm Literal 확장 + env override 정확 attribution.
-# `_USED_LLM_OPENAI` / `_USED_LLM_CLAUDE`는 *baseline default* — env override 시
-# `_resolve_used_llm`이 raw model string을 Literal에 매핑.
+# Story 8.5 — Anthropic 제거 후 OpenAI 단독 라벨 set. legacy ``"claude"``/``"claude-haiku-4-5"``
+# 라벨은 캐시 row에서 *역호환 read*만 허용 (graceful miss로 처리 — 사용자 입력 직후 새 LLM 호출).
 _USED_LLM_OPENAI: Final[str] = "gpt-4o-mini"
-_USED_LLM_CLAUDE: Final[str] = "claude"
-_VALID_USED_LLM_LABELS: Final[frozenset[str]] = frozenset(
-    {"gpt-4o-mini", "gpt-4o", "claude-haiku-4-5", "claude", "stub"}
-)
+_VALID_USED_LLM_LABELS: Final[frozenset[str]] = frozenset({"gpt-4o-mini", "gpt-4o", "stub"})
 
 
 def _resolve_used_llm(model: str) -> str:
-    """``settings.llm_main_model``/``llm_fallback_model`` raw string → Literal 매핑.
+    """``settings.llm_main_model`` raw string → Literal 매핑.
 
-    매핑 규칙:
     - ``"gpt-4o-mini"`` 또는 ``"gpt-4o-mini-*"`` → ``"gpt-4o-mini"`` (snapshot pin 호환).
     - ``"gpt-4o"`` 또는 ``"gpt-4o-*"`` (mini 미포함) → ``"gpt-4o"``.
-    - ``"claude-haiku-4-5*"`` → ``"claude-haiku-4-5"``.
-    - 그 외 ``claude*`` → ``"claude"`` (기존 캐시 row 호환).
     - 매칭 실패 → ``"stub"`` (LangSmith trace에서 mismatch 식별 가능).
     """
     if not model:
@@ -93,15 +73,11 @@ def _resolve_used_llm(model: str) -> str:
         return "gpt-4o-mini"
     if lowered.startswith("gpt-4o"):
         return "gpt-4o"
-    if lowered.startswith("claude-haiku-4-5"):
-        return "claude-haiku-4-5"
-    if lowered.startswith("claude"):
-        return "claude"
     return "stub"
 
 
-# CR mn-5 — Redis network partition 시 indefinite hang 차단. ``redis.get``/``redis.set``
-# 자체 timeout이 SDK 레벨에서 보장되지 않을 수 있어 router 차원에서 명시적 cap.
+# Redis network partition 시 indefinite hang 차단. ``redis.get``/``redis.set`` 자체 timeout이
+# SDK 레벨에서 보장되지 않을 수 있어 router 차원에서 명시적 cap.
 _REDIS_OP_TIMEOUT_SECONDS: Final[float] = 2.0
 
 
@@ -110,9 +86,9 @@ async def _try_cache_get(
 ) -> tuple[FeedbackLLMOutput, str] | None:
     """캐시 lookup — graceful (예외 시 None 반환 + log warning).
 
-    CR MJ-4 — ``used_llm`` 필드를 ``_VALID_USED_LLM_LABELS``로 validate. cache poisoning /
-    schema drift 시 ValidationError로 노드가 폭발하지 않도록 graceful miss로 fallthrough.
-    CR mn-5 — ``redis.get`` 자체에 ``asyncio.wait_for`` 외부 timeout 적용.
+    ``used_llm`` 필드를 ``_VALID_USED_LLM_LABELS``로 validate. cache poisoning / schema drift
+    시 ValidationError로 노드가 폭발하지 않도록 graceful miss로 fallthrough. legacy ``"claude"``
+    / ``"claude-haiku-4-5"`` 캐시 row는 *invalid label*로 미스 처리되어 새 OpenAI 호출.
     """
     try:
         cached_raw = await asyncio.wait_for(redis.get(cache_key), timeout=_REDIS_OP_TIMEOUT_SECONDS)
@@ -126,7 +102,6 @@ async def _try_cache_get(
         output = FeedbackLLMOutput.model_validate(payload["output"])
         used_llm = payload["used_llm"]
     except Exception as exc:  # noqa: BLE001
-        # 캐시 corruption 또는 schema drift — graceful miss.
         log.warning("llm_router.cache_deserialize_failed", error=type(exc).__name__)
         return None
     if not isinstance(used_llm, str) or used_llm not in _VALID_USED_LLM_LABELS:
@@ -144,12 +119,7 @@ async def _try_cache_set(
     output: FeedbackLLMOutput,
     used_llm: str,
 ) -> bool:
-    """캐시 write — graceful. 성공 시 True / 실패 시 False (log warning).
-
-    CR mn-4 — ``ensure_ascii=False`` 적용 → 한국어 본문이 ``\\uXXXX`` 이스케이프되어 cache
-    value ~3× 부풀던 회귀 차단(Redis 메모리 + payload 비용).
-    CR mn-5 — ``redis.set`` 자체에 ``asyncio.wait_for`` 외부 timeout 적용.
-    """
+    """캐시 write — graceful. 성공 시 True / 실패 시 False (log warning)."""
     try:
         payload = {
             "output": output.model_dump(mode="json"),
@@ -169,44 +139,31 @@ async def _try_cache_set(
         return False
 
 
-async def _openai_then_anthropic(system: str, user: str) -> tuple[FeedbackLLMOutput, str]:
-    """OpenAI primary → Anthropic fallback. 양쪽 실패 시 ``LLMRouterExhaustedError``.
+async def _call_openai_once(system: str, user: str) -> tuple[FeedbackLLMOutput, str]:
+    """OpenAI 단일 호출 — adapter 내부 tenacity 3회 backoff. 최종 실패 시
+    ``LLMRouterExhaustedError`` raise.
 
-    CR mn-21 — 이전 ``output: FeedbackLLMOutput | None = None`` + ``assert``-pattern을
-    helper로 분리해 control flow상 None 가능성 자체 제거(타입 narrowing 명확화 +
-    ``python -O`` 안전).
+    Story 8.5 — 이전 Anthropic fallback 분기는 제거됨. ``_OPENAI_HANDLED_TYPES`` 안에 잡힌 모든
+    영구/transient 최종 실패는 즉시 exhausted 신호 + Sentry capture_message + LLMRouterExhausted
+    Error로 변환. ``generate_feedback`` 노드가 본 예외 catch 후 safe fallback 텍스트로 graceful
+    응답.
     """
-    openai_exc: BaseException | None = None
     try:
-        primary = await call_openai_feedback(
+        output = await call_openai_feedback(
             system=system, user=user, response_format=FeedbackLLMOutput
         )
     except _OPENAI_HANDLED_TYPES as exc:
-        openai_exc = exc
         sentry_sdk.capture_exception(exc)
-    else:
-        # Story 3.9 AC13 — env override 시 정확 attribution.
-        return primary, _resolve_used_llm(settings.llm_main_model)
-
-    # OpenAI 실패 → Anthropic fallback.
-    try:
-        fallback = await call_claude_feedback(
-            system=system, user=user, response_format=FeedbackLLMOutput
-        )
-    except _ANTHROPIC_HANDLED_TYPES as anthropic_exc:
-        sentry_sdk.capture_exception(anthropic_exc)
         sentry_sdk.capture_message(
-            "dual_llm_router.exhausted",
+            "llm_router.exhausted",
             level="error",
             tags={"component": "llm_router", "stage": "final"},
         )
-        openai_class = type(openai_exc).__name__ if openai_exc else "n/a"
         raise LLMRouterExhaustedError(
-            f"dual_llm_router_exhausted (openai={openai_class}, "
-            f"anthropic={type(anthropic_exc).__name__})"
-        ) from anthropic_exc
+            f"llm_router_exhausted (openai={type(exc).__name__})"
+        ) from exc
 
-    return fallback, _resolve_used_llm(settings.llm_fallback_model)
+    return output, _resolve_used_llm(settings.llm_main_model)
 
 
 async def _route_feedback_inner(
@@ -216,7 +173,7 @@ async def _route_feedback_inner(
     cache_key: str | None,
     redis: redis_asyncio.Redis | None,
 ) -> tuple[FeedbackLLMOutput, str, bool]:
-    """Outer deadline 적용 전 inner 본 흐름 — cache + dual-LLM + cache write."""
+    """Outer deadline 적용 전 inner 본 흐름 — cache lookup + OpenAI 호출 + cache write."""
     start = time.monotonic()
 
     # 1. Cache lookup (graceful)
@@ -234,10 +191,10 @@ async def _route_feedback_inner(
             )
             return cached_output, cached_used_llm, True
 
-    # 2-3. OpenAI primary → Anthropic fallback (raises LLMRouterExhaustedError on dual fail)
-    output, used_llm = await _openai_then_anthropic(system, user)
+    # 2. OpenAI 호출 (raises LLMRouterExhaustedError on permanent failure)
+    output, used_llm = await _call_openai_once(system, user)
 
-    # 4. Cache write (graceful)
+    # 3. Cache write (graceful)
     cache_write_ok = False
     if cache_key is not None and redis is not None:
         cache_write_ok = await _try_cache_set(redis, cache_key, output, used_llm)
@@ -260,18 +217,21 @@ async def route_feedback(
     cache_key: str | None,
     redis: redis_asyncio.Redis | None,
 ) -> tuple[FeedbackLLMOutput, str, bool]:
-    """듀얼 LLM router — cache lookup → OpenAI primary → Anthropic fallback → cache write.
+    """LLM router — cache lookup → OpenAI 단독 호출 → cache write.
 
     반환 3-tuple ``(output, used_llm, cache_hit)``. cache_hit 시 ``used_llm``은 캐시 생성
-    시점 라벨(현재 호출이 OpenAI 가용해도 캐시가 ``"claude"``이면 그대로 반환 — Story 3.8
-    LangSmith 분석 정합).
+    시점 라벨(legacy ``"claude"`` 캐시 row는 validate 단계에서 graceful miss로 떨어지고 새
+    OpenAI 호출).
 
     오류 분기:
-    - 양쪽 LLM 실패 → ``LLMRouterExhaustedError`` raise + Sentry ``capture_message``.
-    - 한쪽 LLM 성공 → ``capture_exception(other)`` breadcrumb 보존(failed LLM 별도 알림).
+    - OpenAI 영구 실패 → ``LLMRouterExhaustedError`` raise + Sentry ``capture_message``.
     - cache 실패 → graceful pass-through(LLM 직접 호출 + write skip).
     - Outer deadline 초과(``settings.llm_router_total_budget_seconds=25``) →
-      ``LLMRouterExhaustedError`` raise + Sentry ``capture_message`` (CR MJ-7+MJ-22).
+      ``LLMRouterExhaustedError`` raise + Sentry ``capture_message``.
+
+    Story 8.5 — 이전 Anthropic fallback 분기 제거. 포트폴리오 scope에서 단일 provider(OpenAI)
+    + tenacity 3회 retry로 transient 처리. 영구 장애는 ``generate_feedback`` 노드의 safe
+    fallback 텍스트로 graceful 응답.
     """
     try:
         return await asyncio.wait_for(
@@ -280,12 +240,12 @@ async def route_feedback(
         )
     except TimeoutError as exc:
         sentry_sdk.capture_message(
-            "dual_llm_router.outer_timeout",
+            "llm_router.outer_timeout",
             level="error",
             tags={"component": "llm_router", "stage": "outer_deadline"},
         )
         raise LLMRouterExhaustedError(
-            f"dual_llm_router_outer_timeout ({settings.llm_router_total_budget_seconds}s)"
+            f"llm_router_outer_timeout ({settings.llm_router_total_budget_seconds}s)"
         ) from exc
 
 

@@ -166,17 +166,17 @@ class Citation(BaseModel):
 class FeedbackOutput(BaseModel):
     """`generate_feedback` 노드 *공식 출력* — Story 3.6 stub은 `used_llm="stub"`.
 
-    Story 3.9 AC13 — ``used_llm`` Literal 확장. ``settings.llm_main_model`` env override
-    시 ``"gpt-4o"``로 운영자 승격 가능 + ``settings.llm_fallback_model`` env override 시
-    ``"claude-haiku-4-5"`` 명시(기존 ``"claude"`` 라벨도 유지 — 이전 캐시 row 호환). 미매칭
-    model id는 ``_resolve_used_llm`` 헬퍼가 ``"stub"`` fallback.
+    Story 8.5 — Anthropic fallback 제거 후 ``used_llm`` Literal 정리:
+    ``"gpt-4o-mini"``(default) / ``"gpt-4o"``(env override 승격) / ``"stub"``(LLM 미설정
+    or 영구 장애 fallback). 이전 ``"claude"``/``"claude-haiku-4-5"`` 캐시 row는 graceful
+    miss로 처리되어 새 OpenAI 호출 자동 트리거(별 마이그레이션 불필요).
     """
 
     model_config = ConfigDict(extra="forbid")
 
     text: str
     citations: list[Citation]
-    used_llm: Literal["gpt-4o-mini", "gpt-4o", "claude-haiku-4-5", "claude", "stub"] = "stub"
+    used_llm: Literal["gpt-4o-mini", "gpt-4o", "stub"] = "stub"
 
 
 class KnowledgeChunkContext(BaseModel):

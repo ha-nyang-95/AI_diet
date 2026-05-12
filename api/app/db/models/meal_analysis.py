@@ -19,7 +19,7 @@ D5 결정(2026-05-04 — IN으로 변경) 정합: 식단 *관리* 앱 본연의 
 - ``feedback_text``        ``text``        NOT NULL — full LLM 본문 (상세 화면용)
 - ``feedback_summary``     ``text``        NOT NULL CHECK length<=120 — 1줄 (목록 화면용)
 - ``citations``            ``jsonb``       NOT NULL DEFAULT '[]' — Story 3.6 Citation 정합
-- ``used_llm``             ``text``        NOT NULL CHECK IN('gpt-4o-mini','claude','stub')
+- ``used_llm``             ``text``        NOT NULL CHECK IN('gpt-4o-mini','gpt-4o','stub')
 - ``created_at`` / ``updated_at``         ``timestamptz`` NOT NULL DEFAULT now()
 
 UNIQUE 제약 — ``uq_meal_analyses_meal_id`` ON ``(meal_id)`` — 1 meal = 1 analysis,
@@ -88,7 +88,8 @@ class MealAnalysis(Base):
     citations: Mapped[list[dict[str, Any]]] = mapped_column(
         JSONB, nullable=False, server_default=text("'[]'::jsonb")
     )
-    # router 결정 추적: 'gpt-4o-mini'/'claude'/'stub' 3-way (Story 3.6 dual-LLM 정합).
+    # router 결정 추적: 'gpt-4o-mini'/'gpt-4o'/'stub' 3-way (Story 8.5에서 Anthropic 제거 후
+    # OpenAI 단독 — 이전 'claude'는 alembic 0023이 'gpt-4o-mini'로 cleanup).
     used_llm: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
@@ -123,7 +124,7 @@ class MealAnalysis(Base):
             name="ck_meal_analyses_fit_reason",
         ),
         CheckConstraint(
-            "used_llm IN ('gpt-4o-mini','claude','stub')",
+            "used_llm IN ('gpt-4o-mini','gpt-4o','stub')",
             name="ck_meal_analyses_used_llm",
         ),
         CheckConstraint(

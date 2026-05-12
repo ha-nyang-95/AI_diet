@@ -251,7 +251,7 @@ CSRF 추가 가드 — httpOnly 쿠키 + SameSite=Lax는 1차 방어, Cloudflare
    - [ ] `DATABASE_URL` — Supabase pooler URI (위 §4.4.3 Supabase 생성 step 2).
    - [ ] `ENVIRONMENT=production`
    - [ ] `JWT_SECRET_KEY` — 신규 발급 값.
-   - [ ] `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `LANGSMITH_API_KEY` (dev 키 재사용).
+   - [ ] `OPENAI_API_KEY` / `LANGSMITH_API_KEY` (dev 키 재사용). Story 8.5 갱신: Anthropic 제거 — `ANTHROPIC_API_KEY` 미사용.
    - [ ] `LANGCHAIN_TRACING_V2=true` / `LANGSMITH_PROJECT=balancenote-prod`
    - [ ] `GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET` / `GOOGLE_OAUTH_REDIRECT_URI`
      (dev client 재사용 + prod URI).
@@ -286,9 +286,9 @@ CSRF 추가 가드 — httpOnly 쿠키 + SameSite=Lax는 1차 방어, Cloudflare
 **GitHub Actions Secrets** (`daily-cost-alert.yml` 등 workflow용):
 
 - [ ] Repository Settings → Secrets and variables → Actions → New repository secret.
-- [ ] `OPENAI_API_KEY` (read-only 별도 발급 권장), `ANTHROPIC_ADMIN_API_KEY`,
-  `LANGSMITH_API_KEY`, `DISCORD_COST_WEBHOOK_URL`, `THRESHOLD_USD=5.0`,
-  `SENTRY_AUTH_TOKEN` (옵션).
+- [ ] `OPENAI_API_KEY` (read-only 별도 발급 권장), `LANGSMITH_API_KEY`,
+  `DISCORD_COST_WEBHOOK_URL`, `THRESHOLD_USD=5.0`, `SENTRY_AUTH_TOKEN` (옵션).
+  Story 8.5 갱신: `ANTHROPIC_ADMIN_API_KEY` 제거.
 
 ### 4.4.4 smoke 검증 (배포 후 첫 1회)
 

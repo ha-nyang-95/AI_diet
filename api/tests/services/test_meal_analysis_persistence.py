@@ -110,7 +110,7 @@ async def test_upsert_updates_existing_row(
         db_session,
         meal_id=meal.id,
         user_id=user.id,
-        payload=_make_payload(meal.id, score=85, llm="claude"),
+        payload=_make_payload(meal.id, score=85, llm="gpt-4o"),
         fit_reason="ok",
         citations=[Citation(source="KDA", doc_title="당뇨 가이드", published_year=2024)],
     )
@@ -125,7 +125,7 @@ async def test_upsert_updates_existing_row(
         )
     assert len(rows) == 1
     assert rows[0].fit_score == 85
-    assert rows[0].used_llm == "claude"
+    assert rows[0].used_llm == "gpt-4o"
     assert rows[0].fit_reason == "ok"
 
 
