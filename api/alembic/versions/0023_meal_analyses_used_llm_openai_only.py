@@ -38,9 +38,7 @@ def upgrade() -> None:
     )
 
     # 2. legacy 'claude' row를 'gpt-4o-mini'로 정리 (dev DB cleanup, prod는 빈 상태).
-    op.execute(
-        "UPDATE meal_analyses SET used_llm = 'gpt-4o-mini' WHERE used_llm = 'claude'"
-    )
+    op.execute("UPDATE meal_analyses SET used_llm = 'gpt-4o-mini' WHERE used_llm = 'claude'")
 
     # 3. 새 CHECK 제약 ADD — Story 8.5 OpenAI 단독 라벨 set.
     op.create_check_constraint(
@@ -60,9 +58,7 @@ def downgrade() -> None:
 
     # 2. 'gpt-4o' row는 'gpt-4o-mini'로 강등 (downgrade는 lossy — Story 3.9 env override 승격
     #    내역은 보존 불가, prod 미가동 시점 안전 trade-off).
-    op.execute(
-        "UPDATE meal_analyses SET used_llm = 'gpt-4o-mini' WHERE used_llm = 'gpt-4o'"
-    )
+    op.execute("UPDATE meal_analyses SET used_llm = 'gpt-4o-mini' WHERE used_llm = 'gpt-4o'")
 
     # 3. 기존 CHECK 제약 복원 (legacy 'claude' 허용은 그대로 — 과거 row 복원 시 호환).
     op.create_check_constraint(
